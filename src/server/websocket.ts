@@ -1,0 +1,143 @@
+import { WebSocketServer, WebSocket } from 'ws';
+import type { IncomingMessage } from 'http';
+import { getUserFromToken, SESSION_COOKIE } from './middleware/auth';
+import { createCliSession, writeToSession, endCliSession, findActiveSession, detachSession, getSession } from '../shared/cli-bridge';
+import type { WsClientMessage, WsServerMessage } from '../shared/types';
+
+interface AuthedSocket extends WebSocket {
+  userId?: string;
+  sessionId?: string;
+  isAlive?: boolean;
+}
+
+export function setupWebSocketServer(): WebSocketServer {
+  const wss = new WebSocketServer({ noServer: true });
+
+  const heartbeat = setInterval(() => {
+    wss.clients.forEach((ws) => {
+      const socket = ws as AuthedSocket;
+      if (socket.isAlive === false) {
+        if (socket.sessionId) detachSession(socket.sessionId);
+        return socket.terminate();
+      }
+      socket.isAlive = false;
+      socket.ping();
+    });
+  }, 30_000);
+
+  wss.on('close', () => clearInterval(heartbeat));
+
+  wss.on('connection', async (ws: AuthedSocket, req: IncomingMessage) => {
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+
+    // Auth: read session cookie
+    const cookieHeader = req.headers.cookie ?? '';
+    const sessionCookie = cookieHeader
+      .split(';')
+      .map((c) => c.trim())
+      .find((c) => c.startsWith(SESSION_COOKIE + '='))
+      ?.split('=')
+      .slice(1)
+      .join('=');
+    const token = sessionCookie ? decodeURIComponent(sessionCookie) : null;
+
+    if (!token) {
+      ws.close(4001, 'Missing session');
+      return;
+    }
+
+    const user = getUserFromToken(token);
+    if (!user) {
+      ws.close(4001, 'Unauthorized');
+      return;
+    }
+
+    ws.userId = user.id;
+
+    const url = new URL(req.url ?? '', `http://${req.headers.host}`);
+    const projectId = url.searchParams.get('projectId');
+    const requestedSessionId = url.searchParams.get('sessionId');
+    const forceNew = url.searchParams.get('new') === 'true';
+
+    let managed;
+    let isReconnect = false;
+
+    if (requestedSessionId) {
+      managed = getSession(requestedSessionId);
+      if (managed && managed.alive) {
+        // Verify ownership
+        if (managed.userId !== ws.userId) {
+          ws.close(4003, 'Not your session');
+          return;
+        }
+        isReconnect = true;
+      } else {
+        ws.close(4003, 'Session not found');
+        return;
+      }
+    } else if (forceNew) {
+      try {
+        managed = createCliSession(ws.userId, projectId);
+      } catch (err) {
+        console.error('[ws] failed to create CLI session:', err);
+        ws.close(4002, 'Failed to create session');
+        return;
+      }
+    } else {
+      managed = findActiveSession(ws.userId, projectId ?? null);
+      isReconnect = !!managed;
+      if (!managed) {
+        try {
+          managed = createCliSession(ws.userId, projectId);
+        } catch (err) {
+          console.error('[ws] failed to create CLI session:', err);
+          ws.close(4002, 'Failed to create session');
+          return;
+        }
+      }
+    }
+    ws.sessionId = managed.sessionId;
+
+    const send = (msg: WsServerMessage) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(msg));
+      }
+    };
+
+    managed.onOutput = (data) => send({ type: 'output', data });
+    managed.onError = (data) => send({ type: 'error', data });
+    managed.onExit = (code) => send({ type: 'exit', code });
+
+    send({ type: 'ready', sessionId: managed.sessionId });
+
+    if (isReconnect && managed.outputBuffer) {
+      send({ type: 'output', data: managed.outputBuffer });
+    }
+
+    ws.on('message', (raw) => {
+      let msg: WsClientMessage;
+      try { msg = JSON.parse(raw.toString()) as WsClientMessage; } catch { return; }
+      if (msg.type === 'input') {
+        writeToSession(ws.sessionId!, msg.data);
+      } else if (msg.type === 'resize') {
+        if (managed && msg.cols && msg.rows) {
+          managed.ptyProcess.resize(msg.cols, msg.rows);
+        }
+      } else if (msg.type === 'ping') {
+        send({ type: 'pong' });
+      }
+    });
+
+    ws.on('close', () => {
+      if (ws.sessionId) detachSession(ws.sessionId);
+    });
+
+    ws.on('error', (err) => {
+      console.error('[ws] socket error', err.message);
+      if (ws.sessionId) detachSession(ws.sessionId);
+    });
+  });
+
+  return wss;
+}

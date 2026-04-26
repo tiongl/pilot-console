@@ -4,7 +4,6 @@ import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import type { SessionWithUser } from '@/types';
 
@@ -17,8 +16,8 @@ interface Props {
 }
 
 export default function ActiveSessionsTable({ sessions }: Props) {
-  const router = useRouter();
   const [terminating, setTerminating] = useState<string | null>(null);
+  const [visibleSessions, setVisibleSessions] = useState(sessions);
 
   async function terminateSession(sessionId: string) {
     setTerminating(sessionId);
@@ -30,7 +29,7 @@ export default function ActiveSessionsTable({ sessions }: Props) {
     setTerminating(null);
     if (res.ok) {
       toast.success('Session terminated');
-      router.refresh();
+      setVisibleSessions(prev => prev.filter(s => s.id !== sessionId));
     } else {
       toast.error('Failed to terminate session');
     }
@@ -49,7 +48,7 @@ export default function ActiveSessionsTable({ sessions }: Props) {
         </TableRow>
       </TableHeader>
       <TableBody>
-        {sessions.map((s) => (
+        {visibleSessions.map((s) => (
           <TableRow key={s.id}>
             <TableCell className="font-mono text-xs">{s.id.slice(0, 12)}…</TableCell>
             <TableCell>

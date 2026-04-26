@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import Link from 'next/link';
+import { Link } from 'react-router';
 import { FolderOpen, Pin } from 'lucide-react';
 import type { Project } from '@/types';
 
@@ -71,7 +71,7 @@ export default function ProjectNav({ projects }: Props) {
     return (
       <p className="px-3 py-4 text-xs text-muted-foreground text-center">
         No projects yet.{' '}
-        <Link href="/projects/new" className="underline">
+        <Link to="/projects/new" className="underline">
           Create one
         </Link>
       </p>
@@ -91,7 +91,7 @@ export default function ProjectNav({ projects }: Props) {
       {sorted.map((project) => (
         <Link
           key={project.id}
-          href={`/projects/${project.id}/chat`}
+          to={`/projects/${project.id}/chat`}
           className="group flex items-center gap-3 rounded-lg px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors"
         >
           <FolderOpen className="h-4 w-4 shrink-0" />

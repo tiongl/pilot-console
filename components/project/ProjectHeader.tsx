@@ -1,8 +1,7 @@
 'use client';
 
 import { useCallback, useState } from 'react';
-import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { Link, useLocation } from 'react-router';
 import { Wrench, Settings, ListTodo, History, Keyboard, GitBranch, Bookmark } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import SessionHistory from './SessionHistory';
@@ -20,7 +19,7 @@ interface Props {
 }
 
 export default function ProjectHeader({ projectId, projectName, repoPath, children, todoPanel, onSnippetInsert }: Props) {
-  const pathname = usePathname();
+  const { pathname } = useLocation();
   const basePath = `/projects/${projectId}`;
   const isChat = pathname === `${basePath}/chat` || pathname === basePath;
   const [activePanel, setActivePanel] = useState<'none' | 'notes' | 'history' | 'git' | 'snippets'>('none');
@@ -37,7 +36,7 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
       {/* Header */}
       <div className="flex items-center justify-between border-b px-4 py-2">
         <div className="min-w-0">
-          <Link href={`${basePath}/chat`} className="hover:underline">
+          <Link to={`${basePath}/chat`} className="hover:underline">
             <h2 className="text-sm font-semibold truncate">{projectName}</h2>
           </Link>
           <p className="text-xs text-muted-foreground font-mono truncate">{repoPath}</p>
@@ -92,12 +91,12 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
           >
             <Keyboard className="h-4 w-4" />
           </Button>
-          <Link href={`${basePath}/skills`}>
+          <Link to={`${basePath}/skills`}>
             <Button variant={pathname.includes('/skills') ? 'secondary' : 'ghost'} size="icon" className="h-8 w-8" title="Skills & MCP">
               <Wrench className="h-4 w-4" />
             </Button>
           </Link>
-          <Link href={`${basePath}/settings`}>
+          <Link to={`${basePath}/settings`}>
             <Button variant={pathname.includes('/settings') ? 'secondary' : 'ghost'} size="icon" className="h-8 w-8" title="Settings">
               <Settings className="h-4 w-4" />
             </Button>

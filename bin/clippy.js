@@ -2,32 +2,18 @@
 
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 const os = require('os');
 
 const pkgDir = path.resolve(__dirname, '..');
 
-// Use production mode only if a production build exists
-const hasProductionBuild = fs.existsSync(path.join(pkgDir, '.next', 'BUILD_ID'));
-process.env.NODE_ENV = hasProductionBuild ? 'production' : 'development';
-
-// Auto-generate AUTH_SECRET / NEXTAUTH_SECRET if not set
+// Ensure the config directory exists
 const configDir = path.join(os.homedir(), '.gcclippy');
-const secretFile = path.join(configDir, '.secret');
+fs.mkdirSync(configDir, { recursive: true });
 
-if (!process.env.AUTH_SECRET && !process.env.NEXTAUTH_SECRET) {
-  fs.mkdirSync(configDir, { recursive: true });
-  let secret;
-  if (fs.existsSync(secretFile)) {
-    secret = fs.readFileSync(secretFile, 'utf-8').trim();
-  } else {
-    secret = crypto.randomBytes(32).toString('hex');
-    fs.writeFileSync(secretFile, secret, { mode: 0o600 });
-  }
-  process.env.AUTH_SECRET = secret;
-  process.env.NEXTAUTH_SECRET = secret;
-}
+// Check if we have a production client build
+const hasClientBuild = fs.existsSync(path.join(pkgDir, 'dist', 'client', 'index.html'));
+process.env.NODE_ENV = hasClientBuild ? 'production' : 'development';
 
-// Register tsx for TypeScript support and load the server
+// Register tsx for TypeScript support and start the Express server
 require('tsx/cjs');
-require('../server.ts');
+require('../src/server/index.ts');

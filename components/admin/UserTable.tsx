@@ -5,7 +5,6 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import type { User } from '@/types';
 
@@ -14,8 +13,8 @@ interface Props {
 }
 
 export default function UserTable({ users }: Props) {
-  const router = useRouter();
   const [loading, setLoading] = useState<string | null>(null);
+  const [visibleUsers, setVisibleUsers] = useState(users);
 
   async function changeRole(id: string, role: 'admin' | 'user') {
     setLoading(id);
@@ -27,7 +26,7 @@ export default function UserTable({ users }: Props) {
     setLoading(null);
     if (res.ok) {
       toast.success('Role updated');
-      router.refresh();
+      setVisibleUsers(prev => prev.map(u => u.id === id ? { ...u, role } : u));
     } else {
       toast.error('Failed to update role');
     }
@@ -44,7 +43,7 @@ export default function UserTable({ users }: Props) {
     setLoading(null);
     if (res.ok) {
       toast.success('User deleted');
-      router.refresh();
+      setVisibleUsers(prev => prev.filter(u => u.id !== id));
     } else {
       const { error } = await res.json() as { error: string };
       toast.error(error ?? 'Failed to delete user');
@@ -63,7 +62,7 @@ export default function UserTable({ users }: Props) {
         </TableRow>
       </TableHeader>
       <TableBody>
-        {users.map((u) => (
+        {visibleUsers.map((u) => (
           <TableRow key={u.id}>
             <TableCell className="font-medium">{u.displayName ?? '—'}</TableCell>
             <TableCell>{u.email ?? '—'}</TableCell>

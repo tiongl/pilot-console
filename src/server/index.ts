@@ -1,0 +1,535 @@
+import express from 'express';
+import cookieParser from 'cookie-parser';
+import { createServer } from 'http';
+import path from 'path';
+import fs from 'fs';
+import os from 'os';
+import crypto from 'crypto';
+import { execSync } from 'child_process';
+import { parse } from 'url';
+import { requireAuth, requireAdmin, SESSION_COOKIE, createSession, destroySession, getUserFromToken } from './middleware/auth';
+import { getGitHubCliProfile } from '../shared/gh-cli-auth';
+import { upsertUser, listUsers, updateUserRole, deleteUser } from '../shared/user-store';
+import { createProject, listProjects, getProjectById, updateProject, deleteProject, addSkill, listSkills, updateSkill, deleteSkill } from '../shared/project-store';
+import { listSessionsForUser, listAllSessions, getCopilotSessionDetail } from '../shared/session-store';
+import { setupWebSocketServer } from './websocket';
+import { getAllSessions, endCliSession, endSessionByProject } from '../shared/cli-bridge';
+import { getDb } from '../shared/db';
+
+const app = express();
+app.use(express.json());
+app.use(cookieParser());
+
+// ---------------------------------------------------------------------------
+// Auth routes (no auth required)
+// ---------------------------------------------------------------------------
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const profile = await getGitHubCliProfile();
+    if (!profile) {
+      res.status(401).json({ error: 'GitHub CLI not authenticated. Run: gh auth login' });
+      return;
+    }
+    const user = upsertUser(String(profile.id), profile.login, profile.email ?? null, profile.name ?? null);
+    const token = createSession(user.id);
+    res.cookie(SESSION_COOKIE, token, {
+      httpOnly: true,
+      sameSite: 'lax',
+      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+      path: '/',
+    });
+    res.json({ user });
+  } catch (err) {
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  const token = req.cookies?.[SESSION_COOKIE];
+  if (token) destroySession(token);
+  res.clearCookie(SESSION_COOKIE);
+  res.json({ ok: true });
+});
+
+app.get('/api/auth/me', (req, res) => {
+  const token = req.cookies?.[SESSION_COOKIE];
+  if (!token) { res.status(401).json({ error: 'Not authenticated' }); return; }
+  const user = getUserFromToken(token);
+  if (!user) {
+    res.clearCookie(SESSION_COOKIE);
+    res.status(401).json({ error: 'Session expired' });
+    return;
+  }
+  res.json({ user });
+});
+
+// ---------------------------------------------------------------------------
+// Protected API routes
+// ---------------------------------------------------------------------------
+app.use('/api', requireAuth);
+
+// --- Projects ---
+app.get('/api/projects', (req, res) => {
+  const db = getDb();
+  const projects = db.prepare('SELECT id, name, repo_path as repoPath, description, pinned, sort_order as sortOrder, created_at as createdAt FROM projects ORDER BY pinned DESC, sort_order, name').all();
+  res.json({ projects });
+});
+
+app.post('/api/projects', (req, res) => {
+  try {
+    const { name, repoPath, description } = req.body;
+    const project = createProject(name, repoPath, description);
+    res.status(201).json(project);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/projects/:id', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Not found' }); return; }
+  res.json(project);
+});
+
+app.patch('/api/projects/:id', (req, res) => {
+  try {
+    const project = updateProject(req.params.id, req.body);
+    res.json(project);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/projects/:id', (req, res) => {
+  deleteProject(req.params.id);
+  res.json({ ok: true });
+});
+
+// --- Sessions ---
+app.get('/api/sessions/active', (req, res) => {
+  const active = getAllSessions()
+    .filter((s) => s.alive && s.projectId)
+    .map((s) => ({ projectId: s.projectId!, sessionId: s.sessionId }));
+  res.json({ sessions: active });
+});
+
+app.delete('/api/projects/:id/session', (req, res) => {
+  const projectId = req.params.id;
+  const sessionId = req.query.sessionId as string | undefined;
+  if (sessionId) {
+    endCliSession(sessionId);
+    res.json({ ok: true });
+  } else {
+    const session = getAllSessions().find((s) => s.alive && s.projectId === projectId);
+    if (session) {
+      endSessionByProject(session.userId, projectId);
+      res.json({ ok: true });
+    } else {
+      res.status(404).json({ error: 'No active session' });
+    }
+  }
+});
+
+app.get('/api/projects/:id/sessions', (req, res) => {
+  const projectId = req.params.id;
+  const db = getDb();
+  const sessions = db.prepare(`
+    SELECT id, user_id as userId, project_id as projectId, copilot_session_id as copilotSessionId,
+           started_at as startedAt, ended_at as endedAt,
+           CASE WHEN output_log IS NOT NULL THEN 1 ELSE 0 END as hasTranscript
+    FROM cli_sessions
+    WHERE project_id = ?
+    ORDER BY started_at DESC
+    LIMIT 50
+  `).all(projectId);
+  res.json({ sessions });
+});
+
+app.get('/api/sessions/:id/transcript', (req, res) => {
+  const db = getDb();
+  const row = db.prepare('SELECT output_log as outputLog FROM cli_sessions WHERE id = ?').get(req.params.id) as { outputLog: string | null } | undefined;
+  if (!row || !row.outputLog) {
+    res.status(404).json({ error: 'No transcript available' });
+    return;
+  }
+  res.json({ transcript: row.outputLog });
+});
+
+// --- Skills ---
+app.get('/api/projects/:id/skills', (req, res) => {
+  res.json(listSkills(req.params.id));
+});
+
+app.post('/api/projects/:id/skills', (req, res) => {
+  try {
+    const { type, name, config } = req.body;
+    const skill = addSkill(req.params.id, type, name, config || {});
+    res.status(201).json(skill);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.patch('/api/projects/:id/skills/:skillId', (req, res) => {
+  try {
+    const skill = updateSkill(req.params.skillId, req.body);
+    res.json(skill);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/projects/:id/skills/:skillId', (req, res) => {
+  deleteSkill(req.params.skillId);
+  res.json({ ok: true });
+});
+
+// --- Todos ---
+app.get('/api/projects/:id/todos', (req, res) => {
+  const db = getDb();
+  const todos = db.prepare('SELECT id, project_id as projectId, parent_id as parentId, text, done, position, created_at as createdAt FROM project_todos WHERE project_id = ? ORDER BY position').all(req.params.id);
+  res.json({ todos });
+});
+
+app.post('/api/projects/:id/todos', (req, res) => {
+  const db = getDb();
+  const id = crypto.randomUUID();
+  const maxPos = db.prepare('SELECT COALESCE(MAX(position), -1) as maxPos FROM project_todos WHERE project_id = ? AND parent_id IS ?').get(req.params.id, req.body.parentId || null) as { maxPos: number };
+  db.prepare('INSERT INTO project_todos (id, project_id, parent_id, text, position) VALUES (?, ?, ?, ?, ?)').run(id, req.params.id, req.body.parentId || null, req.body.text || '', (maxPos?.maxPos ?? -1) + 1);
+  res.status(201).json({ id });
+});
+
+app.patch('/api/projects/:id/todos/:todoId', (req, res) => {
+  const db = getDb();
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  if (req.body.text !== undefined) { sets.push('text = ?'); vals.push(req.body.text); }
+  if (req.body.done !== undefined) { sets.push('done = ?'); vals.push(req.body.done ? 1 : 0); }
+  if (req.body.parentId !== undefined) { sets.push('parent_id = ?'); vals.push(req.body.parentId); }
+  if (req.body.position !== undefined) { sets.push('position = ?'); vals.push(req.body.position); }
+  if (sets.length > 0) {
+    vals.push(req.params.todoId, req.params.id);
+    db.prepare(`UPDATE project_todos SET ${sets.join(', ')} WHERE id = ? AND project_id = ?`).run(...vals);
+  }
+  res.json({ ok: true });
+});
+
+app.delete('/api/projects/:id/todos/:todoId', (req, res) => {
+  getDb().prepare('DELETE FROM project_todos WHERE id = ? AND project_id = ?').run(req.params.todoId, req.params.id);
+  res.json({ ok: true });
+});
+
+// --- Snippets ---
+app.get('/api/projects/:id/snippets', (req, res) => {
+  const db = getDb();
+  const snippets = db.prepare('SELECT id, project_id as projectId, title, content, created_at as createdAt FROM project_snippets WHERE project_id = ? OR project_id IS NULL ORDER BY created_at DESC').all(req.params.id);
+  res.json({ snippets });
+});
+
+app.post('/api/projects/:id/snippets', (req, res) => {
+  const db = getDb();
+  const id = crypto.randomUUID();
+  db.prepare('INSERT INTO project_snippets (id, project_id, title, content) VALUES (?, ?, ?, ?)').run(id, req.body.global ? null : req.params.id, req.body.title || 'Untitled', req.body.content || '');
+  res.status(201).json({ id });
+});
+
+app.delete('/api/snippets/:id', (req, res) => {
+  getDb().prepare('DELETE FROM project_snippets WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// --- Git ---
+app.get('/api/projects/:id/git-status', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  try {
+    const opts = { cwd: project.repoPath, encoding: 'utf-8' as const, timeout: 5000 };
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', opts).trim();
+    const status = execSync('git status --porcelain', opts).trim();
+    const diffStat = execSync('git diff --stat', opts).trim();
+    const files = status ? status.split('\n').map(line => ({
+      status: line.substring(0, 2).trim(),
+      path: line.substring(3),
+    })) : [];
+    res.json({ branch, files, diffStat });
+  } catch (err) {
+    res.status(500).json({ error: 'Git command failed', message: String(err) });
+  }
+});
+
+app.get('/api/projects/:id/git-diff', (req, res) => {
+  const filePath = req.query.file as string;
+  const project = getProjectById(req.params.id);
+  if (!project || !filePath) { res.status(400).json({ error: 'Missing project or file' }); return; }
+  try {
+    const opts = { cwd: project.repoPath, encoding: 'utf-8' as const, timeout: 5000 };
+    let diff = '';
+    try { diff = execSync(`git diff -- "${filePath}"`, opts).trim(); } catch {}
+    if (!diff) {
+      try { diff = execSync(`git diff --cached -- "${filePath}"`, opts).trim(); } catch {}
+    }
+    res.json({ diff: diff || 'No changes' });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// --- Browse ---
+app.get('/api/browse', (req, res) => {
+  const dirParam = (req.query.dir as string) || os.homedir();
+  const dir = path.resolve(dirParam);
+  try {
+    const stat = fs.statSync(dir);
+    if (!stat.isDirectory()) { res.status(400).json({ error: 'Not a directory' }); return; }
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const dirs = entries
+      .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+      .map((e) => e.name)
+      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+    const isGitRepo = fs.existsSync(path.join(dir, '.git'));
+    res.json({ path: dir, dirs, isGitRepo, parent: path.dirname(dir) });
+  } catch {
+    res.status(400).json({ error: 'Cannot read directory' });
+  }
+});
+
+// --- Copilot Config ---
+const COPILOT_DIR = path.join(os.homedir(), '.copilot');
+const SETTINGS_PATH = path.join(COPILOT_DIR, 'settings.json');
+const MCP_CONFIG_PATH = path.join(COPILOT_DIR, 'mcp-config.json');
+
+function readJsonFile(filePath: string): Record<string, unknown> {
+  try { return JSON.parse(fs.readFileSync(filePath, 'utf-8')); } catch { return {}; }
+}
+
+function readMcpConfig(): Record<string, unknown> {
+  const config = readJsonFile(MCP_CONFIG_PATH);
+  return (config.mcpServers as Record<string, unknown>) || {};
+}
+
+function writeMcpConfig(mcpServers: Record<string, unknown>) {
+  fs.writeFileSync(MCP_CONFIG_PATH, JSON.stringify({ mcpServers }, null, 2), 'utf-8');
+}
+
+app.get('/api/copilot-config', (req, res) => {
+  const projectId = req.query.projectId as string | undefined;
+  const settings = readJsonFile(SETTINGS_PATH);
+  const mcpConfig = readJsonFile(MCP_CONFIG_PATH);
+
+  interface InstalledPlugin { name: string; marketplace: string; version: string; enabled: boolean; cache_path: string; }
+  interface PluginSkill { name: string; path: string; }
+
+  function getPluginSkills(cachePath: string): PluginSkill[] {
+    const skillsDir = path.join(cachePath, 'skills');
+    if (!fs.existsSync(skillsDir)) return [];
+    try {
+      return fs.readdirSync(skillsDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => ({ name: e.name, path: path.join(skillsDir, e.name) }));
+    } catch { return []; }
+  }
+
+  const installedPlugins = (settings.installedPlugins as InstalledPlugin[]) || [];
+  const enabledPlugins = (settings.enabledPlugins as Record<string, boolean>) || {};
+
+  const plugins = installedPlugins.map((p) => {
+    const key = `${p.name}@${p.marketplace}`;
+    const enabled = enabledPlugins[key] ?? p.enabled ?? false;
+    return { name: p.name, marketplace: p.marketplace, version: p.version, enabled, skills: getPluginSkills(p.cache_path) };
+  });
+
+  const mcpServers = (mcpConfig.mcpServers as Record<string, unknown>) || {};
+
+  let repoSkills: { agentsMd: boolean; customInstructions: string[] } = { agentsMd: false, customInstructions: [] };
+  if (projectId) {
+    const project = getProjectById(projectId);
+    if (project) {
+      repoSkills.agentsMd = fs.existsSync(path.join(project.repoPath, 'AGENTS.md'));
+      const copilotDir = path.join(project.repoPath, '.github', 'copilot');
+      if (fs.existsSync(copilotDir)) {
+        try { repoSkills.customInstructions = fs.readdirSync(copilotDir).filter((f) => f.endsWith('.md')); } catch {}
+      }
+    }
+  }
+
+  res.json({ plugins, mcpServers, repoSkills });
+});
+
+app.put('/api/copilot-config/mcp', (req, res) => {
+  writeMcpConfig(req.body.mcpServers || {});
+  res.json({ ok: true });
+});
+
+app.post('/api/copilot-config/mcp', (req, res) => {
+  const servers = readMcpConfig();
+  servers[req.body.name] = req.body.config;
+  writeMcpConfig(servers);
+  res.json({ ok: true });
+});
+
+app.delete('/api/copilot-config/mcp', (req, res) => {
+  const name = req.query.name as string;
+  if (!name) { res.status(400).json({ error: 'Missing name' }); return; }
+  const servers = readMcpConfig();
+  delete servers[name];
+  writeMcpConfig(servers);
+  res.json({ ok: true });
+});
+
+app.get('/api/copilot-config/agents-md', (req, res) => {
+  const projectId = req.query.projectId as string;
+  if (!projectId) { res.status(400).json({ error: 'Missing projectId' }); return; }
+  const project = getProjectById(projectId);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const agentsPath = path.join(project.repoPath, 'AGENTS.md');
+  if (!fs.existsSync(agentsPath)) { res.status(404).json({ error: 'AGENTS.md not found' }); return; }
+  const content = fs.readFileSync(agentsPath, 'utf-8');
+  res.json({ content });
+});
+
+// --- Skill Catalog ---
+app.get('/api/skill-catalog/marketplaces', (req, res) => {
+  try {
+    const raw = execSync('gh copilot plugin marketplace list', { encoding: 'utf-8', timeout: 15000 });
+    const marketplaces: { name: string; source: string; builtin: boolean }[] = [];
+    let builtinSection = false;
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (/included with/i.test(trimmed)) { builtinSection = true; continue; }
+      if (/registered marketplace/i.test(trimmed)) { builtinSection = false; continue; }
+      const m = trimmed.match(/^\S+\s+([\w-]+)\s+\((?:GitHub:\s*)?([^)]+)\)/);
+      if (!m) continue;
+      marketplaces.push({ name: m[1], source: m[2], builtin: builtinSection });
+    }
+    res.json({ marketplaces });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get('/api/skill-catalog/browse', (req, res) => {
+  const marketplace = req.query.marketplace as string;
+  if (!marketplace) { res.status(400).json({ error: 'Missing marketplace' }); return; }
+  try {
+    const raw = execSync(`gh copilot plugin marketplace browse ${marketplace}`, { encoding: 'utf-8', timeout: 30000 });
+    const plugins: { name: string; description: string }[] = [];
+    for (const line of raw.split('\n')) {
+      const m = line.trim().match(/^\S+\s+([\w-]+)\s+-\s+(.+)/);
+      if (m) plugins.push({ name: m[1], description: m[2].trim() });
+    }
+    res.json({ plugins, marketplace });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get('/api/skill-catalog/installed', (req, res) => {
+  try {
+    const raw = execSync('gh copilot plugin list', { encoding: 'utf-8', timeout: 15000 });
+    const installed: { name: string; marketplace: string; version: string }[] = [];
+    for (const line of raw.split('\n')) {
+      const m = line.trim().match(/^\S+\s+([\w-]+)@([\w-]+)\s+\(v?([\d.]+)\)/);
+      if (m) installed.push({ name: m[1], marketplace: m[2], version: m[3] });
+    }
+    res.json({ installed });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.post('/api/skill-catalog/install', (req, res) => {
+  const { plugin, marketplace } = req.body;
+  if (!plugin || !marketplace) { res.status(400).json({ error: 'Missing plugin or marketplace' }); return; }
+  try {
+    const output = execSync(`gh copilot plugin install ${plugin}@${marketplace}`, { encoding: 'utf-8', timeout: 60000 });
+    res.json({ ok: true, output: output.trim() });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.post('/api/skill-catalog/uninstall', (req, res) => {
+  const { plugin, marketplace } = req.body;
+  if (!plugin || !marketplace) { res.status(400).json({ error: 'Missing plugin or marketplace' }); return; }
+  try {
+    const output = execSync(`gh copilot plugin uninstall ${plugin}@${marketplace}`, { encoding: 'utf-8', timeout: 30000 });
+    res.json({ ok: true, output: output.trim() });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.post('/api/skill-catalog/marketplace/add', (req, res) => {
+  const { repo } = req.body;
+  if (!repo) { res.status(400).json({ error: 'Missing repo' }); return; }
+  try {
+    const output = execSync(`gh copilot plugin marketplace register ${repo}`, { encoding: 'utf-8', timeout: 30000 });
+    res.json({ ok: true, output: output.trim() });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// --- Admin ---
+app.get('/api/admin/users', requireAdmin, (req, res) => {
+  res.json(listUsers());
+});
+
+app.patch('/api/admin/users/:id', requireAdmin, (req, res) => {
+  updateUserRole(String(req.params.id), req.body.role);
+  res.json({ ok: true });
+});
+
+app.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
+  deleteUser(String(req.params.id));
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/sessions', requireAdmin, (req, res) => {
+  res.json(listAllSessions());
+});
+
+app.delete('/api/admin/sessions/:id', requireAdmin, (req, res) => {
+  endCliSession(String(req.params.id));
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Static files + SPA fallback
+// ---------------------------------------------------------------------------
+const clientDist = path.resolve(__dirname, '../../dist/client');
+if (fs.existsSync(clientDist)) {
+  app.use(express.static(clientDist));
+  app.get('{*path}', (req, res) => {
+    if (!req.path.startsWith('/api') && !req.path.startsWith('/ws')) {
+      res.sendFile(path.join(clientDist, 'index.html'));
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Start server
+// ---------------------------------------------------------------------------
+const hostname = process.env.HOST ?? 'localhost';
+const port = parseInt(process.env.PORT ?? '3001', 10);
+
+const httpServer = createServer(app);
+
+// WebSocket
+const wss = setupWebSocketServer();
+httpServer.on('upgrade', (req, socket, head) => {
+  const { pathname } = parse(req.url!, true);
+  if (pathname === '/ws') {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req);
+    });
+  } else {
+    socket.destroy();
+  }
+});
+
+httpServer.listen(port, hostname, () => {
+  console.log(`> Ready on http://${hostname}:${port}`);
+});
+
+export { app, httpServer };
