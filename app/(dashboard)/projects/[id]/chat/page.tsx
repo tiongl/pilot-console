@@ -9,5 +9,5 @@ export default async function ProjectChatPage({ params }: { params: Promise<{ id
   const project = getProjectById(id);
   if (!project) notFound();
 
-  return <ChatClient userName={session?.user?.name ?? null} projectId={project.id} />;
+  return <ChatClient key={project.id} userName={session?.user?.name ?? null} projectId={project.id} />;
 }

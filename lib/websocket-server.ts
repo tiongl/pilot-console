@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { IncomingMessage } from 'http';
 import { decode } from 'next-auth/jwt';
-import { createCliSession, writeToSession, endCliSession, findActiveSession, detachSession } from './cli-bridge';
+import { createCliSession, writeToSession, endCliSession, findActiveSession, detachSession, getSession } from './cli-bridge';
 import type { WsClientMessage, WsServerMessage } from '@/types';
 
 interface AuthedSocket extends WebSocket {
@@ -71,16 +71,42 @@ export function setupWebSocketServer(): WebSocketServer {
 
     // Reuse existing PTY session for this user+project, or create a new one
     const projectId = url.searchParams.get('projectId');
-    let managed = findActiveSession(ws.userId, projectId ?? null);
-    const isReconnect = !!managed;
+    const requestedSessionId = url.searchParams.get('sessionId');
+    const forceNew = url.searchParams.get('new') === 'true';
 
-    if (!managed) {
+    let managed;
+    let isReconnect = false;
+
+    if (requestedSessionId) {
+      // Connect to a specific session
+      managed = getSession(requestedSessionId);
+      if (managed && managed.alive) {
+        isReconnect = true;
+      } else {
+        ws.close(4003, 'Session not found');
+        return;
+      }
+    } else if (forceNew) {
+      // Always create new
       try {
         managed = createCliSession(ws.userId, projectId);
       } catch (err) {
         console.error('[ws] failed to create CLI session:', err);
         ws.close(4002, 'Failed to create session');
         return;
+      }
+    } else {
+      // Legacy: find existing or create
+      managed = findActiveSession(ws.userId, projectId ?? null);
+      isReconnect = !!managed;
+      if (!managed) {
+        try {
+          managed = createCliSession(ws.userId, projectId);
+        } catch (err) {
+          console.error('[ws] failed to create CLI session:', err);
+          ws.close(4002, 'Failed to create session');
+          return;
+        }
       }
     }
     ws.sessionId = managed.sessionId;

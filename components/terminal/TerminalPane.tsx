@@ -4,14 +4,18 @@ import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { getThemeByName } from '@/lib/terminal-themes';
 
 interface Props {
   output: string;
   onInput: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
+  fontSize?: number;
+  themeName?: string;
+  onFitRef?: (fit: () => void) => void;
 }
 
-export default function TerminalPane({ output, onInput, onResize }: Props) {
+export default function TerminalPane({ output, onInput, onResize, fontSize = 14, themeName, onFitRef }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -23,11 +27,7 @@ export default function TerminalPane({ output, onInput, onResize }: Props) {
     const term = new Terminal({
       fontFamily: 'Menlo, Monaco, "Courier New", monospace',
       fontSize: 14,
-      theme: {
-        background: '#1e1e2e',
-        foreground: '#cdd6f4',
-        cursor: '#cdd6f4',
-      },
+      theme: getThemeByName(themeName ?? 'Catppuccin').theme,
       cursorBlink: true,
     });
 
@@ -40,6 +40,12 @@ export default function TerminalPane({ output, onInput, onResize }: Props) {
 
     termRef.current = term;
     fitRef.current = fit;
+
+    // Expose fit function for parent (e.g., when tab becomes visible)
+    onFitRef?.(() => {
+      fit.fit();
+      onResize?.(term.cols, term.rows);
+    });
 
     const resizeObserver = new ResizeObserver(() => {
       fit.fit();
@@ -57,6 +63,20 @@ export default function TerminalPane({ output, onInput, onResize }: Props) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Apply theme changes
+  useEffect(() => {
+    if (!termRef.current) return;
+    const t = getThemeByName(themeName ?? 'Catppuccin');
+    termRef.current.options.theme = t.theme;
+  }, [themeName]);
+
+  // Apply font size changes
+  useEffect(() => {
+    if (!termRef.current || !fitRef.current) return;
+    termRef.current.options.fontSize = fontSize;
+    fitRef.current.fit();
+  }, [fontSize]);
 
   // Write only new output chunks to xterm
   useEffect(() => {

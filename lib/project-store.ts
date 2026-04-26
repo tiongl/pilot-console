@@ -75,7 +75,7 @@ export function getProjectById(id: string): Project | null {
 
 export function updateProject(
   id: string,
-  fields: { name?: string; repoPath?: string; description?: string | null },
+  fields: { name?: string; repoPath?: string; description?: string | null; pinned?: boolean },
 ): Project {
   const existing = getProjectById(id);
   if (!existing) throw new Error('Project not found');
@@ -93,6 +93,17 @@ export function updateProject(
   getDb()
     .prepare("UPDATE projects SET name = ?, repo_path = ?, description = ?, updated_at = datetime('now') WHERE id = ?")
     .run(name, repoPath, description, id);
+
+  // Update pinned status if provided (column added by schema migration)
+  if (fields.pinned !== undefined) {
+    try {
+      getDb()
+        .prepare('UPDATE projects SET pinned = ? WHERE id = ?')
+        .run(fields.pinned ? 1 : 0, id);
+    } catch {
+      // pinned column may not exist yet
+    }
+  }
 
   return getProjectById(id)!;
 }

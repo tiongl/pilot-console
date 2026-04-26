@@ -33,6 +33,11 @@ export function findActiveSession(userId: string, projectId: string | null): Man
   return undefined;
 }
 
+/** Return ALL live sessions for a user+project combo */
+export function findAllActiveSessions(userId: string, projectId: string | null): ManagedProcess[] {
+  return [...activeSessions.values()].filter(s => s.userId === userId && s.projectId === projectId && s.alive);
+}
+
 /** Detach WS callbacks without killing the PTY */
 export function detachSession(sessionId: string): void {
   const session = activeSessions.get(sessionId);
@@ -94,15 +99,16 @@ export function createCliSession(userId: string, projectId?: string | null): Man
     managed.onExit?.(exitCode);
     activeSessions.delete(sessionId);
     getDb()
-      .prepare("UPDATE cli_sessions SET ended_at = datetime('now') WHERE id = ?")
-      .run(sessionId);
+      .prepare("UPDATE cli_sessions SET ended_at = datetime('now'), output_log = ? WHERE id = ?")
+      .run(managed.outputBuffer || null, sessionId);
   });
 
   activeSessions.set(sessionId, managed);
 
-  getDb()
-    .prepare('INSERT INTO cli_sessions (id, user_id, project_id) VALUES (?, ?, ?)')
-    .run(sessionId, userId, projectId ?? null);
+  const db = getDb();
+  // Ensure user exists (FK constraint requires it)
+  db.prepare('INSERT OR IGNORE INTO users (id, github_id, role) VALUES (?, ?, ?)').run(userId, userId, 'user');
+  db.prepare('INSERT INTO cli_sessions (id, user_id, project_id) VALUES (?, ?, ?)').run(sessionId, userId, projectId ?? null);
 
   return managed;
 }
@@ -117,11 +123,12 @@ export function writeToSession(sessionId: string, data: string): boolean {
 export function endCliSession(sessionId: string): void {
   const session = activeSessions.get(sessionId);
   if (!session) return;
+  // Save output before killing
+  getDb()
+    .prepare("UPDATE cli_sessions SET ended_at = datetime('now'), output_log = ? WHERE id = ?")
+    .run(session.outputBuffer || null, sessionId);
   try { session.ptyProcess.kill(); } catch { /* already dead */ }
   activeSessions.delete(sessionId);
-  getDb()
-    .prepare("UPDATE cli_sessions SET ended_at = datetime('now') WHERE id = ?")
-    .run(sessionId);
 }
 
 export function getSessionsByUser(userId: string): ManagedProcess[] {
