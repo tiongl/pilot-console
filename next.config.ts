@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Keep native modules (better-sqlite3, ws) server-side only
+  serverExternalPackages: ["better-sqlite3", "ws"],
 };
 
 export default nextConfig;
