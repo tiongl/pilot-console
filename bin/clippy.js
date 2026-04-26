@@ -6,10 +6,10 @@ const crypto = require('crypto');
 const os = require('os');
 
 const pkgDir = path.resolve(__dirname, '..');
-const hasNextBuild = fs.existsSync(path.join(pkgDir, '.next'));
 
-// Use production mode only if .next build exists; otherwise fall back to dev
-process.env.NODE_ENV = hasNextBuild ? 'production' : 'development';
+// Use production mode only if a production build exists
+const hasProductionBuild = fs.existsSync(path.join(pkgDir, '.next', 'BUILD_ID'));
+process.env.NODE_ENV = hasProductionBuild ? 'production' : 'development';
 
 // Auto-generate AUTH_SECRET / NEXTAUTH_SECRET if not set
 const configDir = path.join(os.homedir(), '.gcclippy');
@@ -28,7 +28,6 @@ if (!process.env.AUTH_SECRET && !process.env.NEXTAUTH_SECRET) {
   process.env.NEXTAUTH_SECRET = secret;
 }
 
-import('tsx/esm/api').then(({ register }) => {
-  register();
-  import('../server.ts');
-});
+// Register tsx for TypeScript support and load the server
+require('tsx/cjs');
+require('../server.ts');
