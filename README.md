@@ -25,8 +25,9 @@ npm install
 npm link
 ```
 
-> **Note:** `npm install -g "github:..."` may not work on Windows due to
-> symlink issues in npm's tar extraction. Use the methods above instead.
+> **Note:** `npm install -g "github:..."` does not work on Windows due to
+> postinstall script issues with native dependencies (esbuild, better-sqlite3).
+> Use the clone-based methods above instead.
 
 ## Usage
 
