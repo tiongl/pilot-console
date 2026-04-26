@@ -4,7 +4,8 @@ import Link from 'next/link';
 import { signOut } from '@/lib/auth';
 import { listProjects } from '@/lib/project-store';
 import { Button } from '@/components/ui/button';
-import { FolderOpen, Plus, Shield, LogOut, Settings } from 'lucide-react';
+import { Plus, Shield, LogOut } from 'lucide-react';
+import ProjectNav from '@/components/nav/ProjectNav';
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
   const session = await auth();
@@ -30,23 +31,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
         </div>
 
         <nav className="flex flex-col gap-0.5 flex-1 overflow-y-auto">
-          {projects.map((project) => (
-            <Link
-              key={project.id}
-              href={`/projects/${project.id}/chat`}
-              className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors"
-            >
-              <FolderOpen className="h-4 w-4 shrink-0" />
-              <span className="truncate">{project.name}</span>
-            </Link>
-          ))}
-
-          {projects.length === 0 && (
-            <p className="px-3 py-4 text-xs text-muted-foreground text-center">
-              No projects yet.{' '}
-              <Link href="/projects/new" className="underline">Create one</Link>
-            </p>
-          )}
+          <ProjectNav projects={projects} />
         </nav>
 
         <div className="flex flex-col gap-1 border-t pt-3 mt-2">

@@ -6,7 +6,7 @@ import ChatWindow from '@/components/chat/ChatWindow';
 import ChatInput from '@/components/chat/ChatInput';
 import TerminalPane from '@/components/terminal/TerminalPane';
 import { Button } from '@/components/ui/button';
-import { Terminal, MessageSquare } from 'lucide-react';
+import { Terminal, MessageSquare, Square, RotateCcw } from 'lucide-react';
 import type { ChatMessage } from '@/types';
 
 interface Props {
@@ -19,6 +19,7 @@ export default function ChatClient({ userName: _userName, projectId }: Props) {
   const [viewMode, setViewMode] = useState<'chat' | 'terminal'>('terminal');
   const [rawOutput, setRawOutput] = useState('');
   const assistantIdRef = useRef<string | null>(null);
+  const currentSessionRef = useRef<string | null>(null);
 
   const appendOutput = useCallback((data: string) => {
     setRawOutput((prev) => prev + data);
@@ -42,7 +43,15 @@ export default function ChatClient({ userName: _userName, projectId }: Props) {
         content: `_Process exited (code ${code})_`, timestamp: Date.now(),
       }]);
     },
-    onReady: () => { assistantIdRef.current = null; },
+    onReady: (sessionId) => {
+      assistantIdRef.current = null;
+      // Clear state only when session changed (kill+restart), not on reconnect to same session
+      if (currentSessionRef.current && currentSessionRef.current !== sessionId) {
+        setRawOutput('');
+        setMessages([]);
+      }
+      currentSessionRef.current = sessionId;
+    },
   });
 
   const handleSend = (text: string) => {
@@ -50,6 +59,22 @@ export default function ChatClient({ userName: _userName, projectId }: Props) {
     assistantIdRef.current = null;
     setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: 'user', content: text, timestamp: Date.now() }]);
     send({ type: 'input', data: text + '\n' });
+  };
+
+  const [killing, setKilling] = useState(false);
+
+  const handleKillSession = async () => {
+    if (!projectId || killing) return;
+    setKilling(true);
+    try {
+      await fetch(`/api/projects/${encodeURIComponent(projectId)}/session`, {
+        method: 'DELETE',
+      });
+    } catch {
+      // WS close will handle reconnect regardless
+    } finally {
+      setKilling(false);
+    }
   };
 
   const statusColor = { open: 'bg-green-500', connecting: 'bg-yellow-500', closed: 'bg-gray-400', error: 'bg-red-500' }[state];
@@ -68,6 +93,23 @@ export default function ChatClient({ userName: _userName, projectId }: Props) {
           <Button variant={viewMode === 'terminal' ? 'secondary' : 'ghost'} size="sm" onClick={() => setViewMode('terminal')}>
             <Terminal className="h-4 w-4 mr-1" /> Terminal
           </Button>
+          {projectId && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleKillSession}
+              disabled={killing || state !== 'open'}
+              className="text-destructive hover:text-destructive"
+              title="Kill session and restart"
+            >
+              {killing ? (
+                <RotateCcw className="h-4 w-4 mr-1 animate-spin" />
+              ) : (
+                <Square className="h-4 w-4 mr-1" />
+              )}
+              Kill Session
+            </Button>
+          )}
         </div>
       </div>
 

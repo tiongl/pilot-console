@@ -136,6 +136,14 @@ export function getSession(sessionId: string): ManagedProcess | undefined {
   return activeSessions.get(sessionId);
 }
 
+/** Find and kill the active session for a user+project combo */
+export function endSessionByProject(userId: string, projectId: string): boolean {
+  const session = findActiveSession(userId, projectId);
+  if (!session) return false;
+  endCliSession(session.sessionId);
+  return true;
+}
+
 /** Try to extract a Copilot session UUID from CLI output and persist it */
 function extractAndStoreSessionId(sessionId: string, output: string) {
   const match = output.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
