@@ -1,12 +1,14 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import FolderPicker from '@/components/folder-picker/FolderPicker';
+import { CheckCircle2, XCircle } from 'lucide-react';
 
 export default function NewProjectPage() {
   const router = useRouter();
@@ -15,6 +17,33 @@ export default function NewProjectPage() {
   const [description, setDescription] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [pathStatus, setPathStatus] = useState<{ valid: boolean; isGit: boolean; message: string } | null>(null);
+
+  // Real-time path validation with debounce
+  useEffect(() => {
+    if (!repoPath.trim()) {
+      setPathStatus(null);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/browse?dir=${encodeURIComponent(repoPath)}`);
+        const data = await res.json();
+        if (res.ok) {
+          setPathStatus({
+            valid: true,
+            isGit: data.isGitRepo,
+            message: data.isGitRepo ? 'Valid git repository' : 'Valid directory (not a git repo)',
+          });
+        } else {
+          setPathStatus({ valid: false, isGit: false, message: data.error || 'Invalid path' });
+        }
+      } catch {
+        setPathStatus({ valid: false, isGit: false, message: 'Cannot validate path' });
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [repoPath]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -62,17 +91,31 @@ export default function NewProjectPage() {
 
             <div className="space-y-2">
               <Label htmlFor="repoPath">Repository Path</Label>
-              <Input
-                id="repoPath"
-                value={repoPath}
-                onChange={(e) => setRepoPath(e.target.value)}
-                placeholder="C:\Users\you\repos\my-project"
-                className="font-mono text-sm"
-                required
-              />
-              <p className="text-xs text-muted-foreground">
-                Absolute path to the local git repository. Copilot CLI will run from this directory.
-              </p>
+              <div className="flex gap-2">
+                <Input
+                  id="repoPath"
+                  value={repoPath}
+                  onChange={(e) => setRepoPath(e.target.value)}
+                  placeholder="C:\Users\you\repos\my-project"
+                  className="font-mono text-sm flex-1"
+                  required
+                />
+                <FolderPicker value={repoPath} onChange={(p) => setRepoPath(p)} />
+              </div>
+              {pathStatus && (
+                <div className={`flex items-center gap-1.5 text-xs ${pathStatus.valid ? 'text-green-600' : 'text-destructive'}`}>
+                  {pathStatus.valid
+                    ? <CheckCircle2 className="h-3.5 w-3.5" />
+                    : <XCircle className="h-3.5 w-3.5" />
+                  }
+                  {pathStatus.message}
+                </div>
+              )}
+              {!pathStatus && (
+                <p className="text-xs text-muted-foreground">
+                  Absolute path to the local git repository. Copilot CLI will run from this directory.
+                </p>
+              )}
             </div>
 
             <div className="space-y-2">
@@ -87,11 +130,11 @@ export default function NewProjectPage() {
             </div>
 
             {error && (
-              <p className="text-sm text-destructive">{error}</p>
+              <p className="text-sm text-destructive font-medium">{error}</p>
             )}
 
             <div className="flex gap-3">
-              <Button type="submit" disabled={loading || !name || !repoPath}>
+              <Button type="submit" disabled={loading || !name || !repoPath || (pathStatus !== null && !pathStatus.valid)}>
                 {loading ? 'Creating…' : 'Create Project'}
               </Button>
               <Button type="button" variant="ghost" onClick={() => router.back()}>

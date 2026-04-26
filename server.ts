@@ -1,6 +1,9 @@
 import { createServer } from 'http';
 import { parse } from 'url';
 import next from 'next';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import { setupWebSocketServer } from './lib/websocket-server';
 import { getAllSessions, endSessionByProject } from './lib/cli-bridge';
 
@@ -24,6 +27,32 @@ app.prepare().then(() => {
           .map((s) => ({ projectId: s.projectId!, sessionId: s.sessionId }));
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ sessions: active }));
+        return;
+      }
+
+      // Directory browsing API for folder picker
+      if (parsedUrl.pathname === '/api/browse' && req.method === 'GET') {
+        const dirParam = (parsedUrl.query.dir as string) || os.homedir();
+        const dir = path.resolve(dirParam);
+        try {
+          const stat = fs.statSync(dir);
+          if (!stat.isDirectory()) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Not a directory' }));
+            return;
+          }
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          const dirs = entries
+            .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+            .map((e) => e.name)
+            .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+          const isGitRepo = fs.existsSync(path.join(dir, '.git'));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ path: dir, dirs, isGitRepo, parent: path.dirname(dir) }));
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Cannot read directory' }));
+        }
         return;
       }
 
