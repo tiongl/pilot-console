@@ -25,8 +25,8 @@ npm install
 npm link
 ```
 
-> **Note:** `npm install -g "github:..."` does not work on Windows due to
-> Next.js symlink issues in npm's tar extraction. Use the methods above instead.
+> **Note:** `npm install -g "github:..."` may not work on Windows due to
+> symlink issues in npm's tar extraction. Use the methods above instead.
 
 ## Usage
 
@@ -34,7 +34,7 @@ npm link
 clippy
 ```
 
-This starts the web dashboard at [http://localhost:3000](http://localhost:3000).
+This starts the web dashboard at [http://localhost:3001](http://localhost:3001).
 
 ## Development
 
@@ -42,4 +42,4 @@ This starts the web dashboard at [http://localhost:3000](http://localhost:3000).
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) — the page auto-updates as you edit files.
+Opens Vite dev server at [http://localhost:5173](http://localhost:5173) with HMR, proxying API calls to the Express backend on port 3001.
