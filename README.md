@@ -4,13 +4,19 @@ A GitHub Copilot CLI session manager with a web dashboard.
 
 ## Installation (Windows)
 
-Run the installer script:
+**Option 1 — One-liner** (requires [GitHub CLI](https://cli.github.com/)):
 
 ```powershell
-irm https://raw.githubusercontent.com/tionglee_microsoft/gcclippy/main/scripts/install.ps1 | iex
+gh repo clone tionglee_microsoft/gcclippy ~/.gcclippy/app && cd ~/.gcclippy/app && npm install && npm link
 ```
 
-Or manually:
+**Option 2 — Installer script** (from a local clone):
+
+```powershell
+.\scripts\install.ps1
+```
+
+**Option 3 — Manual:**
 
 ```powershell
 git clone https://github.com/tionglee_microsoft/gcclippy.git ~/.gcclippy/app
@@ -20,8 +26,7 @@ npm link
 ```
 
 > **Note:** `npm install -g "github:..."` does not work on Windows due to
-> [Next.js symlink issues](https://github.com/vercel/next.js/issues) in
-> npm's tar extraction. Use the installer script above instead.
+> Next.js symlink issues in npm's tar extraction. Use the methods above instead.
 
 ## Usage
 

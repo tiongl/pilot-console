@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 # GCClippy installer for Windows
-# Usage: irm https://raw.githubusercontent.com/tionglee_microsoft/gcclippy/main/scripts/install.ps1 | iex
-#   or:  .\scripts\install.ps1
+# Usage: .\scripts\install.ps1  (from a local clone)
+#   or:  pwsh -File path\to\install.ps1
 
 $ErrorActionPreference = "Stop"
 
