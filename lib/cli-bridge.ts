@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from 'child_process';
+import * as pty from 'node-pty';
 import { getDb } from './app-db';
 import { getProjectById } from './project-store';
 
@@ -6,7 +6,7 @@ export interface ManagedProcess {
   sessionId: string;
   userId: string;
   projectId: string | null;
-  process: ChildProcess;
+  ptyProcess: pty.IPty;
   onOutput: ((data: string) => void) | null;
   onError: ((data: string) => void) | null;
   onExit: ((code: number) => void) | null;
@@ -16,6 +16,10 @@ const activeSessions = new Map<string, ManagedProcess>();
 
 const CLI_COMMAND = process.env.COPILOT_CLI_COMMAND ?? 'gh';
 const CLI_ARGS = (process.env.COPILOT_CLI_ARGS ?? 'copilot').split(' ').filter(Boolean);
+
+// node-pty on Windows needs the shell to resolve commands in PATH
+const IS_WINDOWS = process.platform === 'win32';
+const SHELL = IS_WINDOWS ? 'cmd.exe' : '/bin/bash';
 
 export function createCliSession(userId: string, projectId?: string | null): ManagedProcess {
   const sessionId = crypto.randomUUID();
@@ -28,34 +32,36 @@ export function createCliSession(userId: string, projectId?: string | null): Man
     }
   }
 
-  const proc = spawn(CLI_COMMAND, CLI_ARGS, {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, TERM: 'xterm-256color', FORCE_COLOR: '1' },
-    ...(cwd ? { cwd } : {}),
+  // Use shell to resolve commands in PATH (node-pty needs full paths on Windows)
+  const shellArgs = IS_WINDOWS
+    ? ['/c', CLI_COMMAND, ...CLI_ARGS]
+    : ['-c', `${CLI_COMMAND} ${CLI_ARGS.join(' ')}`];
+
+  const ptyProc = pty.spawn(SHELL, shellArgs, {
+    name: 'xterm-256color',
+    cols: 120,
+    rows: 30,
+    cwd: cwd || process.cwd(),
+    env: { ...process.env } as Record<string, string>,
   });
 
   const managed: ManagedProcess = {
     sessionId,
     userId,
     projectId: projectId ?? null,
-    process: proc,
+    ptyProcess: ptyProc,
     onOutput: null,
     onError: null,
     onExit: null,
   };
 
-  proc.stdout?.on('data', (data: Buffer) => {
-    const text = data.toString();
-    managed.onOutput?.(text);
-    extractAndStoreSessionId(sessionId, text);
+  ptyProc.onData((data: string) => {
+    managed.onOutput?.(data);
+    extractAndStoreSessionId(sessionId, data);
   });
 
-  proc.stderr?.on('data', (data: Buffer) => {
-    managed.onError?.(data.toString());
-  });
-
-  proc.on('exit', (code) => {
-    managed.onExit?.(code ?? -1);
+  ptyProc.onExit(({ exitCode }) => {
+    managed.onExit?.(exitCode);
     endCliSession(sessionId);
   });
 
@@ -70,15 +76,15 @@ export function createCliSession(userId: string, projectId?: string | null): Man
 
 export function writeToSession(sessionId: string, data: string): boolean {
   const session = activeSessions.get(sessionId);
-  if (!session?.process.stdin?.writable) return false;
-  session.process.stdin.write(data);
+  if (!session) return false;
+  session.ptyProcess.write(data);
   return true;
 }
 
 export function endCliSession(sessionId: string): void {
   const session = activeSessions.get(sessionId);
   if (!session) return;
-  try { session.process.kill(); } catch { /* already dead */ }
+  try { session.ptyProcess.kill(); } catch { /* already dead */ }
   activeSessions.delete(sessionId);
   getDb()
     .prepare("UPDATE cli_sessions SET ended_at = datetime('now') WHERE id = ?")

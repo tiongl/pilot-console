@@ -29,7 +29,7 @@ export default function AgentsPage() {
                 </div>
               </CardHeader>
               <CardContent className="text-xs text-muted-foreground">
-                User ID: {s.userId.slice(0, 8)}… · PID: {s.process.pid ?? 'unknown'}
+                User ID: {s.userId.slice(0, 8)}… · PID: {s.ptyProcess.pid ?? 'unknown'}
               </CardContent>
             </Card>
           ))}

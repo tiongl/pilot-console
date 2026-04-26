@@ -71,7 +71,14 @@ export function setupWebSocketServer(): WebSocketServer {
 
     // Create a CLI process for this connection
     const projectId = url.searchParams.get('projectId');
-    const managed = createCliSession(ws.userId, projectId);
+    let managed;
+    try {
+      managed = createCliSession(ws.userId, projectId);
+    } catch (err) {
+      console.error('[ws] failed to create CLI session:', err);
+      ws.close(4002, 'Failed to create session');
+      return;
+    }
     ws.sessionId = managed.sessionId;
 
     const send = (msg: WsServerMessage) => {
@@ -96,10 +103,14 @@ export function setupWebSocketServer(): WebSocketServer {
 
       if (msg.type === 'input') {
         writeToSession(ws.sessionId!, msg.data);
+      } else if (msg.type === 'resize') {
+        const session = managed;
+        if (session && msg.cols && msg.rows) {
+          session.ptyProcess.resize(msg.cols, msg.rows);
+        }
       } else if (msg.type === 'ping') {
         send({ type: 'pong' });
       }
-      // resize: node-pty not used, so silently ignored for now
     });
 
     ws.on('close', () => {
