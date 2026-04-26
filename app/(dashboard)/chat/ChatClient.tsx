@@ -16,7 +16,7 @@ interface Props {
 
 export default function ChatClient({ userName: _userName, projectId }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [viewMode, setViewMode] = useState<'chat' | 'terminal'>('chat');
+  const [viewMode, setViewMode] = useState<'chat' | 'terminal'>('terminal');
   const [rawOutput, setRawOutput] = useState('');
   const assistantIdRef = useRef<string | null>(null);
 
@@ -74,13 +74,19 @@ export default function ChatClient({ userName: _userName, projectId }: Props) {
       <div className="flex-1 overflow-hidden">
         {viewMode === 'chat'
           ? <ChatWindow messages={messages} />
-          : <TerminalPane output={rawOutput} onInput={(data) => send({ type: 'input', data })} />
+          : <TerminalPane
+              output={rawOutput}
+              onInput={(data) => send({ type: 'input', data })}
+              onResize={(cols, rows) => send({ type: 'resize', cols, rows })}
+            />
         }
       </div>
 
-      <div className="border-t p-4">
-        <ChatInput onSend={handleSend} disabled={state !== 'open'} />
-      </div>
+      {viewMode === 'chat' && (
+        <div className="border-t p-4">
+          <ChatInput onSend={handleSend} disabled={state !== 'open'} />
+        </div>
+      )}
     </div>
   );
 }

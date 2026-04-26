@@ -8,9 +8,10 @@ import '@xterm/xterm/css/xterm.css';
 interface Props {
   output: string;
   onInput: (data: string) => void;
+  onResize?: (cols: number, rows: number) => void;
 }
 
-export default function TerminalPane({ output, onInput }: Props) {
+export default function TerminalPane({ output, onInput, onResize }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -40,8 +41,14 @@ export default function TerminalPane({ output, onInput }: Props) {
     termRef.current = term;
     fitRef.current = fit;
 
-    const resizeObserver = new ResizeObserver(() => fit.fit());
+    const resizeObserver = new ResizeObserver(() => {
+      fit.fit();
+      onResize?.(term.cols, term.rows);
+    });
     resizeObserver.observe(containerRef.current);
+
+    // Send initial size
+    onResize?.(term.cols, term.rows);
 
     return () => {
       resizeObserver.disconnect();
