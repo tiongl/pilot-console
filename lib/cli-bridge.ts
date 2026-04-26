@@ -2,14 +2,18 @@ import * as pty from 'node-pty';
 import { getDb } from './app-db';
 import { getProjectById } from './project-store';
 
+const MAX_SCROLLBACK = 100_000; // chars to buffer for reconnection replay
+
 export interface ManagedProcess {
   sessionId: string;
   userId: string;
   projectId: string | null;
   ptyProcess: pty.IPty;
+  outputBuffer: string;
   onOutput: ((data: string) => void) | null;
   onError: ((data: string) => void) | null;
   onExit: ((code: number) => void) | null;
+  alive: boolean;
 }
 
 const activeSessions = new Map<string, ManagedProcess>();
@@ -20,6 +24,24 @@ const CLI_ARGS = (process.env.COPILOT_CLI_ARGS ?? 'copilot').split(' ').filter(B
 // node-pty on Windows needs the shell to resolve commands in PATH
 const IS_WINDOWS = process.platform === 'win32';
 const SHELL = IS_WINDOWS ? 'cmd.exe' : '/bin/bash';
+
+/** Find an existing live session for a user+project combo */
+export function findActiveSession(userId: string, projectId: string | null): ManagedProcess | undefined {
+  for (const s of activeSessions.values()) {
+    if (s.userId === userId && s.projectId === projectId && s.alive) return s;
+  }
+  return undefined;
+}
+
+/** Detach WS callbacks without killing the PTY */
+export function detachSession(sessionId: string): void {
+  const session = activeSessions.get(sessionId);
+  if (session) {
+    session.onOutput = null;
+    session.onError = null;
+    session.onExit = null;
+  }
+}
 
 export function createCliSession(userId: string, projectId?: string | null): ManagedProcess {
   const sessionId = crypto.randomUUID();
@@ -50,19 +72,30 @@ export function createCliSession(userId: string, projectId?: string | null): Man
     userId,
     projectId: projectId ?? null,
     ptyProcess: ptyProc,
+    outputBuffer: '',
     onOutput: null,
     onError: null,
     onExit: null,
+    alive: true,
   };
 
   ptyProc.onData((data: string) => {
+    // Always buffer output for reconnection replay
+    managed.outputBuffer += data;
+    if (managed.outputBuffer.length > MAX_SCROLLBACK) {
+      managed.outputBuffer = managed.outputBuffer.slice(-MAX_SCROLLBACK);
+    }
     managed.onOutput?.(data);
     extractAndStoreSessionId(sessionId, data);
   });
 
   ptyProc.onExit(({ exitCode }) => {
+    managed.alive = false;
     managed.onExit?.(exitCode);
-    endCliSession(sessionId);
+    activeSessions.delete(sessionId);
+    getDb()
+      .prepare("UPDATE cli_sessions SET ended_at = datetime('now') WHERE id = ?")
+      .run(sessionId);
   });
 
   activeSessions.set(sessionId, managed);

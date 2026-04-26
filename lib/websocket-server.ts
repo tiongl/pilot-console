@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { IncomingMessage } from 'http';
 import { decode } from 'next-auth/jwt';
-import { createCliSession, writeToSession, endCliSession, getSession } from './cli-bridge';
+import { createCliSession, writeToSession, endCliSession, findActiveSession, detachSession } from './cli-bridge';
 import type { WsClientMessage, WsServerMessage } from '@/types';
 
 interface AuthedSocket extends WebSocket {
@@ -18,7 +18,7 @@ export function setupWebSocketServer(): WebSocketServer {
     wss.clients.forEach((ws) => {
       const socket = ws as AuthedSocket;
       if (socket.isAlive === false) {
-        if (socket.sessionId) endCliSession(socket.sessionId);
+        if (socket.sessionId) detachSession(socket.sessionId);
         return socket.terminate();
       }
       socket.isAlive = false;
@@ -69,15 +69,19 @@ export function setupWebSocketServer(): WebSocketServer {
 
     ws.userId = decoded.userId as string;
 
-    // Create a CLI process for this connection
+    // Reuse existing PTY session for this user+project, or create a new one
     const projectId = url.searchParams.get('projectId');
-    let managed;
-    try {
-      managed = createCliSession(ws.userId, projectId);
-    } catch (err) {
-      console.error('[ws] failed to create CLI session:', err);
-      ws.close(4002, 'Failed to create session');
-      return;
+    let managed = findActiveSession(ws.userId, projectId ?? null);
+    const isReconnect = !!managed;
+
+    if (!managed) {
+      try {
+        managed = createCliSession(ws.userId, projectId);
+      } catch (err) {
+        console.error('[ws] failed to create CLI session:', err);
+        ws.close(4002, 'Failed to create session');
+        return;
+      }
     }
     ws.sessionId = managed.sessionId;
 
@@ -87,11 +91,17 @@ export function setupWebSocketServer(): WebSocketServer {
       }
     };
 
+    // Wire up callbacks from PTY to this WebSocket
     managed.onOutput = (data) => send({ type: 'output', data });
     managed.onError = (data) => send({ type: 'error', data });
     managed.onExit = (code) => send({ type: 'exit', code });
 
     send({ type: 'ready', sessionId: managed.sessionId });
+
+    // Replay buffered output so client catches up after reconnection
+    if (isReconnect && managed.outputBuffer) {
+      send({ type: 'output', data: managed.outputBuffer });
+    }
 
     ws.on('message', (raw) => {
       let msg: WsClientMessage;
@@ -114,12 +124,13 @@ export function setupWebSocketServer(): WebSocketServer {
     });
 
     ws.on('close', () => {
-      if (ws.sessionId) endCliSession(ws.sessionId);
+      // Detach WS callbacks but keep PTY alive for reconnection
+      if (ws.sessionId) detachSession(ws.sessionId);
     });
 
     ws.on('error', (err) => {
       console.error('[ws] socket error', err.message);
-      if (ws.sessionId) endCliSession(ws.sessionId);
+      if (ws.sessionId) detachSession(ws.sessionId);
     });
   });
 
