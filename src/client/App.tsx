@@ -42,6 +42,7 @@ export function App() {
           <Route path="agents" element={<AgentsPage />} />
           <Route path="projects/new" element={<NewProjectPage />} />
           <Route path="projects/:id" element={<ProjectLayout />}>
+            <Route index element={<Navigate to="chat" replace />} />
             <Route path="chat" element={<ProjectChatPage />} />
             <Route path="sessions" element={<ProjectSessionsPage />} />
             <Route path="skills" element={<ProjectSkillsPage />} />

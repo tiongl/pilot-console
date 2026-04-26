@@ -5,188 +5,348 @@ import { Input } from '../../../components/ui/input';
 import { Label } from '../../../components/ui/label';
 import { Card, CardContent, CardHeader, CardTitle } from '../../../components/ui/card';
 import { Badge } from '../../../components/ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../../../components/ui/dialog';
 import { Plug, Server, FileText, Plus, Trash2, ChevronDown, ChevronRight, Search, Download, X, Store, Loader2 } from 'lucide-react';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 interface PluginSkill {
   name: string;
-  description: string;
+  path: string;
 }
 
 interface PluginInfo {
   name: string;
-  description: string;
+  marketplace: string;
+  version: string;
+  enabled: boolean;
   skills: PluginSkill[];
 }
 
 interface McpServerConfig {
+  type: string;
   command: string;
   args?: string[];
-  env?: Record<string, string>;
+  [key: string]: unknown;
 }
 
-interface ProjectPlugins {
+interface RepoSkills {
+  agentsMd: boolean;
+  customInstructions: string[];
+}
+
+interface CopilotConfig {
   plugins: PluginInfo[];
   mcpServers: Record<string, McpServerConfig>;
-  customInstructions: string;
+  repoSkills: RepoSkills;
 }
 
-interface CatalogEntry {
-  id: string;
+interface Marketplace {
+  name: string;
+  source: string;
+  builtin: boolean;
+}
+
+interface CatalogPlugin {
   name: string;
   description: string;
-  command: string;
-  args?: string[];
-  env?: Record<string, string>;
 }
 
-function SkillCatalog({
-  projectId,
-  existingServers,
-  onInstalled,
-}: {
-  projectId: string;
-  existingServers: Record<string, McpServerConfig>;
-  onInstalled: () => void;
-}) {
-  const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
+interface InstalledPlugin {
+  name: string;
+  marketplace: string;
+  version: string;
+}
+
+// ---------------------------------------------------------------------------
+// Skill Catalog Component
+// ---------------------------------------------------------------------------
+
+function SkillCatalog({ onInstallChanged }: { onInstallChanged: () => void }) {
+  const [marketplaces, setMarketplaces] = useState<Marketplace[]>([]);
+  const [selectedMp, setSelectedMp] = useState<string>('');
+  const [plugins, setPlugins] = useState<CatalogPlugin[]>([]);
+  const [installed, setInstalled] = useState<InstalledPlugin[]>([]);
   const [search, setSearch] = useState('');
+  const [loadingMp, setLoadingMp] = useState(true);
+  const [loadingPlugins, setLoadingPlugins] = useState(false);
   const [installing, setInstalling] = useState<string | null>(null);
-  const [open, setOpen] = useState(false);
+  const [showAddMp, setShowAddMp] = useState(false);
+  const [newMpRepo, setNewMpRepo] = useState('');
+  const [addingMp, setAddingMp] = useState(false);
 
-  useEffect(() => {
-    if (!open) return;
-    fetch('/api/skill-catalog')
-      .then((r) => r.json())
-      .then((data) => setCatalog(data.catalog || []))
-      .catch(() => {});
-  }, [open]);
-
-  const filtered = useMemo(
-    () =>
-      catalog.filter(
-        (c) =>
-          !existingServers[c.id] &&
-          (c.name.toLowerCase().includes(search.toLowerCase()) ||
-            c.description.toLowerCase().includes(search.toLowerCase())),
-      ),
-    [catalog, existingServers, search],
-  );
-
-  const handleInstall = useCallback(
-    async (entry: CatalogEntry) => {
-      setInstalling(entry.id);
-      try {
-        const res = await fetch(`/api/projects/${projectId}/skills/mcp-servers`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: entry.id,
-            config: {
-              command: entry.command,
-              args: entry.args,
-              env: entry.env,
-            },
-          }),
-        });
-        if (res.ok) onInstalled();
-      } finally {
-        setInstalling(null);
+  const fetchMarketplaces = useCallback(async () => {
+    setLoadingMp(true);
+    try {
+      const res = await fetch('/api/skill-catalog/marketplaces');
+      if (res.ok) {
+        const data = await res.json();
+        setMarketplaces(data.marketplaces);
+        if (data.marketplaces.length > 0 && !selectedMp) {
+          setSelectedMp(data.marketplaces[0].name);
+        }
       }
-    },
-    [projectId, onInstalled],
-  );
+    } finally {
+      setLoadingMp(false);
+    }
+  }, [selectedMp]);
 
-  if (!open) {
-    return (
-      <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
-        <Store className="h-4 w-4 mr-2" />
-        Skill Catalog
-      </Button>
+  const fetchInstalled = useCallback(async () => {
+    try {
+      const res = await fetch('/api/skill-catalog/installed');
+      if (res.ok) {
+        const data = await res.json();
+        setInstalled(data.installed);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  const fetchPlugins = useCallback(async (mp: string) => {
+    if (!mp) return;
+    setLoadingPlugins(true);
+    try {
+      const res = await fetch(`/api/skill-catalog/browse?marketplace=${encodeURIComponent(mp)}`);
+      if (res.ok) {
+        const data = await res.json();
+        setPlugins(data.plugins);
+      }
+    } finally {
+      setLoadingPlugins(false);
+    }
+  }, []);
+
+  useEffect(() => { fetchMarketplaces(); fetchInstalled(); }, [fetchMarketplaces, fetchInstalled]);
+  useEffect(() => { if (selectedMp) fetchPlugins(selectedMp); }, [selectedMp, fetchPlugins]);
+
+  const isInstalled = useCallback((pluginName: string, marketplace: string) => {
+    return installed.some(i => i.name === pluginName && i.marketplace === marketplace);
+  }, [installed]);
+
+  const handleInstall = async (pluginName: string, marketplace: string) => {
+    setInstalling(pluginName);
+    try {
+      const res = await fetch('/api/skill-catalog/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plugin: pluginName, marketplace }),
+      });
+      if (res.ok) {
+        await fetchInstalled();
+        onInstallChanged();
+      }
+    } finally {
+      setInstalling(null);
+    }
+  };
+
+  const handleUninstall = async (pluginName: string, marketplace: string) => {
+    if (!confirm(`Uninstall "${pluginName}"?`)) return;
+    setInstalling(pluginName);
+    try {
+      const res = await fetch('/api/skill-catalog/uninstall', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plugin: pluginName, marketplace }),
+      });
+      if (res.ok) {
+        await fetchInstalled();
+        onInstallChanged();
+      }
+    } finally {
+      setInstalling(null);
+    }
+  };
+
+  const handleAddMarketplace = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newMpRepo.trim()) return;
+    setAddingMp(true);
+    try {
+      const res = await fetch('/api/skill-catalog/marketplace/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo: newMpRepo.trim() }),
+      });
+      if (res.ok) {
+        setNewMpRepo('');
+        setShowAddMp(false);
+        await fetchMarketplaces();
+      }
+    } finally {
+      setAddingMp(false);
+    }
+  };
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return plugins;
+    const q = search.toLowerCase();
+    return plugins.filter(p =>
+      p.name.toLowerCase().includes(q) || p.description.toLowerCase().includes(q)
     );
+  }, [plugins, search]);
+
+  if (loadingMp) {
+    return <p className="text-sm text-muted-foreground">Loading marketplaces…</p>;
   }
 
   return (
-    <Card>
-      <CardHeader className="py-3 px-4">
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-sm flex items-center gap-2">
-            <Store className="h-4 w-4" />
-            Skill Catalog
-          </CardTitle>
-          <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
-            <X className="h-4 w-4" />
-          </Button>
+    <div className="space-y-4">
+      {/* Marketplace selector + search */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex items-center gap-2">
+          <Label className="text-sm whitespace-nowrap">Marketplace</Label>
+          <select
+            value={selectedMp}
+            onChange={(e) => setSelectedMp(e.target.value)}
+            className="h-8 text-sm border rounded-md px-2 bg-background"
+          >
+            {marketplaces.map(mp => (
+              <option key={mp.name} value={mp.name}>
+                {mp.name} {mp.builtin ? '(built-in)' : ''}
+              </option>
+            ))}
+          </select>
         </div>
-      </CardHeader>
-      <CardContent className="py-2 px-4 space-y-3">
-        <div className="relative">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+        <div className="relative flex-1 min-w-[200px]">
+          <Search className="absolute left-2.5 top-2 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder="Search skills..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="pl-9"
+            placeholder="Search plugins…"
+            className="pl-8 h-8 text-sm"
           />
+          {search && (
+            <button onClick={() => setSearch('')} className="absolute right-2 top-2">
+              <X className="h-4 w-4 text-muted-foreground" />
+            </button>
+          )}
         </div>
-        {filtered.length === 0 ? (
-          <p className="text-xs text-muted-foreground py-2">
-            {catalog.length === 0 ? 'Loading...' : 'No matching skills found.'}
-          </p>
-        ) : (
-          <div className="space-y-2 max-h-60 overflow-y-auto">
-            {filtered.map((entry) => (
-              <div
-                key={entry.id}
-                className="flex items-start justify-between gap-2 p-2 rounded-md border text-sm"
-              >
-                <div className="min-w-0">
-                  <p className="font-medium truncate">{entry.name}</p>
-                  <p className="text-xs text-muted-foreground line-clamp-2">{entry.description}</p>
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={installing === entry.id}
-                  onClick={() => handleInstall(entry)}
-                >
-                  {installing === entry.id ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <Download className="h-3 w-3" />
-                  )}
-                </Button>
+        <Button size="sm" variant="outline" onClick={() => setShowAddMp(!showAddMp)}>
+          <Plus className="h-4 w-4 mr-1" />
+          Add Marketplace
+        </Button>
+      </div>
+
+      {/* Add marketplace form */}
+      {showAddMp && (
+        <Card>
+          <CardContent className="pt-4">
+            <form onSubmit={handleAddMarketplace} className="flex items-end gap-3">
+              <div className="flex-1 space-y-1">
+                <Label className="text-sm">GitHub Repository (owner/repo)</Label>
+                <Input
+                  value={newMpRepo}
+                  onChange={(e) => setNewMpRepo(e.target.value)}
+                  placeholder="owner/repo"
+                  className="h-8 text-sm"
+                  required
+                />
               </div>
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
+              <Button type="submit" size="sm" disabled={addingMp}>
+                {addingMp ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Register'}
+              </Button>
+              <Button type="button" variant="ghost" size="sm" onClick={() => setShowAddMp(false)}>Cancel</Button>
+            </form>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Plugin grid */}
+      {loadingPlugins ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Loading plugins from {selectedMp}…
+        </div>
+      ) : filtered.length === 0 ? (
+        <p className="text-sm text-muted-foreground py-4">
+          {search ? 'No plugins match your search.' : 'No plugins found in this marketplace.'}
+        </p>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {filtered.map(plugin => {
+            const alreadyInstalled = isInstalled(plugin.name, selectedMp);
+            const busy = installing === plugin.name;
+            return (
+              <Card key={plugin.name} className="flex flex-col">
+                <CardHeader className="py-3 px-4 pb-1">
+                  <div className="flex items-center gap-2">
+                    <CardTitle className="text-sm font-mono">{plugin.name}</CardTitle>
+                    {alreadyInstalled && (
+                      <Badge variant="default" className="text-xs">installed</Badge>
+                    )}
+                  </div>
+                </CardHeader>
+                <CardContent className="pt-1 pb-3 px-4 flex-1 flex flex-col justify-between">
+                  <p className="text-xs text-muted-foreground mb-3 line-clamp-2">{plugin.description}</p>
+                  <div>
+                    {alreadyInstalled ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="text-xs text-destructive hover:text-destructive"
+                        disabled={busy}
+                        onClick={() => handleUninstall(plugin.name, selectedMp)}
+                      >
+                        {busy ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Trash2 className="h-3 w-3 mr-1" />}
+                        Uninstall
+                      </Button>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="text-xs"
+                        disabled={busy}
+                        onClick={() => handleInstall(plugin.name, selectedMp)}
+                      >
+                        {busy ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Download className="h-3 w-3 mr-1" />}
+                        Install
+                      </Button>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
+      <p className="text-xs text-muted-foreground">
+        {filtered.length} plugin{filtered.length !== 1 ? 's' : ''} in {selectedMp}
+        {search ? ` matching "${search}"` : ''}
+      </p>
+    </div>
   );
 }
 
+// ---------------------------------------------------------------------------
+// Page
+// ---------------------------------------------------------------------------
+
 export default function ProjectSkillsPage() {
   const { id } = useParams<{ id: string }>();
-  const [data, setData] = useState<ProjectPlugins | null>(null);
+  const [config, setConfig] = useState<CopilotConfig | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [showAddMcp, setShowAddMcp] = useState(false);
+  const [mcpName, setMcpName] = useState('');
+  const [mcpCommand, setMcpCommand] = useState('');
+  const [mcpArgs, setMcpArgs] = useState('');
   const [expandedPlugins, setExpandedPlugins] = useState<Set<string>>(new Set());
-  const [expandedServers, setExpandedServers] = useState<Set<string>>(new Set());
+  const [agentsMdContent, setAgentsMdContent] = useState<string | null>(null);
 
-  // New MCP server form
-  const [showAddServer, setShowAddServer] = useState(false);
-  const [newServerName, setNewServerName] = useState('');
-  const [newServerCommand, setNewServerCommand] = useState('');
-  const [newServerArgs, setNewServerArgs] = useState('');
-
-  const fetchData = useCallback(() => {
-    if (!id) return;
-    fetch(`/api/projects/${id}/skills`)
-      .then((r) => r.json())
-      .then((d) => setData(d))
-      .catch(() => {});
+  const fetchConfig = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/copilot-config?projectId=${id}`);
+      if (res.ok) setConfig(await res.json());
+    } finally {
+      setLoading(false);
+    }
   }, [id]);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    fetchConfig();
+  }, [fetchConfig]);
 
   const togglePlugin = (name: string) => {
     setExpandedPlugins((prev) => {
@@ -196,252 +356,307 @@ export default function ProjectSkillsPage() {
     });
   };
 
-  const toggleServer = (name: string) => {
-    setExpandedServers((prev) => {
-      const next = new Set(prev);
-      next.has(name) ? next.delete(name) : next.add(name);
-      return next;
-    });
-  };
-
-  const addServer = async (e: React.FormEvent) => {
+  const addMcpServer = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!id) return;
-    const args = newServerArgs
-      .split(/\s+/)
+    if (!mcpName.trim() || !mcpCommand.trim()) return;
+    const args = mcpArgs
+      .split(',')
       .map((a) => a.trim())
       .filter(Boolean);
-    await fetch(`/api/projects/${id}/skills/mcp-servers`, {
+    await fetch('/api/copilot-config/mcp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        name: newServerName,
-        config: { command: newServerCommand, args },
+        name: mcpName.trim(),
+        config: { type: 'stdio', command: mcpCommand.trim(), args },
       }),
     });
-    setNewServerName('');
-    setNewServerCommand('');
-    setNewServerArgs('');
-    setShowAddServer(false);
-    fetchData();
+    setShowAddMcp(false);
+    setMcpName('');
+    setMcpCommand('');
+    setMcpArgs('');
+    fetchConfig();
   };
 
-  const removeServer = async (name: string) => {
-    if (!id) return;
+  const deleteMcpServer = async (name: string) => {
     if (!confirm(`Remove MCP server "${name}"?`)) return;
-    await fetch(`/api/projects/${id}/skills/mcp-servers/${encodeURIComponent(name)}`, {
+    await fetch(`/api/copilot-config/mcp?name=${encodeURIComponent(name)}`, {
       method: 'DELETE',
     });
-    fetchData();
+    fetchConfig();
   };
 
-  if (!data) return <div className="p-6 text-muted-foreground">Loading skills…</div>;
+  if (loading) {
+    return (
+      <div className="p-6">
+        <p className="text-sm text-muted-foreground">Loading Copilot configuration…</p>
+      </div>
+    );
+  }
+
+  if (!config) {
+    return (
+      <div className="p-6">
+        <p className="text-sm text-destructive">Failed to load Copilot configuration.</p>
+      </div>
+    );
+  }
+
+  const mcpEntries = Object.entries(config.mcpServers) as [string, McpServerConfig][];
 
   return (
-    <div className="p-6 space-y-6 max-w-2xl">
-      {/* Plugins section */}
+    <div className="p-6 space-y-8 max-w-4xl overflow-y-auto h-full">
+      {/* ─── Skill Catalog (Dialog) ─── */}
+      <Dialog>
+        <DialogTrigger render={
+          <Button variant="outline" size="sm">
+            <Store className="h-4 w-4 mr-2" />
+            Skill Catalog
+          </Button>
+        } />
+        <DialogContent className="sm:max-w-2xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Skill Catalog</DialogTitle>
+          </DialogHeader>
+          <SkillCatalog onInstallChanged={fetchConfig} />
+        </DialogContent>
+      </Dialog>
+
+      {/* ─── Section A: Installed Plugins & Skills ─── */}
       <section className="space-y-3">
         <div className="flex items-center gap-2">
-          <Plug className="h-5 w-5" />
-          <h3 className="text-lg font-semibold">Plugins</h3>
-          <Badge variant="secondary">{data.plugins.length}</Badge>
+          <Plug className="h-5 w-5 text-muted-foreground" />
+          <h3 className="text-lg font-semibold">Installed Plugins</h3>
+          <Badge variant="outline" className="text-xs ml-auto">
+            read-only
+          </Badge>
         </div>
 
-        {data.plugins.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No plugins loaded.</p>
+        {config.plugins.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No plugins installed.</p>
         ) : (
           <div className="space-y-2">
-            {data.plugins.map((plugin) => (
-              <Card key={plugin.name}>
-                <CardHeader
-                  className="py-3 px-4 cursor-pointer"
-                  onClick={() => togglePlugin(plugin.name)}
-                >
-                  <div className="flex items-center gap-2">
-                    {expandedPlugins.has(plugin.name) ? (
-                      <ChevronDown className="h-4 w-4" />
-                    ) : (
-                      <ChevronRight className="h-4 w-4" />
-                    )}
-                    <CardTitle className="text-sm">{plugin.name}</CardTitle>
-                    <Badge variant="outline" className="text-xs">
-                      {plugin.skills.length} skill{plugin.skills.length !== 1 ? 's' : ''}
-                    </Badge>
-                  </div>
-                  {plugin.description && (
-                    <p className="text-xs text-muted-foreground ml-6">{plugin.description}</p>
-                  )}
-                </CardHeader>
-                {expandedPlugins.has(plugin.name) && (
-                  <CardContent className="py-2 px-4">
-                    <div className="space-y-1 ml-6">
-                      {plugin.skills.map((skill) => (
-                        <div key={skill.name} className="text-sm">
-                          <span className="font-mono text-xs">{skill.name}</span>
-                          {skill.description && (
-                            <span className="text-muted-foreground ml-2 text-xs">
-                              — {skill.description}
-                            </span>
-                          )}
-                        </div>
-                      ))}
+            {config.plugins.map((plugin) => {
+              const expanded = expandedPlugins.has(plugin.name);
+              return (
+                <Card key={plugin.name}>
+                  <CardHeader className="py-3 px-4 cursor-pointer" onClick={() => togglePlugin(plugin.name)}>
+                    <div className="flex items-center gap-2">
+                      {expanded ? (
+                        <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                      )}
+                      <CardTitle className="text-sm">{plugin.name}</CardTitle>
+                      <Badge variant="outline" className="text-xs">
+                        {plugin.marketplace}
+                      </Badge>
+                      <span className="text-xs text-muted-foreground">v{plugin.version}</span>
+                      <Badge
+                        variant={plugin.enabled ? 'default' : 'secondary'}
+                        className="text-xs ml-auto"
+                      >
+                        {plugin.enabled ? 'enabled' : 'disabled'}
+                      </Badge>
                     </div>
-                  </CardContent>
-                )}
-              </Card>
-            ))}
+                  </CardHeader>
+                  {expanded && plugin.skills.length > 0 && (
+                    <CardContent className="pt-0 pb-3 px-4">
+                      <ul className="space-y-1 ml-6">
+                        {plugin.skills.map((skill) => (
+                          <li key={skill.name} className="text-sm text-muted-foreground flex items-center gap-2">
+                            <span className="inline-block w-1.5 h-1.5 rounded-full bg-muted-foreground/40" />
+                            {skill.name}
+                          </li>
+                        ))}
+                      </ul>
+                    </CardContent>
+                  )}
+                </Card>
+              );
+            })}
           </div>
         )}
       </section>
 
-      {/* MCP Servers section */}
+      {/* ─── Section B: MCP Servers ─── */}
       <section className="space-y-3">
         <div className="flex items-center gap-2">
-          <Server className="h-5 w-5" />
+          <Server className="h-5 w-5 text-muted-foreground" />
           <h3 className="text-lg font-semibold">MCP Servers</h3>
-          <Badge variant="secondary">{Object.keys(data.mcpServers).length}</Badge>
+          <Button
+            size="sm"
+            variant="outline"
+            className="ml-auto"
+            onClick={() => setShowAddMcp(!showAddMcp)}
+          >
+            <Plus className="h-4 w-4 mr-1" />
+            Add
+          </Button>
         </div>
 
-        {Object.keys(data.mcpServers).length === 0 ? (
+        {showAddMcp && (
+          <Card>
+            <CardContent className="pt-4">
+              <form onSubmit={addMcpServer} className="space-y-3">
+                <div className="space-y-1">
+                  <Label>Name</Label>
+                  <Input
+                    value={mcpName}
+                    onChange={(e) => setMcpName(e.target.value)}
+                    placeholder="my-mcp-server"
+                    required
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label>Command</Label>
+                  <Input
+                    value={mcpCommand}
+                    onChange={(e) => setMcpCommand(e.target.value)}
+                    placeholder="npx"
+                    required
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label>Args (comma-separated)</Label>
+                  <Input
+                    value={mcpArgs}
+                    onChange={(e) => setMcpArgs(e.target.value)}
+                    placeholder="@my/server, serve"
+                    className="font-mono text-sm"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <Button type="submit" size="sm">
+                    Save
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setShowAddMcp(false)}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </form>
+            </CardContent>
+          </Card>
+        )}
+
+        {mcpEntries.length === 0 && !showAddMcp ? (
           <p className="text-sm text-muted-foreground">No MCP servers configured.</p>
         ) : (
           <div className="space-y-2">
-            {Object.entries(data.mcpServers).map(([name, config]) => (
+            {mcpEntries.map(([name, srv]) => (
               <Card key={name}>
-                <CardHeader
-                  className="py-3 px-4 cursor-pointer"
-                  onClick={() => toggleServer(name)}
-                >
+                <CardHeader className="py-3 px-4">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      {expandedServers.has(name) ? (
-                        <ChevronDown className="h-4 w-4" />
-                      ) : (
-                        <ChevronRight className="h-4 w-4" />
-                      )}
                       <CardTitle className="text-sm font-mono">{name}</CardTitle>
+                      <Badge variant="outline" className="text-xs">
+                        {srv.type}
+                      </Badge>
                     </div>
                     <Button
                       variant="ghost"
-                      size="sm"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        removeServer(name);
-                      }}
+                      size="icon"
+                      className="h-7 w-7 text-destructive"
+                      onClick={() => deleteMcpServer(name)}
                     >
-                      <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                      <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
                 </CardHeader>
-                {expandedServers.has(name) && (
-                  <CardContent className="py-2 px-4 ml-6 text-xs font-mono space-y-1">
-                    <p>
-                      <span className="text-muted-foreground">command:</span> {config.command}
-                    </p>
-                    {config.args && config.args.length > 0 && (
-                      <p>
-                        <span className="text-muted-foreground">args:</span> {config.args.join(' ')}
-                      </p>
-                    )}
-                    {config.env && Object.keys(config.env).length > 0 && (
-                      <div>
-                        <span className="text-muted-foreground">env:</span>
-                        {Object.entries(config.env).map(([k, v]) => (
-                          <p key={k} className="ml-4">
-                            {k}={v}
-                          </p>
-                        ))}
-                      </div>
-                    )}
-                  </CardContent>
-                )}
+                <CardContent className="pt-0 pb-3 px-4">
+                  <code className="text-xs text-muted-foreground">
+                    {srv.command} {srv.args?.join(' ')}
+                  </code>
+                </CardContent>
               </Card>
             ))}
           </div>
         )}
-
-        <div className="flex gap-2">
-          {!showAddServer ? (
-            <Button variant="outline" size="sm" onClick={() => setShowAddServer(true)}>
-              <Plus className="h-4 w-4 mr-2" />
-              Add MCP Server
-            </Button>
-          ) : (
-            <Card className="w-full">
-              <CardContent className="py-3 px-4">
-                <form onSubmit={addServer} className="space-y-3">
-                  <div className="space-y-1">
-                    <Label className="text-xs">Server Name</Label>
-                    <Input
-                      value={newServerName}
-                      onChange={(e) => setNewServerName(e.target.value)}
-                      placeholder="my-server"
-                      required
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs">Command</Label>
-                    <Input
-                      value={newServerCommand}
-                      onChange={(e) => setNewServerCommand(e.target.value)}
-                      placeholder="npx"
-                      required
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs">Arguments (space-separated)</Label>
-                    <Input
-                      value={newServerArgs}
-                      onChange={(e) => setNewServerArgs(e.target.value)}
-                      placeholder="-y @modelcontextprotocol/server-filesystem"
-                    />
-                  </div>
-                  <div className="flex gap-2">
-                    <Button type="submit" size="sm">
-                      Add
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setShowAddServer(false)}
-                    >
-                      Cancel
-                    </Button>
-                  </div>
-                </form>
-              </CardContent>
-            </Card>
-          )}
-
-          <SkillCatalog
-            projectId={id!}
-            existingServers={data.mcpServers}
-            onInstalled={fetchData}
-          />
-        </div>
       </section>
 
-      {/* Custom Instructions section */}
+      {/* ─── Section C: Repo Context ─── */}
       <section className="space-y-3">
         <div className="flex items-center gap-2">
-          <FileText className="h-5 w-5" />
-          <h3 className="text-lg font-semibold">Custom Instructions</h3>
+          <FileText className="h-5 w-5 text-muted-foreground" />
+          <h3 className="text-lg font-semibold">Repo Context</h3>
+          <Badge variant="outline" className="text-xs ml-auto">
+            read-only
+          </Badge>
         </div>
-        {data.customInstructions ? (
-          <Card>
-            <CardContent className="py-3 px-4">
-              <pre className="text-xs whitespace-pre-wrap font-mono text-muted-foreground">
-                {data.customInstructions}
+
+        <Card>
+          <CardContent className="pt-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm">AGENTS.md</span>
+              {config.repoSkills.agentsMd ? (
+                <div className="flex items-center gap-2">
+                  <Badge variant="default" className="text-xs">
+                    present
+                  </Badge>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-xs"
+                    onClick={async () => {
+                      if (agentsMdContent !== null) {
+                        setAgentsMdContent(null);
+                        return;
+                      }
+                      try {
+                        const res = await fetch(
+                          `/api/copilot-config/agents-md?projectId=${id}`
+                        );
+                        if (res.ok) {
+                          const data = await res.json();
+                          setAgentsMdContent(data.content);
+                        }
+                      } catch {
+                        // ignore
+                      }
+                    }}
+                  >
+                    {agentsMdContent !== null ? 'Hide' : 'View'}
+                  </Button>
+                </div>
+              ) : (
+                <Badge variant="secondary" className="text-xs">
+                  not found
+                </Badge>
+              )}
+            </div>
+
+            {agentsMdContent !== null && (
+              <pre className="text-xs text-muted-foreground bg-muted p-3 rounded-md overflow-auto max-h-64 whitespace-pre-wrap">
+                {agentsMdContent}
               </pre>
-            </CardContent>
-          </Card>
-        ) : (
-          <p className="text-sm text-muted-foreground">
-            No custom instructions. Add a <code className="text-xs">.github/copilot-instructions.md</code> file
-            to your repo.
-          </p>
-        )}
+            )}
+
+            {config.repoSkills.customInstructions.length > 0 && (
+              <div className="space-y-1">
+                <span className="text-sm font-medium">.github/copilot/</span>
+                <ul className="ml-4 space-y-0.5">
+                  {config.repoSkills.customInstructions.map((f) => (
+                    <li key={f} className="text-sm text-muted-foreground flex items-center gap-2">
+                      <FileText className="h-3 w-3" />
+                      {f}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {!config.repoSkills.agentsMd && config.repoSkills.customInstructions.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                No repo-level context files found.
+              </p>
+            )}
+          </CardContent>
+        </Card>
       </section>
     </div>
   );
