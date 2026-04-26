@@ -55,13 +55,19 @@ function initSchema(db: Database.Database) {
     CREATE TABLE IF NOT EXISTS cli_sessions (
       id                 TEXT PRIMARY KEY,
       user_id            TEXT NOT NULL REFERENCES users(id),
-      project_id         TEXT REFERENCES projects(id) ON DELETE SET NULL,
       copilot_session_id TEXT,
       started_at         TEXT DEFAULT (datetime('now')),
       ended_at           TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_cli_sessions_user_id ON cli_sessions(user_id);
-    CREATE INDEX IF NOT EXISTS idx_cli_sessions_project_id ON cli_sessions(project_id);
   `);
+
+  // Migrations: add columns that may not exist in older DBs
+  const cols = db.pragma('table_info(cli_sessions)') as Array<{ name: string }>;
+  const colNames = new Set(cols.map((c) => c.name));
+  if (!colNames.has('project_id')) {
+    db.exec('ALTER TABLE cli_sessions ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_cli_sessions_project_id ON cli_sessions(project_id)');
+  }
 }
