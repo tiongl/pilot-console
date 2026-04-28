@@ -23,4 +23,11 @@ export default defineConfig({
       },
     },
   },
+  test: {
+    globals: true,
+    environment: 'happy-dom',
+    setupFiles: ['./src/test/setup.ts'],
+    root: '.',
+    include: ['src/**/*.test.{ts,tsx}', 'hooks/**/*.test.{ts,tsx}', 'lib/**/*.test.{ts,tsx}'],
+  },
 });

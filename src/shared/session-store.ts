@@ -4,7 +4,7 @@ import os from 'os';
 import { getDb } from './db';
 import type { CliSession, SessionWithUser } from './types';
 
-const COPILOT_DB_PATH = path.join(os.homedir(), '.copilot', 'session-state', 'session_store.db');
+const COPILOT_DB_PATH = path.join(os.homedir(), '.copilot', 'session-store.db');
 
 function getCopilotDb(): Database.Database | null {
   try {
@@ -54,6 +54,53 @@ export function listAllSessions(): SessionWithUser[] {
     userDisplayName: (r.user_display_name as string) ?? null,
     userEmail: (r.user_email as string) ?? null,
   }));
+}
+
+export interface CopilotSessionSummary {
+  id: string;
+  summary: string | null;
+  cwd: string | null;
+  createdAt: string;
+  turnCount: number;
+}
+
+/** Lists Copilot CLI sessions whose cwd matches a project repo path */
+export function listCopilotSessionsForProject(repoPath: string, limit = 50): CopilotSessionSummary[] {
+  const cpDb = getCopilotDb();
+  if (!cpDb) return [];
+  try {
+    const normalized = repoPath.replace(/\\/g, '/');
+    const rows = cpDb.prepare(`
+      SELECT s.id, s.summary, s.cwd, s.created_at,
+             (SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id) as turn_count
+      FROM sessions s
+      WHERE s.cwd IS NOT NULL
+      ORDER BY s.created_at DESC
+      LIMIT ?
+    `).all(limit * 3) as Record<string, unknown>[];
+
+    const isWindows = process.platform === 'win32';
+    const results: CopilotSessionSummary[] = [];
+    for (const row of rows) {
+      const cwd = ((row.cwd as string) ?? '').replace(/\\/g, '/');
+      const match = isWindows
+        ? cwd.toLowerCase().startsWith(normalized.toLowerCase())
+        : cwd.startsWith(normalized);
+      if (match) {
+        results.push({
+          id: row.id as string,
+          summary: (row.summary as string) ?? null,
+          cwd: row.cwd as string,
+          createdAt: row.created_at as string,
+          turnCount: row.turn_count as number,
+        });
+        if (results.length >= limit) break;
+      }
+    }
+    return results;
+  } finally {
+    cpDb.close();
+  }
 }
 
 /** Reads detail from the Copilot session store by copilot session ID */

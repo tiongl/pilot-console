@@ -1,13 +1,29 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { Clock, FileText, X } from 'lucide-react';
+import { Clock, MessageSquare, User, Bot, X } from 'lucide-react';
 
-interface SessionRecord {
+interface CopilotSession {
   id: string;
-  startedAt: string;
-  endedAt: string | null;
-  hasTranscript: number;
+  summary: string | null;
+  cwd: string | null;
+  createdAt: string;
+  turnCount: number;
+}
+
+interface CopilotTurn {
+  turn_index: number;
+  user_message: string;
+  assistant_response: string;
+  timestamp: string;
+}
+
+interface SessionDetail {
+  id: string;
+  summary: string | null;
+  cwd: string | null;
+  createdAt: string;
+  turns: CopilotTurn[];
 }
 
 interface Props {
@@ -15,9 +31,8 @@ interface Props {
 }
 
 export default function SessionHistory({ projectId }: Props) {
-  const [sessions, setSessions] = useState<SessionRecord[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [transcript, setTranscript] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<CopilotSession[]>([]);
+  const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [loading, setLoading] = useState(true);
 
   const fetchSessions = useCallback(async () => {
@@ -34,39 +49,28 @@ export default function SessionHistory({ projectId }: Props) {
 
   useEffect(() => { fetchSessions(); }, [fetchSessions]);
 
-  const viewTranscript = async (sessionId: string) => {
-    if (selectedId === sessionId) {
-      setSelectedId(null);
-      setTranscript(null);
+  const viewSession = async (sessionId: string) => {
+    if (detail?.id === sessionId) {
+      setDetail(null);
       return;
     }
-    setSelectedId(sessionId);
     try {
       const res = await fetch(`/api/sessions/${sessionId}/transcript`);
       if (res.ok) {
         const data = await res.json();
-        setTranscript(data.transcript);
-      } else {
-        setTranscript(null);
+        setDetail(data);
       }
     } catch {
-      setTranscript(null);
+      setDetail(null);
     }
   };
 
-  const formatDate = (d: string) => {
-    const date = new Date(d + 'Z');
+  const formatDate = (d: string | null | undefined) => {
+    if (!d) return 'Unknown date';
+    const date = new Date(d);
+    if (isNaN(date.getTime())) return 'Unknown date';
     return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' +
            date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-  };
-
-  const formatDuration = (start: string, end: string | null) => {
-    if (!end) return 'active';
-    const ms = new Date(end + 'Z').getTime() - new Date(start + 'Z').getTime();
-    const mins = Math.floor(ms / 60000);
-    if (mins < 1) return '<1m';
-    if (mins < 60) return `${mins}m`;
-    return `${Math.floor(mins / 60)}h ${mins % 60}m`;
   };
 
   if (loading) return <div className="p-4 text-xs text-muted-foreground">Loading…</div>;
@@ -78,17 +82,34 @@ export default function SessionHistory({ projectId }: Props) {
         <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Session History</h3>
       </div>
 
-      {selectedId && transcript !== null ? (
+      {detail ? (
         <div className="flex-1 flex flex-col overflow-hidden">
           <div className="flex items-center justify-between px-3 py-1.5 border-b bg-muted/30">
-            <span className="text-xs text-muted-foreground truncate">Transcript</span>
-            <button onClick={() => { setSelectedId(null); setTranscript(null); }} className="text-muted-foreground hover:text-foreground">
+            <span className="text-xs text-muted-foreground truncate">
+              {detail.summary || formatDate(detail.createdAt)}
+            </span>
+            <button onClick={() => setDetail(null)} className="text-muted-foreground hover:text-foreground">
               <X className="h-3.5 w-3.5" />
             </button>
           </div>
-          <pre className="flex-1 overflow-auto p-3 text-xs font-mono whitespace-pre-wrap bg-[#1e1e2e] text-[#cdd6f4]">
-            {transcript}
-          </pre>
+          <div className="flex-1 overflow-y-auto p-3 space-y-3">
+            {detail.turns.length === 0 ? (
+              <p className="text-xs text-muted-foreground text-center py-4">No conversation turns</p>
+            ) : (
+              detail.turns.map((turn) => (
+                <div key={turn.turn_index} className="space-y-2">
+                  <div className="flex items-start gap-2">
+                    <User className="h-3.5 w-3.5 text-blue-400 mt-0.5 shrink-0" />
+                    <pre className="text-xs whitespace-pre-wrap break-words flex-1 text-foreground">{turn.user_message}</pre>
+                  </div>
+                  <div className="flex items-start gap-2 pl-1">
+                    <Bot className="h-3.5 w-3.5 text-green-400 mt-0.5 shrink-0" />
+                    <pre className="text-xs whitespace-pre-wrap break-words flex-1 text-muted-foreground">{turn.assistant_response}</pre>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto">
@@ -100,19 +121,20 @@ export default function SessionHistory({ projectId }: Props) {
                 <div
                   key={s.id}
                   className="px-3 py-2 hover:bg-accent/50 cursor-pointer flex items-center gap-2"
-                  onClick={() => s.hasTranscript && viewTranscript(s.id)}
+                  onClick={() => viewSession(s.id)}
                 >
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium truncate">{formatDate(s.startedAt)}</p>
+                    <p className="text-xs font-medium truncate">
+                      {s.summary || formatDate(s.createdAt)}
+                    </p>
                     <p className="text-xs text-muted-foreground">
-                      {formatDuration(s.startedAt, s.endedAt)}
+                      {formatDate(s.createdAt)}
                     </p>
                   </div>
-                  {s.hasTranscript ? (
-                    <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                  ) : (
-                    <span className="text-xs text-muted-foreground">no log</span>
-                  )}
+                  <div className="flex items-center gap-1 text-muted-foreground shrink-0">
+                    <MessageSquare className="h-3 w-3" />
+                    <span className="text-xs">{s.turnCount}</span>
+                  </div>
                 </div>
               ))}
             </div>

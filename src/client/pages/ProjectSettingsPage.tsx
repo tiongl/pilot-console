@@ -55,7 +55,7 @@ export default function ProjectSettingsPage() {
   };
 
   const handleDelete = async () => {
-    if (!confirm('Delete this project? This cannot be undone.')) return;
+    if (!confirm('Delete this project from GC Clippy? Your git repository will not be affected.')) return;
     await fetch(`/api/projects/${id}`, { method: 'DELETE' });
     navigate('/');
   };
@@ -104,7 +104,7 @@ export default function ProjectSettingsPage() {
       <Card className="border-destructive/50">
         <CardHeader>
           <CardTitle className="text-destructive">Danger Zone</CardTitle>
-          <CardDescription>Permanently delete this project and all its data.</CardDescription>
+          <CardDescription>Remove this project from GC Clippy. Your git repository on disk will not be deleted or modified.</CardDescription>
         </CardHeader>
         <CardContent>
           <Button variant="destructive" onClick={handleDelete}>

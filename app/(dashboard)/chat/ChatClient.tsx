@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useCliSocket } from '@/hooks/useCliSocket';
-import TerminalPane from '@/components/terminal/TerminalPane';
+import TerminalPane, { type TerminalPaneAPI, TERMINAL_FONTS } from '@/components/terminal/TerminalPane';
 import { Button } from '@/components/ui/button';
-import { Square, Minus, Plus, Palette, X as XIcon } from 'lucide-react';
+import { Square, Minus, Plus, Palette, Type, X as XIcon } from 'lucide-react';
 import { THEMES } from '@/lib/terminal-themes';
 
 interface Props {
@@ -15,6 +15,8 @@ interface Props {
 interface TabMeta {
   id: string;
   label: string;
+  themeName: string;
+  fontFamily: string;
 }
 
 let tabCounter = 0;
@@ -24,31 +26,36 @@ let tabCounter = 0;
  * Parent only manages tab list and active tab — no output flows through parent state.
  */
 function TerminalTab({
-  projectId, fontSize, themeName, active, forceNew, onStatusChange, onKill,
+  projectId, fontSize, fontFamily, themeName, active, forceNew, onStatusChange, onKill,
 }: {
   projectId?: string;
   fontSize: number;
+  fontFamily: string;
   themeName: string;
   active: boolean;
   forceNew: boolean;
   onStatusChange: (status: string) => void;
   onKill: (sessionId: string | null) => void;
 }) {
-  const [output, setOutput] = useState('');
   const sessionIdRef = useRef<string | null>(null);
-  const fitTermRef = useRef<(() => void) | null>(null);
+  const termApiRef = useRef<TerminalPaneAPI | null>(null);
+  const pendingOutput = useRef<string[]>([]);
 
-  const appendOutput = useCallback((data: string) => {
-    setOutput(prev => prev + data);
+  const writeToTerm = useCallback((data: string) => {
+    if (termApiRef.current) {
+      termApiRef.current.write(data);
+    } else {
+      pendingOutput.current.push(data);
+    }
   }, []);
 
   const { state, send } = useCliSocket({
     projectId,
     forceNew,
-    onOutput: appendOutput,
-    onError: (data) => appendOutput(`\x1b[31m${data}\x1b[0m`),
+    onOutput: writeToTerm,
+    onError: (data) => writeToTerm(`\x1b[31m${data}\x1b[0m`),
     onExit: (code) => {
-      appendOutput(`\r\n\x1b[33m[Process exited with code ${code}]\x1b[0m\r\n`);
+      writeToTerm(`\r\n\x1b[33m[Process exited with code ${code}]\x1b[0m\r\n`);
     },
     onReady: (sessionId) => {
       sessionIdRef.current = sessionId;
@@ -60,8 +67,8 @@ function TerminalTab({
 
   // Re-fit terminal when tab becomes active (ensures proper dimensions)
   useEffect(() => {
-    if (active && fitTermRef.current) {
-      fitTermRef.current();
+    if (active && termApiRef.current) {
+      termApiRef.current.fit();
     }
   }, [active]);
 
@@ -70,33 +77,42 @@ function TerminalTab({
     (onKill as unknown as { _getSessionId?: () => string | null })._getSessionId = () => sessionIdRef.current;
   });
 
+  const handleTermReady = useCallback((api: TerminalPaneAPI) => {
+    termApiRef.current = api;
+    if (pendingOutput.current.length > 0) {
+      const buffered = pendingOutput.current.join('');
+      pendingOutput.current = [];
+      api.write(buffered);
+    }
+  }, []);
+
   return (
     <div className="absolute inset-0" style={{
       zIndex: active ? 1 : 0,
       visibility: active ? 'visible' : 'hidden',
     }}>
       <TerminalPane
-        output={output}
         onInput={(data) => send({ type: 'input', data })}
         onResize={(cols, rows) => send({ type: 'resize', cols, rows })}
         fontSize={fontSize}
+        fontFamily={fontFamily}
         themeName={themeName}
-        onFitRef={(fn) => { fitTermRef.current = fn; }}
+        onReady={handleTermReady}
       />
     </div>
   );
 }
 
 export default function ChatClient({ userName: _userName, projectId }: Props) {
+  const defaultTheme = typeof window !== 'undefined' ? localStorage.getItem('gcclippy-theme') || 'Catppuccin' : 'Catppuccin';
+  const defaultFont = typeof window !== 'undefined' ? localStorage.getItem('gcclippy-font') || TERMINAL_FONTS[0].family : TERMINAL_FONTS[0].family;
+
   const [tabs, setTabs] = useState<TabMeta[]>(() => {
     tabCounter++;
-    return [{ id: `tab-${tabCounter}`, label: 'Terminal 1' }];
+    return [{ id: `tab-${tabCounter}`, label: 'Terminal 1', themeName: defaultTheme, fontFamily: defaultFont }];
   });
   const [activeTabId, setActiveTabId] = useState(tabs[0].id);
   const [fontSize, setFontSize] = useState(14);
-  const [themeName, setThemeName] = useState(() =>
-    typeof window !== 'undefined' ? localStorage.getItem('gcclippy-theme') || 'Catppuccin' : 'Catppuccin'
-  );
   const [tabStatuses, setTabStatuses] = useState<Record<string, string>>({});
 
   // Track which tabs need forceNew (all except the first one which uses find-or-create)
@@ -108,10 +124,10 @@ export default function ChatClient({ userName: _userName, projectId }: Props) {
 
   const addTab = useCallback(() => {
     tabCounter++;
-    const newTab: TabMeta = { id: `tab-${tabCounter}`, label: `Terminal ${tabCounter}` };
+    const newTab: TabMeta = { id: `tab-${tabCounter}`, label: `Terminal ${tabCounter}`, themeName: defaultTheme, fontFamily: defaultFont };
     setTabs(prev => [...prev, newTab]);
     setActiveTabId(newTab.id);
-  }, []);
+  }, [defaultTheme, defaultFont]);
 
   const closeTab = useCallback((tabId: string) => {
     // Kill the session for this tab
@@ -130,7 +146,7 @@ export default function ChatClient({ userName: _userName, projectId }: Props) {
       const next = prev.filter(t => t.id !== tabId);
       if (next.length === 0) {
         tabCounter++;
-        return [{ id: `tab-${tabCounter}`, label: `Terminal ${tabCounter}` }];
+        return [{ id: `tab-${tabCounter}`, label: `Terminal ${tabCounter}`, themeName: defaultTheme, fontFamily: defaultFont }];
       }
       return next;
     });
@@ -175,6 +191,19 @@ export default function ChatClient({ userName: _userName, projectId }: Props) {
 
   const activeStatus = tabStatuses[activeTabId] || 'closed';
   const statusColor = { open: 'bg-green-500', connecting: 'bg-yellow-500', closed: 'bg-gray-400', error: 'bg-red-500' }[activeStatus] ?? 'bg-gray-400';
+  const activeTab = tabs.find(t => t.id === activeTabId);
+  const activeThemeName = activeTab?.themeName ?? defaultTheme;
+  const activeFontFamily = activeTab?.fontFamily ?? defaultFont;
+
+  const setActiveTheme = useCallback((name: string) => {
+    setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, themeName: name } : t));
+    localStorage.setItem('gcclippy-theme', name);
+  }, [activeTabId]);
+
+  const setActiveFont = useCallback((family: string) => {
+    setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, fontFamily: family } : t));
+    localStorage.setItem('gcclippy-font', family);
+  }, [activeTabId]);
 
   return (
     <div className="flex h-full flex-col">
@@ -217,10 +246,20 @@ export default function ChatClient({ userName: _userName, projectId }: Props) {
         </div>
         <div className="flex items-center gap-2 px-3 shrink-0 border-l">
           <div className="flex items-center gap-1 border rounded-md px-1">
+            <Type className="h-3 w-3 text-muted-foreground ml-1" />
+            <select
+              value={activeFontFamily}
+              onChange={(e) => setActiveFont(e.target.value)}
+              className="h-6 text-xs bg-transparent border-none outline-none px-1 text-foreground"
+            >
+              {TERMINAL_FONTS.map(f => <option key={f.id} value={f.family}>{f.label}</option>)}
+            </select>
+          </div>
+          <div className="flex items-center gap-1 border rounded-md px-1">
             <Palette className="h-3 w-3 text-muted-foreground ml-1" />
             <select
-              value={themeName}
-              onChange={(e) => { setThemeName(e.target.value); localStorage.setItem('gcclippy-theme', e.target.value); }}
+              value={activeThemeName}
+              onChange={(e) => setActiveTheme(e.target.value)}
               className="h-6 text-xs bg-transparent border-none outline-none px-1 text-foreground"
             >
               {THEMES.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
@@ -258,7 +297,8 @@ export default function ChatClient({ userName: _userName, projectId }: Props) {
               key={tab.id}
               projectId={projectId}
               fontSize={fontSize}
-              themeName={themeName}
+              fontFamily={tab.fontFamily || defaultFont}
+              themeName={tab.themeName || defaultTheme}
               active={tab.id === activeTabId}
               forceNew={tab.id !== firstTabId.current}
               onStatusChange={statusCallbacksRef.current[tab.id]}
