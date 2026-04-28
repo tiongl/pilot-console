@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from 'react-router';
+import { Routes, Route, Navigate, useParams } from 'react-router';
 import { AuthProvider, useAuth } from './lib/auth-context';
 import LoginPage from './pages/LoginPage';
 import DashboardLayout from './pages/DashboardLayout';
@@ -14,6 +14,13 @@ import ProjectSkillsPage from './pages/ProjectSkillsPage';
 import ProjectSettingsPage from './pages/ProjectSettingsPage';
 import AdminPage from './pages/AdminPage';
 import AdminSessionsPage from './pages/AdminSessionsPage';
+import AdminDaemonPage from './pages/AdminDaemonPage';
+
+/** Forces ProjectChatPage to remount when switching projects */
+function ProjectChatPageKeyed() {
+  const { id } = useParams<{ id: string }>();
+  return <ProjectChatPage key={id} />;
+}
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -43,13 +50,14 @@ export function App() {
           <Route path="projects/new" element={<NewProjectPage />} />
           <Route path="projects/:id" element={<ProjectLayout />}>
             <Route index element={<Navigate to="chat" replace />} />
-            <Route path="chat" element={<ProjectChatPage />} />
+            <Route path="chat" element={<ProjectChatPageKeyed />} />
             <Route path="sessions" element={<ProjectSessionsPage />} />
             <Route path="skills" element={<ProjectSkillsPage />} />
             <Route path="settings" element={<ProjectSettingsPage />} />
           </Route>
           <Route path="admin" element={<AdminRoute><AdminPage /></AdminRoute>} />
           <Route path="admin/sessions" element={<AdminRoute><AdminSessionsPage /></AdminRoute>} />
+          <Route path="admin/daemon" element={<AdminRoute><AdminDaemonPage /></AdminRoute>} />
         </Route>
       </Routes>
     </AuthProvider>

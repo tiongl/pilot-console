@@ -23,6 +23,7 @@ export function useCliSocket(options: UseCliSocketOptions = {}) {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttempts = useRef(0);
   const knownSessionId = useRef<string | null>(null);
+  const pendingInput = useRef<WsClientMessage[]>([]);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -48,8 +49,17 @@ export function useCliSocket(options: UseCliSocketOptions = {}) {
     wsRef.current = ws;
 
     ws.onopen = () => {
+      console.log('[useCliSocket] WS opened');
       setState('open');
       reconnectAttempts.current = 0;
+      // Flush any input that was buffered while disconnected
+      if (pendingInput.current.length > 0) {
+        console.log(`[useCliSocket] flushing ${pendingInput.current.length} buffered messages`);
+        for (const msg of pendingInput.current) {
+          ws.send(JSON.stringify(msg));
+        }
+        pendingInput.current = [];
+      }
     };
 
     ws.onmessage = (event) => {
@@ -59,20 +69,31 @@ export function useCliSocket(options: UseCliSocketOptions = {}) {
       if (msg.type === 'output') opts.onOutput?.(msg.data);
       else if (msg.type === 'error') opts.onError?.(msg.data);
       else if (msg.type === 'exit') {
+        console.log(`[useCliSocket] exit: code=${msg.code}`);
         opts.onExit?.(msg.code);
         knownSessionId.current = null; // Session ended, create new on reconnect
       }
       else if (msg.type === 'ready') {
+        console.log(`[useCliSocket] ready: sessionId=${msg.sessionId}`);
         knownSessionId.current = msg.sessionId;
         opts.onReady?.(msg.sessionId);
       }
     };
 
-    ws.onerror = () => setState('error');
+    ws.onerror = () => {
+      console.error('[useCliSocket] WS error');
+      setState('error');
+    };
 
     ws.onclose = (evt) => {
+      console.log(`[useCliSocket] WS closed: code=${evt.code}, reason=${evt.reason}`);
       setState('closed');
       wsRef.current = null;
+      // Notify about daemon/session creation failures
+      if (evt.code === 4002) {
+        opts.onError?.(`Failed to create terminal session — the daemon may not be running. Check Admin → Daemon.`);
+        return; // Don't reconnect on daemon failure
+      }
       // Session not found — clear cached ID so next connect creates fresh
       if (evt.code === 4003) {
         knownSessionId.current = null;
@@ -96,6 +117,12 @@ export function useCliSocket(options: UseCliSocketOptions = {}) {
   const send = useCallback((msg: WsClientMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(msg));
+    } else if (msg.type === 'input') {
+      // Buffer input during disconnection so keystrokes aren't lost
+      pendingInput.current.push(msg);
+      console.log(`[useCliSocket] buffered input (readyState=${wsRef.current?.readyState})`);
+    } else {
+      console.warn(`[useCliSocket] send dropped (readyState=${wsRef.current?.readyState}):`, msg.type);
     }
   }, []);
 

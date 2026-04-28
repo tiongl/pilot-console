@@ -5,9 +5,12 @@
     "dev": "concurrently -n server,client \"npx tsx src/server/index.ts\" \"npx vite\"",
     "dev:server": "npx tsx src/server/index.ts",
     "dev:client": "npx vite",
+    "daemon": "npx tsx src/daemon/index.ts",
     "build": "npx vite build",
-    "start": "NODE_ENV=production npx tsx src/server/index.ts",
-    "lint": "eslint"
+    "start": "cross-env NODE_ENV=production npx tsx src/server/index.ts",
+    "lint": "eslint",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "bin": {
     "clippy": "./bin/clippy.js"
@@ -40,6 +43,9 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/cookie-parser": "^1.4.10",
     "@types/express": "^5.0.6",
@@ -50,8 +56,12 @@
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.7.0",
     "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
     "eslint": "^9",
+    "happy-dom": "^20.9.0",
+    "jsdom": "^27.0.1",
     "tailwindcss": "^4",
-    "vite": "^6.4.2"
+    "vite": "^6.4.2",
+    "vitest": "^4.1.5"
   }
 }

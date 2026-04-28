@@ -1,6 +1,6 @@
-import * as pty from 'node-pty';
 import { getDb } from './db';
 import { getProjectById } from './project-store';
+import { getDaemonClient } from '../daemon/client';
 
 const MAX_SCROLLBACK = 100_000; // chars to buffer for reconnection replay
 
@@ -8,20 +8,34 @@ export interface ManagedProcess {
   sessionId: string;
   userId: string;
   projectId: string | null;
-  ptyProcess: pty.IPty;
   outputBuffer: string;
   onOutput: ((data: string) => void) | null;
   onError: ((data: string) => void) | null;
   onExit: ((code: number) => void) | null;
   alive: boolean;
+  lastOutputAt: number;
+  lastExitCode: number | null;
+  exitedAt: number | null;
+  /** Tracks the currently active WebSocket connection (used to prevent stale detach) */
+  activeWsId: number | null;
 }
 
 const activeSessions = new Map<string, ManagedProcess>();
+const recentlyExited = new Map<string, ManagedProcess>();
+const EXITED_RETENTION_MS = 30_000;
+const BUSY_THRESHOLD_MS = 10_000;
+
+export type SessionStatus = 'idle' | 'busy' | 'exited';
+
+export function getSessionStatus(session: ManagedProcess): SessionStatus {
+  if (!session.alive) return 'exited';
+  if (session.lastOutputAt > 0 && Date.now() - session.lastOutputAt < BUSY_THRESHOLD_MS) return 'busy';
+  return 'idle';
+}
 
 const CLI_COMMAND = process.env.COPILOT_CLI_COMMAND ?? 'gh';
 const CLI_ARGS = (process.env.COPILOT_CLI_ARGS ?? 'copilot').split(' ').filter(Boolean);
 
-// node-pty on Windows needs the shell to resolve commands in PATH
 const IS_WINDOWS = process.platform === 'win32';
 const SHELL = IS_WINDOWS ? 'cmd.exe' : '/bin/bash';
 
@@ -38,14 +52,52 @@ export function findAllActiveSessions(userId: string, projectId: string | null):
   return [...activeSessions.values()].filter(s => s.userId === userId && s.projectId === projectId && s.alive);
 }
 
-/** Detach WS callbacks without killing the PTY */
-export function detachSession(sessionId: string): void {
+/** Detach WS callbacks without killing the PTY.
+ *  If wsId is provided, only detach if this WS is still the active one (prevents stale detach race). */
+export function detachSession(sessionId: string, wsId?: number): void {
   const session = activeSessions.get(sessionId);
   if (session) {
+    if (wsId !== undefined && session.activeWsId !== wsId) {
+      return;
+    }
     session.onOutput = null;
     session.onError = null;
     session.onExit = null;
+    session.activeWsId = null;
   }
+}
+
+/**
+ * Wire a ManagedProcess to the daemon's output/exit streams.
+ * Whenever the daemon sends output for this session, it arrives through the
+ * client singleton and is forwarded to the ManagedProcess callbacks.
+ */
+function wireDaemonListeners(managed: ManagedProcess) {
+  const client = getDaemonClient();
+
+  client.onOutput(managed.sessionId, (data: string) => {
+    managed.outputBuffer += data;
+    if (managed.outputBuffer.length > MAX_SCROLLBACK) {
+      managed.outputBuffer = managed.outputBuffer.slice(-MAX_SCROLLBACK);
+    }
+    managed.lastOutputAt = Date.now();
+    managed.onOutput?.(data);
+    extractAndStoreSessionId(managed.sessionId, data);
+  });
+
+  client.onExit(managed.sessionId, (code: number) => {
+    managed.alive = false;
+    managed.lastExitCode = code;
+    managed.exitedAt = Date.now();
+    managed.onExit?.(code);
+    activeSessions.delete(managed.sessionId);
+    recentlyExited.set(managed.sessionId, managed);
+    setTimeout(() => recentlyExited.delete(managed.sessionId), EXITED_RETENTION_MS);
+    client.removeListeners(managed.sessionId);
+    getDb()
+      .prepare("UPDATE cli_sessions SET ended_at = datetime('now'), output_log = ? WHERE id = ?")
+      .run(managed.outputBuffer || null, managed.sessionId);
+  });
 }
 
 export function createCliSession(userId: string, projectId?: string | null): ManagedProcess {
@@ -59,54 +111,51 @@ export function createCliSession(userId: string, projectId?: string | null): Man
     }
   }
 
-  // Use shell to resolve commands in PATH (node-pty needs full paths on Windows)
   const shellArgs = IS_WINDOWS
     ? ['/c', CLI_COMMAND, ...CLI_ARGS]
     : ['-c', `${CLI_COMMAND} ${CLI_ARGS.join(' ')}`];
-
-  const ptyProc = pty.spawn(SHELL, shellArgs, {
-    name: 'xterm-256color',
-    cols: 120,
-    rows: 30,
-    cwd: cwd || process.cwd(),
-    env: { ...process.env } as Record<string, string>,
-  });
 
   const managed: ManagedProcess = {
     sessionId,
     userId,
     projectId: projectId ?? null,
-    ptyProcess: ptyProc,
     outputBuffer: '',
     onOutput: null,
     onError: null,
     onExit: null,
     alive: true,
+    lastOutputAt: 0,
+    lastExitCode: null,
+    exitedAt: null,
+    activeWsId: null,
   };
 
-  ptyProc.onData((data: string) => {
-    // Always buffer output for reconnection replay
-    managed.outputBuffer += data;
-    if (managed.outputBuffer.length > MAX_SCROLLBACK) {
-      managed.outputBuffer = managed.outputBuffer.slice(-MAX_SCROLLBACK);
-    }
-    managed.onOutput?.(data);
-    extractAndStoreSessionId(sessionId, data);
-  });
-
-  ptyProc.onExit(({ exitCode }) => {
+  // Create session in daemon (async, but we fire-and-forget for API compat)
+  const client = getDaemonClient();
+  client.createSession({
+    sessionId,
+    cwd: cwd || process.cwd(),
+    shell: SHELL,
+    args: shellArgs,
+    cols: 120,
+    rows: 30,
+    meta: { userId, projectId: projectId ?? null },
+  }).then(() => {
+    // Attach to receive output
+    return client.attachSession(sessionId);
+  }).catch((err) => {
+    console.error(`[cli-bridge] Failed to create daemon session ${sessionId}:`, err);
     managed.alive = false;
-    managed.onExit?.(exitCode);
+    managed.lastExitCode = -1;
+    managed.exitedAt = Date.now();
+    managed.onExit?.(-1);
     activeSessions.delete(sessionId);
-    getDb()
-      .prepare("UPDATE cli_sessions SET ended_at = datetime('now'), output_log = ? WHERE id = ?")
-      .run(managed.outputBuffer || null, sessionId);
   });
 
+  wireDaemonListeners(managed);
   activeSessions.set(sessionId, managed);
 
   const db = getDb();
-  // Ensure user exists (FK constraint requires it)
   db.prepare('INSERT OR IGNORE INTO users (id, github_id, role) VALUES (?, ?, ?)').run(userId, userId, 'user');
   db.prepare('INSERT INTO cli_sessions (id, user_id, project_id) VALUES (?, ?, ?)').run(sessionId, userId, projectId ?? null);
 
@@ -115,19 +164,21 @@ export function createCliSession(userId: string, projectId?: string | null): Man
 
 export function writeToSession(sessionId: string, data: string): boolean {
   const session = activeSessions.get(sessionId);
-  if (!session) return false;
-  session.ptyProcess.write(data);
+  if (!session || !session.alive) return false;
+  getDaemonClient().writeToSession(sessionId, data).catch((err) => {
+    console.error(`[cli-bridge] writeToSession failed for ${sessionId}:`, err);
+  });
   return true;
 }
 
 export function endCliSession(sessionId: string): void {
   const session = activeSessions.get(sessionId);
   if (!session) return;
-  // Save output before killing
   getDb()
     .prepare("UPDATE cli_sessions SET ended_at = datetime('now'), output_log = ? WHERE id = ?")
     .run(session.outputBuffer || null, sessionId);
-  try { session.ptyProcess.kill(); } catch { /* already dead */ }
+  getDaemonClient().killSession(sessionId).catch(() => { /* ok */ });
+  getDaemonClient().removeListeners(sessionId);
   activeSessions.delete(sessionId);
 }
 
@@ -137,6 +188,11 @@ export function getSessionsByUser(userId: string): ManagedProcess[] {
 
 export function getAllSessions(): ManagedProcess[] {
   return [...activeSessions.values()];
+}
+
+/** All active sessions plus recently exited ones (for status indicators) */
+export function getAllSessionsWithExited(): ManagedProcess[] {
+  return [...activeSessions.values(), ...recentlyExited.values()];
 }
 
 export function getSession(sessionId: string): ManagedProcess | undefined {
@@ -149,6 +205,82 @@ export function endSessionByProject(userId: string, projectId: string): boolean 
   if (!session) return false;
   endCliSession(session.sessionId);
   return true;
+}
+
+/**
+ * Initialize the daemon connection and recover any surviving sessions.
+ * Call this once during server startup.
+ */
+export async function initDaemonBridge(): Promise<void> {
+  const client = getDaemonClient();
+  const maxRetries = 3;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      await client.connect();
+      break;
+    } catch (err) {
+      console.error(`[cli-bridge] Failed to connect to daemon (attempt ${attempt}/${maxRetries}):`, err);
+      if (attempt === maxRetries) {
+        console.error('[cli-bridge] Giving up on daemon connection. Terminals will not work.');
+        return;
+      }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+
+  // Discover sessions that survived the server restart
+  const daemonSessions = await client.listSessions();
+  const db = getDb();
+  let recovered = 0;
+
+  for (const info of daemonSessions) {
+    if (!info.alive) continue; // skip exited
+    if (activeSessions.has(info.sessionId)) continue; // already known
+
+    const userId = info.meta?.userId ?? 'unknown';
+    const projectId = info.meta?.projectId ?? null;
+
+    const managed: ManagedProcess = {
+      sessionId: info.sessionId,
+      userId,
+      projectId,
+      outputBuffer: '', // will be populated by attach
+      onOutput: null,
+      onError: null,
+      onExit: null,
+      alive: true,
+      lastOutputAt: info.lastOutputAt,
+      lastExitCode: null,
+      exitedAt: null,
+      activeWsId: null,
+    };
+
+    wireDaemonListeners(managed);
+    activeSessions.set(info.sessionId, managed);
+
+    // Attach to get the output buffer
+    try {
+      const attached = await client.attachSession(info.sessionId);
+      managed.outputBuffer = attached.buffer;
+      managed.alive = attached.alive;
+      if (!attached.alive) {
+        managed.lastExitCode = attached.exitCode;
+        managed.exitedAt = Date.now();
+      }
+    } catch {
+      console.warn(`[cli-bridge] Failed to attach to recovered session ${info.sessionId}`);
+    }
+
+    // Ensure DB row exists
+    db.prepare('INSERT OR IGNORE INTO users (id, github_id, role) VALUES (?, ?, ?)').run(userId, userId, 'user');
+    db.prepare('INSERT OR IGNORE INTO cli_sessions (id, user_id, project_id) VALUES (?, ?, ?)').run(info.sessionId, userId, projectId);
+
+    recovered++;
+  }
+
+  if (recovered > 0) {
+    console.log(`[cli-bridge] Recovered ${recovered} session(s) from daemon`);
+  }
 }
 
 /** Try to extract a Copilot session UUID from CLI output and persist it */

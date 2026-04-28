@@ -2,13 +2,17 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { IncomingMessage } from 'http';
 import { getUserFromToken, SESSION_COOKIE } from './middleware/auth';
 import { createCliSession, writeToSession, endCliSession, findActiveSession, detachSession, getSession } from '../shared/cli-bridge';
+import { getDaemonClient } from '../daemon/client';
 import type { WsClientMessage, WsServerMessage } from '../shared/types';
 
 interface AuthedSocket extends WebSocket {
   userId?: string;
   sessionId?: string;
   isAlive?: boolean;
+  wsId?: number;
 }
+
+let wsIdCounter = 0;
 
 export function setupWebSocketServer(): WebSocketServer {
   const wss = new WebSocketServer({ noServer: true });
@@ -17,7 +21,7 @@ export function setupWebSocketServer(): WebSocketServer {
     wss.clients.forEach((ws) => {
       const socket = ws as AuthedSocket;
       if (socket.isAlive === false) {
-        if (socket.sessionId) detachSession(socket.sessionId);
+        if (socket.sessionId) detachSession(socket.sessionId, socket.wsId);
         return socket.terminate();
       }
       socket.isAlive = false;
@@ -29,6 +33,7 @@ export function setupWebSocketServer(): WebSocketServer {
 
   wss.on('connection', async (ws: AuthedSocket, req: IncomingMessage) => {
     ws.isAlive = true;
+    ws.wsId = ++wsIdCounter;
     ws.on('pong', () => { ws.isAlive = true; });
 
     // Auth: read session cookie
@@ -105,10 +110,15 @@ export function setupWebSocketServer(): WebSocketServer {
       }
     };
 
+    managed.activeWsId = ws.wsId!;
     managed.onOutput = (data) => send({ type: 'output', data });
     managed.onError = (data) => send({ type: 'error', data });
-    managed.onExit = (code) => send({ type: 'exit', code });
+    managed.onExit = (code) => {
+      console.log(`[ws] session ${managed!.sessionId} exited: code=${code}`);
+      send({ type: 'exit', code });
+    };
 
+    console.log(`[ws] WS ${ws.wsId} session ready: ${managed.sessionId}, isReconnect=${isReconnect}, alive=${managed.alive}, bufferLen=${managed.outputBuffer?.length ?? 0}`);
     send({ type: 'ready', sessionId: managed.sessionId });
 
     if (isReconnect && managed.outputBuffer) {
@@ -119,10 +129,11 @@ export function setupWebSocketServer(): WebSocketServer {
       let msg: WsClientMessage;
       try { msg = JSON.parse(raw.toString()) as WsClientMessage; } catch { return; }
       if (msg.type === 'input') {
-        writeToSession(ws.sessionId!, msg.data);
+        const ok = writeToSession(ws.sessionId!, msg.data);
+        if (!ok) console.warn(`[ws] writeToSession failed for ${ws.sessionId} (session gone?)`);
       } else if (msg.type === 'resize') {
         if (managed && msg.cols && msg.rows) {
-          managed.ptyProcess.resize(msg.cols, msg.rows);
+          getDaemonClient().resizeSession(managed.sessionId, msg.cols, msg.rows).catch(() => {});
         }
       } else if (msg.type === 'ping') {
         send({ type: 'pong' });
@@ -130,12 +141,13 @@ export function setupWebSocketServer(): WebSocketServer {
     });
 
     ws.on('close', () => {
-      if (ws.sessionId) detachSession(ws.sessionId);
+      console.log(`[ws] WS ${ws.wsId} closed for session ${ws.sessionId}`);
+      if (ws.sessionId) detachSession(ws.sessionId, ws.wsId);
     });
 
     ws.on('error', (err) => {
-      console.error('[ws] socket error', err.message);
-      if (ws.sessionId) detachSession(ws.sessionId);
+      console.error(`[ws] WS ${ws.wsId} error for session ${ws.sessionId}:`, err.message);
+      if (ws.sessionId) detachSession(ws.sessionId, ws.wsId);
     });
   });
 

@@ -11,9 +11,9 @@ import { requireAuth, requireAdmin, SESSION_COOKIE, createSession, destroySessio
 import { getGitHubCliProfile } from '../shared/gh-cli-auth';
 import { upsertUser, listUsers, updateUserRole, deleteUser } from '../shared/user-store';
 import { createProject, listProjects, getProjectById, updateProject, deleteProject, addSkill, listSkills, updateSkill, deleteSkill } from '../shared/project-store';
-import { listSessionsForUser, listAllSessions, getCopilotSessionDetail } from '../shared/session-store';
+import { listSessionsForUser, listAllSessions, getCopilotSessionDetail, listCopilotSessionsForProject } from '../shared/session-store';
 import { setupWebSocketServer } from './websocket';
-import { getAllSessions, endCliSession, endSessionByProject } from '../shared/cli-bridge';
+import { getAllSessions, getAllSessionsWithExited, getSessionStatus, endCliSession, endSessionByProject, initDaemonBridge } from '../shared/cli-bridge';
 import { getDb } from '../shared/db';
 
 const app = express();
@@ -107,10 +107,15 @@ app.delete('/api/projects/:id', (req, res) => {
 
 // --- Sessions ---
 app.get('/api/sessions/active', (req, res) => {
-  const active = getAllSessions()
-    .filter((s) => s.alive && s.projectId)
-    .map((s) => ({ projectId: s.projectId!, sessionId: s.sessionId }));
-  res.json({ sessions: active });
+  const sessions = getAllSessionsWithExited()
+    .filter((s) => s.projectId)
+    .map((s) => ({
+      projectId: s.projectId!,
+      sessionId: s.sessionId,
+      status: getSessionStatus(s),
+      exitCode: s.lastExitCode,
+    }));
+  res.json({ sessions });
 });
 
 app.delete('/api/projects/:id/session', (req, res) => {
@@ -131,28 +136,19 @@ app.delete('/api/projects/:id/session', (req, res) => {
 });
 
 app.get('/api/projects/:id/sessions', (req, res) => {
-  const projectId = req.params.id;
-  const db = getDb();
-  const sessions = db.prepare(`
-    SELECT id, user_id as userId, project_id as projectId, copilot_session_id as copilotSessionId,
-           started_at as startedAt, ended_at as endedAt,
-           CASE WHEN output_log IS NOT NULL THEN 1 ELSE 0 END as hasTranscript
-    FROM cli_sessions
-    WHERE project_id = ?
-    ORDER BY started_at DESC
-    LIMIT 50
-  `).all(projectId);
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const sessions = listCopilotSessionsForProject(project.repoPath);
   res.json({ sessions });
 });
 
 app.get('/api/sessions/:id/transcript', (req, res) => {
-  const db = getDb();
-  const row = db.prepare('SELECT output_log as outputLog FROM cli_sessions WHERE id = ?').get(req.params.id) as { outputLog: string | null } | undefined;
-  if (!row || !row.outputLog) {
-    res.status(404).json({ error: 'No transcript available' });
+  const detail = getCopilotSessionDetail(req.params.id);
+  if (!detail) {
+    res.status(404).json({ error: 'Session not found' });
     return;
   }
-  res.json({ transcript: row.outputLog });
+  res.json(detail);
 });
 
 // --- Skills ---
@@ -494,6 +490,82 @@ app.delete('/api/admin/sessions/:id', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+// --- Daemon management ---
+app.get('/api/daemon/status', requireAuth, async (req, res) => {
+  const { getDaemonClient } = await import('../daemon/client');
+  const client = getDaemonClient();
+  try {
+    const sessions = await client.listSessions();
+    res.json({
+      connected: client.isConnected,
+      sessions: sessions.map(s => ({
+        sessionId: s.sessionId,
+        alive: s.alive,
+        exitCode: s.exitCode,
+        exitedAt: s.exitedAt,
+        lastOutputAt: s.lastOutputAt,
+        bufferLength: s.bufferLength,
+        userId: s.meta?.userId ?? null,
+        projectId: s.meta?.projectId ?? null,
+      })),
+    });
+  } catch {
+    res.json({ connected: false, sessions: [] });
+  }
+});
+
+app.post('/api/daemon/restart', requireAdmin, async (req, res) => {
+  const { getDaemonClient } = await import('../daemon/client');
+  const client = getDaemonClient();
+  const fs = await import('fs');
+  const path = await import('path');
+  const os = await import('os');
+
+  // Kill existing daemon by PID
+  const pidPath = path.join(os.homedir(), '.gcclippy', 'daemon.pid');
+  try {
+    if (fs.existsSync(pidPath)) {
+      const daemonPid = parseInt(fs.readFileSync(pidPath, 'utf-8').trim(), 10);
+      if (daemonPid && !isNaN(daemonPid)) {
+        try { process.kill(daemonPid, 'SIGTERM'); } catch { /* already dead */ }
+      }
+      try { fs.unlinkSync(pidPath); } catch { /* ok */ }
+    }
+  } catch { /* ok */ }
+
+  // Clean up secret and lock so the new daemon generates fresh ones
+  const secretPath = path.join(os.homedir(), '.gcclippy', 'daemon.secret');
+  const lockPath = path.join(os.homedir(), '.gcclippy', 'daemon.lock');
+  try { fs.unlinkSync(secretPath); } catch { /* ok */ }
+  try { fs.unlinkSync(lockPath); } catch { /* ok */ }
+
+  // Disconnect and wait a moment for cleanup
+  client.disconnect();
+  await new Promise(r => setTimeout(r, 1000));
+
+  // Reconnect (will auto-start a new daemon)
+  try {
+    await client.connect();
+    // Re-initialize the bridge to recover sessions
+    await initDaemonBridge();
+    res.json({ ok: true, connected: client.isConnected });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+app.delete('/api/daemon/sessions/:id', requireAdmin, async (req, res) => {
+  const { getDaemonClient } = await import('../daemon/client');
+  const client = getDaemonClient();
+  try {
+    await client.killSession(String(req.params.id));
+    endCliSession(String(req.params.id));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Static files + SPA fallback
 // ---------------------------------------------------------------------------
@@ -528,8 +600,14 @@ httpServer.on('upgrade', (req, socket, head) => {
   }
 });
 
-httpServer.listen(port, hostname, () => {
+httpServer.listen(port, hostname, async () => {
   console.log(`> Ready on http://${hostname}:${port}`);
+  // Connect to daemon and recover surviving sessions
+  try {
+    await initDaemonBridge();
+  } catch (err) {
+    console.error('Failed to initialize daemon bridge:', err);
+  }
 });
 
 export { app, httpServer };
