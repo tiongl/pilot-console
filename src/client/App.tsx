@@ -57,7 +57,7 @@ export function App() {
           </Route>
           <Route path="admin" element={<AdminRoute><AdminPage /></AdminRoute>} />
           <Route path="admin/sessions" element={<AdminRoute><AdminSessionsPage /></AdminRoute>} />
-          <Route path="admin/daemon" element={<AdminRoute><AdminDaemonPage /></AdminRoute>} />
+          <Route path="daemon" element={<AdminDaemonPage />} />
         </Route>
       </Routes>
     </AuthProvider>

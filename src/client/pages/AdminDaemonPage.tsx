@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useAuth } from '../lib/auth-context';
 import { Button } from '../../../components/ui/button';
 import { RefreshCw, Trash2, Server, Activity, AlertTriangle } from 'lucide-react';
 
@@ -19,6 +20,8 @@ interface DaemonStatus {
 }
 
 export default function AdminDaemonPage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const [status, setStatus] = useState<DaemonStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [restarting, setRestarting] = useState(false);
@@ -110,15 +113,17 @@ export default function AdminDaemonPage() {
               </div>
             </div>
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleRestart}
-            disabled={restarting}
-          >
-            <RefreshCw className={`h-4 w-4 mr-2 ${restarting ? 'animate-spin' : ''}`} />
-            {restarting ? 'Restarting...' : 'Restart Daemon'}
-          </Button>
+          {isAdmin && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleRestart}
+              disabled={restarting}
+            >
+              <RefreshCw className={`h-4 w-4 mr-2 ${restarting ? 'animate-spin' : ''}`} />
+              {restarting ? 'Restarting...' : 'Restart Daemon'}
+            </Button>
+          )}
         </div>
         <div className="mt-4 grid grid-cols-3 gap-4 text-center">
           <div className="rounded-md bg-muted/50 px-3 py-2">
@@ -159,15 +164,17 @@ export default function AdminDaemonPage() {
                     )}
                   </div>
                 </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-destructive hover:text-destructive hover:bg-destructive/10 shrink-0"
-                  onClick={() => handleKillSession(session.sessionId)}
-                >
-                  <Trash2 className="h-4 w-4 mr-1" />
-                  Kill
-                </Button>
+                {isAdmin && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-destructive hover:text-destructive hover:bg-destructive/10 shrink-0"
+                    onClick={() => handleKillSession(session.sessionId)}
+                  >
+                    <Trash2 className="h-4 w-4 mr-1" />
+                    Kill
+                  </Button>
+                )}
               </div>
             ))}
           </div>

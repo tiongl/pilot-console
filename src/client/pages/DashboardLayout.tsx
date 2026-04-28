@@ -230,31 +230,29 @@ export default function DashboardLayout() {
           </div>
 
           {user?.role === 'admin' && (
-            <>
-              <Link
-                to="/admin"
-                className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors"
-              >
-                <Shield className="h-4 w-4" />
-                Admin
-              </Link>
-              <Link
-                to="/admin/daemon"
-                className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors"
-              >
-                <Server className="h-4 w-4" />
-                <span className="flex-1">Daemon</span>
-                <span
-                  className={`h-2 w-2 shrink-0 rounded-full ${
-                    daemonConnected === true ? 'bg-green-500' :
-                    daemonConnected === false ? 'bg-red-500 animate-pulse' :
-                    'bg-muted-foreground'
-                  }`}
-                  title={daemonConnected === true ? 'Daemon connected' : daemonConnected === false ? 'Daemon disconnected' : 'Checking...'}
-                />
-              </Link>
-            </>
+            <Link
+              to="/admin"
+              className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors"
+            >
+              <Shield className="h-4 w-4" />
+              Admin
+            </Link>
           )}
+          <Link
+            to="/daemon"
+            className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors"
+          >
+            <Server className="h-4 w-4" />
+            <span className="flex-1">Daemon</span>
+            <span
+              className={`h-2 w-2 shrink-0 rounded-full ${
+                daemonConnected === true ? 'bg-green-500' :
+                daemonConnected === false ? 'bg-red-500 animate-pulse' :
+                'bg-muted-foreground'
+              }`}
+              title={daemonConnected === true ? 'Daemon connected' : daemonConnected === false ? 'Daemon disconnected' : 'Checking...'}
+            />
+          </Link>
           <Button variant="ghost" onClick={handleLogout} className="w-full justify-start gap-3 px-3">
             <LogOut className="h-4 w-4" />
             Sign out
