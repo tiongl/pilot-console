@@ -4,10 +4,13 @@ import { getDaemonClient } from '../daemon/client';
 
 const MAX_SCROLLBACK = 100_000; // chars to buffer for reconnection replay
 
+export type SessionMode = 'cli' | 'shell' | 'powershell';
+
 export interface ManagedProcess {
   sessionId: string;
   userId: string;
   projectId: string | null;
+  mode: SessionMode;
   outputBuffer: string;
   onOutput: ((data: string) => void) | null;
   onError: ((data: string) => void) | null;
@@ -37,12 +40,14 @@ const CLI_COMMAND = process.env.COPILOT_CLI_COMMAND ?? 'gh';
 const CLI_ARGS = (process.env.COPILOT_CLI_ARGS ?? 'copilot').split(' ').filter(Boolean);
 
 const IS_WINDOWS = process.platform === 'win32';
-const SHELL = IS_WINDOWS ? 'cmd.exe' : '/bin/bash';
+const SHELL = IS_WINDOWS
+  ? (process.env.COMSPEC || 'cmd.exe')
+  : (process.env.SHELL || '/bin/bash');
 
-/** Find an existing live session for a user+project combo */
-export function findActiveSession(userId: string, projectId: string | null): ManagedProcess | undefined {
+/** Find an existing live session for a user+project+mode combo */
+export function findActiveSession(userId: string, projectId: string | null, mode: SessionMode = 'cli'): ManagedProcess | undefined {
   for (const s of activeSessions.values()) {
-    if (s.userId === userId && s.projectId === projectId && s.alive) return s;
+    if (s.userId === userId && s.projectId === projectId && s.mode === mode && s.alive) return s;
   }
   return undefined;
 }
@@ -82,7 +87,9 @@ function wireDaemonListeners(managed: ManagedProcess) {
     }
     managed.lastOutputAt = Date.now();
     managed.onOutput?.(data);
-    extractAndStoreSessionId(managed.sessionId, data);
+    if (managed.mode === 'cli') {
+      extractAndStoreSessionId(managed.sessionId, data);
+    }
   });
 
   client.onExit(managed.sessionId, (code: number) => {
@@ -100,25 +107,52 @@ function wireDaemonListeners(managed: ManagedProcess) {
   });
 }
 
-export function createCliSession(userId: string, projectId?: string | null): ManagedProcess {
+export function createCliSession(userId: string, projectId?: string | null, mode: SessionMode = 'cli'): ManagedProcess {
   const sessionId = crypto.randomUUID();
 
   let cwd: string | undefined;
   if (projectId) {
     const project = getProjectById(projectId);
-    if (project) {
-      cwd = project.repoPath;
+    if (project?.repoPath) {
+      try {
+        const fs = require('fs');
+        if (fs.existsSync(project.repoPath)) {
+          cwd = project.repoPath;
+        } else {
+          console.warn(`[cli-bridge] Project repoPath does not exist: ${project.repoPath}, using process.cwd()`);
+        }
+      } catch {
+        console.warn(`[cli-bridge] Failed to check repoPath: ${project.repoPath}`);
+      }
     }
   }
 
-  const shellArgs = IS_WINDOWS
-    ? ['/c', CLI_COMMAND, ...CLI_ARGS]
-    : ['-c', `${CLI_COMMAND} ${CLI_ARGS.join(' ')}`];
+  const resolvedCwd = cwd || process.cwd();
+  console.log(`[cli-bridge] Creating ${mode} session ${sessionId}, cwd=${resolvedCwd}`);
+
+  let shell: string;
+  let shellArgs: string[];
+
+  if (mode === 'powershell') {
+    shell = IS_WINDOWS ? 'pwsh.exe' : 'pwsh';
+    shellArgs = [];
+  } else if (mode === 'shell') {
+    // Plain shell — no gh copilot wrapper
+    shell = SHELL;
+    shellArgs = [];
+  } else {
+    // Copilot CLI mode — wrap in shell
+    shell = SHELL;
+    shellArgs = IS_WINDOWS
+      ? ['/c', CLI_COMMAND, ...CLI_ARGS]
+      : ['-c', `${CLI_COMMAND} ${CLI_ARGS.join(' ')}`];
+  }
 
   const managed: ManagedProcess = {
     sessionId,
     userId,
     projectId: projectId ?? null,
+    mode,
     outputBuffer: '',
     onOutput: null,
     onError: null,
@@ -134,12 +168,12 @@ export function createCliSession(userId: string, projectId?: string | null): Man
   const client = getDaemonClient();
   client.createSession({
     sessionId,
-    cwd: cwd || process.cwd(),
-    shell: SHELL,
+    cwd: resolvedCwd,
+    shell,
     args: shellArgs,
     cols: 120,
     rows: 30,
-    meta: { userId, projectId: projectId ?? null },
+    meta: { userId, projectId: projectId ?? null, mode },
   }).then(() => {
     // Attach to receive output
     return client.attachSession(sessionId);
@@ -244,7 +278,8 @@ export async function initDaemonBridge(): Promise<void> {
       sessionId: info.sessionId,
       userId,
       projectId,
-      outputBuffer: '', // will be populated by attach
+      mode: (info.meta?.mode as SessionMode) || 'cli',
+      outputBuffer: '',
       onOutput: null,
       onError: null,
       onExit: null,

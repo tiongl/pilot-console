@@ -49,7 +49,7 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
                 size="icon"
                 className="h-8 w-8"
                 onClick={() => setActivePanel(p => p === 'notes' ? 'none' : 'notes')}
-                title="Project Notes"
+                title="Project TODO"
               >
                 <ListTodo className="h-4 w-4" />
               </Button>

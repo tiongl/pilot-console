@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useParams } from 'react-router';
 import { useCliSocket } from '../../../hooks/useCliSocket';
 import TerminalPane, { type TerminalPaneAPI, TERMINAL_FONTS } from '../../../components/terminal/TerminalPane';
 import { Button } from '../../../components/ui/button';
-import { Square, Minus, Plus, Palette, Type, X as XIcon } from 'lucide-react';
+import { Square, Minus, Plus, Palette, Type, X as XIcon, Terminal, Bot, GitCommitHorizontal } from 'lucide-react';
 import { THEMES } from '../../../lib/terminal-themes';
+import GitLogTab from '../../../components/project/GitLogTab';
 
 interface TabMeta {
   id: string;
   label: string;
+  mode: 'cli' | 'shell' | 'powershell' | 'git';
   themeName: string;
   fontFamily: string;
   sessionId?: string;
@@ -29,7 +32,7 @@ const projectTabStates = new Map<string, ProjectTabState>();
  * Output is written directly to xterm (no React state accumulation).
  */
 function TerminalTab({
-  projectId, fontSize, fontFamily, themeName, active, forceNew, sessionId: initialSessionId, onStatusChange, onKill, onSessionId,
+  projectId, fontSize, fontFamily, themeName, active, forceNew, mode, sessionId: initialSessionId, onStatusChange, onKill, onSessionId,
 }: {
   projectId?: string;
   fontSize: number;
@@ -37,6 +40,7 @@ function TerminalTab({
   themeName: string;
   active: boolean;
   forceNew: boolean;
+  mode: 'cli' | 'shell' | 'powershell';
   sessionId?: string;
   onStatusChange: (status: string) => void;
   onKill: (sessionId: string | null) => void;
@@ -59,6 +63,7 @@ function TerminalTab({
     projectId,
     sessionId: initialSessionId,
     forceNew: !initialSessionId && forceNew,
+    mode,
     onOutput: (data) => {
       console.log(`[TerminalTab] onOutput: ${data.length} chars, termApi=${!!termApiRef.current}`);
       writeToTerm(data);
@@ -143,7 +148,7 @@ export default function ProjectChatPage() {
     const saved = projectId ? projectTabStates.get(projectId) : null;
     if (saved && saved.tabs.length > 0) return saved.tabs;
     tabCounter++;
-    return [{ id: `tab-${tabCounter}`, label: 'Terminal 1', themeName: defaultTheme, fontFamily: defaultFont }];
+    return [{ id: `tab-${tabCounter}`, label: 'Copilot 1', mode: 'cli' as const, themeName: defaultTheme, fontFamily: defaultFont }];
   });
   const [activeTabId, setActiveTabId] = useState(() => {
     const saved = projectId ? projectTabStates.get(projectId) : null;
@@ -166,12 +171,41 @@ export default function ProjectChatPage() {
     }
   }, [projectId, tabs, activeTabId, fontSize]);
 
-  const addTab = useCallback(() => {
+  const [showNewMenu, setShowNewMenu] = useState(false);
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  const plusBtnRef = useRef<HTMLDivElement>(null);
+
+  // Position the portal menu relative to the + button
+  useEffect(() => {
+    if (showNewMenu && plusBtnRef.current) {
+      const rect = plusBtnRef.current.getBoundingClientRect();
+      setMenuPos({ top: rect.bottom + 2, left: rect.left });
+    }
+  }, [showNewMenu]);
+
+  // Close new-tab menu on outside click
+  useEffect(() => {
+    if (!showNewMenu) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-new-tab-menu]')) setShowNewMenu(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showNewMenu]);
+
+  const addTab = useCallback((mode: 'cli' | 'shell' | 'powershell' | 'git' = 'cli') => {
+    if (mode === 'git') {
+      // Only allow one git tab
+      const existing = tabs.find(t => t.mode === 'git');
+      if (existing) { setActiveTabId(existing.id); return; }
+    }
     tabCounter++;
-    const newTab: TabMeta = { id: `tab-${tabCounter}`, label: `Terminal ${tabCounter}`, themeName: defaultTheme, fontFamily: defaultFont };
+    const label = mode === 'shell' ? `Shell ${tabCounter}` : mode === 'powershell' ? `PS ${tabCounter}` : mode === 'git' ? 'Git Log' : `Copilot ${tabCounter}`;
+    const newTab: TabMeta = { id: `tab-${tabCounter}`, label, mode, themeName: defaultTheme, fontFamily: defaultFont };
     setTabs(prev => [...prev, newTab]);
     setActiveTabId(newTab.id);
-  }, [defaultTheme, defaultFont]);
+  }, [defaultTheme, defaultFont, tabs]);
 
   const closeTab = useCallback((tabId: string) => {
     const killCb = killCallbacksRef.current[tabId];
@@ -187,17 +221,13 @@ export default function ProjectChatPage() {
 
     setTabs(prev => {
       const next = prev.filter(t => t.id !== tabId);
-      if (next.length === 0) {
-        tabCounter++;
-        return [{ id: `tab-${tabCounter}`, label: `Terminal ${tabCounter}`, themeName: defaultTheme, fontFamily: defaultFont }];
-      }
       return next;
     });
     setActiveTabId(prev => {
       if (prev !== tabId) return prev;
       const idx = tabs.findIndex(t => t.id === tabId);
       const remaining = tabs.filter(t => t.id !== tabId);
-      if (remaining.length === 0) return `tab-${tabCounter}`;
+      if (remaining.length === 0) return '';
       return remaining[Math.min(idx, remaining.length - 1)].id;
     });
   }, [projectId, tabs]);
@@ -267,27 +297,62 @@ export default function ProjectChatPage() {
                 }`}
                 onClick={() => setActiveTabId(tab.id)}
               >
-                <div className={`h-1.5 w-1.5 rounded-full ${stColor}`} />
+                {tab.mode !== 'git' && <div className={`h-1.5 w-1.5 rounded-full ${stColor}`} />}
+                {tab.mode === 'powershell' ? <span className="h-3 w-3 text-[9px] font-bold leading-3 text-center shrink-0">PS</span> : tab.mode === 'shell' ? <Terminal className="h-3 w-3 shrink-0" /> : tab.mode === 'git' ? <GitCommitHorizontal className="h-3 w-3 shrink-0" /> : <Bot className="h-3 w-3 shrink-0" />}
                 <span className="truncate max-w-[100px]">{tab.label}</span>
-                {tabs.length > 1 && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
-                    className="h-4 w-4 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-muted"
-                  >
-                    <XIcon className="h-3 w-3" />
-                  </button>
-                )}
+                <button
+                  onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
+                  className="h-4 w-4 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-muted"
+                >
+                  <XIcon className="h-3 w-3" />
+                </button>
               </div>
             );
           })}
-          <button
-            onClick={addTab}
-            className="px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-background/50 shrink-0"
-            title="New terminal (Ctrl+Shift+T)"
-          >
-            +
-          </button>
+          <div className="shrink-0" data-new-tab-menu ref={plusBtnRef}>
+            <button
+              onClick={(e) => { e.stopPropagation(); setShowNewMenu(v => !v); }}
+              className="px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-background/50"
+              title="New tab"
+            >
+              +
+            </button>
+          </div>
         </div>
+        {showNewMenu && createPortal(
+          <div
+            className="fixed z-50 rounded-md border bg-popover p-1 shadow-md text-xs min-w-[140px]"
+            style={menuPos}
+            data-new-tab-menu
+          >
+            <button
+              onClick={() => { addTab('cli'); setShowNewMenu(false); }}
+              className="flex items-center gap-2 w-full rounded px-2 py-1.5 hover:bg-accent text-left"
+            >
+              <Bot className="h-3.5 w-3.5" /> Copilot CLI
+            </button>
+            <button
+              onClick={() => { addTab('shell'); setShowNewMenu(false); }}
+              className="flex items-center gap-2 w-full rounded px-2 py-1.5 hover:bg-accent text-left"
+            >
+              <Terminal className="h-3.5 w-3.5" /> Terminal
+            </button>
+            <button
+              onClick={() => { addTab('powershell'); setShowNewMenu(false); }}
+              className="flex items-center gap-2 w-full rounded px-2 py-1.5 hover:bg-accent text-left"
+            >
+              <span className="h-3.5 w-3.5 text-[10px] font-bold leading-[14px] text-center">PS</span> PowerShell
+            </button>
+            <div className="border-t my-1" />
+            <button
+              onClick={() => { addTab('git'); setShowNewMenu(false); }}
+              className="flex items-center gap-2 w-full rounded px-2 py-1.5 hover:bg-accent text-left"
+            >
+              <GitCommitHorizontal className="h-3.5 w-3.5" /> Git Log
+            </button>
+          </div>,
+          document.body
+        )}
         <div className="flex items-center gap-2 px-3 shrink-0 border-l">
           <div className="flex items-center gap-1 border rounded-md px-1">
             <Type className="h-3 w-3 text-muted-foreground ml-1" />
@@ -318,16 +383,29 @@ export default function ProjectChatPage() {
               <Plus className="h-3 w-3" />
             </Button>
           </div>
-          <Button variant="ghost" size="sm" className="h-6 text-xs text-destructive hover:text-destructive" onClick={handleKillActive} disabled={activeStatus !== 'open'} title="Kill active session (Ctrl+Shift+K)">
-            <Square className="h-3 w-3 mr-1" />
-            Kill
-          </Button>
         </div>
       </div>
 
       {/* Terminal content — all tabs stay mounted, hidden via CSS */}
       <div className="flex-1 overflow-hidden relative">
+        {tabs.length === 0 && (
+          <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
+            Click <Plus className="h-4 w-4 mx-1 inline" /> to open a terminal
+          </div>
+        )}
         {tabs.map(tab => {
+          // Git tab renders GitLogTab instead of a terminal
+          if (tab.mode === 'git') {
+            return (
+              <div key={tab.id} className="absolute inset-0" style={{
+                zIndex: tab.id === activeTabId ? 1 : 0,
+                visibility: tab.id === activeTabId ? 'visible' : 'hidden',
+              }}>
+                <GitLogTab projectId={projectId} />
+              </div>
+            );
+          }
+
           if (!killCallbacksRef.current[tab.id]) {
             killCallbacksRef.current[tab.id] = (() => {}) as (sid: string | null) => void;
           }
@@ -342,7 +420,8 @@ export default function ProjectChatPage() {
               fontFamily={tab.fontFamily || defaultFont}
               themeName={tab.themeName || defaultTheme}
               active={tab.id === activeTabId}
-              forceNew={tab.id !== firstTabId.current}
+              forceNew={tab.mode !== 'cli' || tab.id !== firstTabId.current}
+              mode={tab.mode || 'cli'}
               sessionId={tab.sessionId}
               onStatusChange={statusCallbacksRef.current[tab.id]}
               onKill={killCallbacksRef.current[tab.id]}

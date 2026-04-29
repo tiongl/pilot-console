@@ -12,7 +12,7 @@ interface ShortcutActions {
 const SHORTCUTS = [
   { keys: 'Ctrl+Shift+K', description: 'Kill session' },
   { keys: 'Ctrl+Shift+T', description: 'New terminal tab' },
-  { keys: 'Ctrl+Shift+N', description: 'Toggle notes panel' },
+  { keys: 'Ctrl+Shift+N', description: 'Toggle TODO panel' },
   { keys: 'Ctrl+Shift+G', description: 'Toggle git panel' },
   { keys: 'Ctrl + / Ctrl -', description: 'Font size up / down' },
   { keys: 'Ctrl+Shift+/', description: 'Show this help' },

@@ -9,6 +9,7 @@ interface UseCliSocketOptions {
   projectId?: string;
   sessionId?: string;
   forceNew?: boolean;
+  mode?: 'cli' | 'shell' | 'powershell';
   onOutput?: (data: string) => void;
   onError?: (data: string) => void;
   onExit?: (code: number) => void;
@@ -31,6 +32,7 @@ export function useCliSocket(options: UseCliSocketOptions = {}) {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const urlParams = new URLSearchParams();
     if (optionsRef.current.projectId) urlParams.set('projectId', optionsRef.current.projectId);
+    if (optionsRef.current.mode && optionsRef.current.mode !== 'cli') urlParams.set('mode', optionsRef.current.mode);
 
     if (knownSessionId.current) {
       // Reconnect to existing session
@@ -91,7 +93,7 @@ export function useCliSocket(options: UseCliSocketOptions = {}) {
       wsRef.current = null;
       // Notify about daemon/session creation failures
       if (evt.code === 4002) {
-        opts.onError?.(`Failed to create terminal session — the daemon may not be running. Check Admin → Daemon.`);
+        optionsRef.current.onError?.(`Failed to create terminal session — the daemon may not be running. Check Admin → Daemon.`);
         return; // Don't reconnect on daemon failure
       }
       // Session not found — clear cached ID so next connect creates fresh

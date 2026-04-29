@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { GitBranch, FileCode, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import DiffViewer from './DiffViewer';
 
 interface GitFile {
   status: string;
@@ -117,19 +118,13 @@ export default function GitPanel({ projectId }: Props) {
                       <span className={`text-xs shrink-0 ${info.color}`}>{info.label}</span>
                     </div>
                     {isExpanded && (
-                      <div className="bg-muted/30 border-t">
+                      <div className="bg-muted/30 border-t max-h-80 overflow-y-auto">
                         {diffLoading ? (
                           <p className="px-4 py-2 text-xs text-muted-foreground">Loading diff…</p>
+                        ) : diff ? (
+                          <DiffViewer diff={diff} showToggle={false} />
                         ) : (
-                          <pre className="px-4 py-2 text-xs font-mono overflow-x-auto whitespace-pre max-h-64 overflow-y-auto">
-                            {diff?.split('\n').map((line, i) => {
-                              let color = '';
-                              if (line.startsWith('+') && !line.startsWith('+++')) color = 'text-green-500';
-                              else if (line.startsWith('-') && !line.startsWith('---')) color = 'text-red-500';
-                              else if (line.startsWith('@@')) color = 'text-blue-400';
-                              return <div key={i} className={color}>{line}</div>;
-                            })}
-                          </pre>
+                          <p className="px-4 py-2 text-xs text-muted-foreground">No changes</p>
                         )}
                       </div>
                     )}

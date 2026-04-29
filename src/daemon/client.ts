@@ -260,7 +260,7 @@ export class DaemonClient {
     args: string[];
     cols: number;
     rows: number;
-    meta?: { userId?: string; projectId?: string | null };
+    meta?: { userId?: string; projectId?: string | null; mode?: string };
   }): Promise<string> {
     await this.ensureConnected();
     const resp = await this.request({

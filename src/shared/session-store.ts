@@ -61,23 +61,62 @@ export interface CopilotSessionSummary {
   summary: string | null;
   cwd: string | null;
   createdAt: string;
+  updatedAt: string | null;
   turnCount: number;
+  durationMs: number | null;
+  activeMs: number | null;
+  userMsgChars: number;
+  assistantMsgChars: number;
 }
 
-/** Lists Copilot CLI sessions whose cwd matches a project repo path */
-export function listCopilotSessionsForProject(repoPath: string, limit = 50): CopilotSessionSummary[] {
+/** Max gap (ms) between turns to count as "active" — gaps larger than this are treated as idle */
+const ACTIVE_GAP_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
+
+/** Lists Copilot CLI sessions whose cwd matches a project repo path.
+ *  When `search` is provided, only sessions whose summary, created_at, or
+ *  turn content (user_message / assistant_response) contain the term are returned. */
+export function listCopilotSessionsForProject(repoPath: string, limit = 50, search?: string): CopilotSessionSummary[] {
   const cpDb = getCopilotDb();
   if (!cpDb) return [];
   try {
     const normalized = repoPath.replace(/\\/g, '/');
+    const searchTerm = search?.trim().toLowerCase() || '';
+
+    // Build optional content-search condition
+    const searchClause = searchTerm
+      ? `AND (
+           instr(lower(coalesce(s.summary, '')), ?) > 0
+           OR instr(lower(coalesce(s.created_at, '')), ?) > 0
+           OR EXISTS (
+             SELECT 1 FROM turns t2
+             WHERE t2.session_id = s.id
+               AND (instr(lower(coalesce(t2.user_message, '')), ?) > 0
+                 OR instr(lower(coalesce(t2.assistant_response, '')), ?) > 0)
+           )
+         )`
+      : '';
+
+    const params: unknown[] = [];
+    if (searchTerm) params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+    params.push(limit * 3);
+
     const rows = cpDb.prepare(`
-      SELECT s.id, s.summary, s.cwd, s.created_at,
-             (SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id) as turn_count
+      SELECT s.id, s.summary, s.cwd, s.created_at, s.updated_at,
+             (SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id) as turn_count,
+             (SELECT MIN(t.timestamp) FROM turns t WHERE t.session_id = s.id) as first_turn_at,
+             (SELECT MAX(t.timestamp) FROM turns t WHERE t.session_id = s.id) as last_turn_at,
+             (SELECT COALESCE(SUM(LENGTH(t.user_message)), 0) FROM turns t WHERE t.session_id = s.id) as user_chars,
+             (SELECT COALESCE(SUM(LENGTH(t.assistant_response)), 0) FROM turns t WHERE t.session_id = s.id) as assistant_chars
       FROM sessions s
       WHERE s.cwd IS NOT NULL
+      ${searchClause}
       ORDER BY s.created_at DESC
       LIMIT ?
-    `).all(limit * 3) as Record<string, unknown>[];
+    `).all(...params) as Record<string, unknown>[];
+
+    const turnTimestampsStmt = cpDb.prepare(
+      'SELECT timestamp FROM turns WHERE session_id = ? ORDER BY turn_index'
+    );
 
     const isWindows = process.platform === 'win32';
     const results: CopilotSessionSummary[] = [];
@@ -87,12 +126,40 @@ export function listCopilotSessionsForProject(repoPath: string, limit = 50): Cop
         ? cwd.toLowerCase().startsWith(normalized.toLowerCase())
         : cwd.startsWith(normalized);
       if (match) {
+        const firstAt = row.first_turn_at as string | null;
+        const lastAt = row.last_turn_at as string | null;
+        let durationMs: number | null = null;
+        if (firstAt && lastAt) {
+          durationMs = new Date(lastAt).getTime() - new Date(firstAt).getTime();
+          if (durationMs < 0) durationMs = null;
+        }
+
+        // Compute active time by summing gaps under the threshold
+        let activeMs: number | null = null;
+        const turnCount = row.turn_count as number;
+        if (turnCount >= 2) {
+          const timestamps = turnTimestampsStmt.all(row.id as string) as { timestamp: string }[];
+          let active = 0;
+          for (let i = 1; i < timestamps.length; i++) {
+            const gap = new Date(timestamps[i].timestamp).getTime() - new Date(timestamps[i - 1].timestamp).getTime();
+            if (gap > 0 && gap <= ACTIVE_GAP_THRESHOLD_MS) {
+              active += gap;
+            }
+          }
+          activeMs = active > 0 ? active : null;
+        }
+
         results.push({
           id: row.id as string,
           summary: (row.summary as string) ?? null,
           cwd: row.cwd as string,
           createdAt: row.created_at as string,
-          turnCount: row.turn_count as number,
+          updatedAt: (row.updated_at as string) ?? null,
+          turnCount,
+          durationMs,
+          activeMs,
+          userMsgChars: (row.user_chars as number) ?? 0,
+          assistantMsgChars: (row.assistant_chars as number) ?? 0,
         });
         if (results.length >= limit) break;
       }

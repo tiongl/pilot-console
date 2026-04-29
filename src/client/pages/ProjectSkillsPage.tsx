@@ -179,6 +179,35 @@ function SkillCatalog({ onInstallChanged }: { onInstallChanged: () => void }) {
     }
   };
 
+  // Suggested marketplaces that aren't already registered
+  const suggestedMarketplaces = useMemo(() => {
+    const known = [
+      { repo: 'microsoft/work-iq', name: 'work-iq', description: 'MCP Server and CLI for accessing Work IQ (M365 Copilot)' },
+      { repo: 'devantler-tech/copilot-plugins', name: 'devantler-plugins', description: 'Curated agent skills bundled by category' },
+      { repo: 'Arithmomaniac/copilot-plugins', name: 'arithmomaniac-plugins', description: 'Agent skills for Git workflows, productivity & dev tools' },
+      { repo: 'rtasalem/dev-suq', name: 'dev-suq', description: 'Open-source plugins for hybrid agentic-developer workflow' },
+      { repo: 'AndyElessar/skills', name: 'andy-skills', description: 'Plugins for dotnet, meta-prompts, and more' },
+    ];
+    const registeredSources = new Set(marketplaces.map(m => m.source.toLowerCase()));
+    return known.filter(k => !registeredSources.has(k.repo.toLowerCase()));
+  }, [marketplaces]);
+
+  const handleAddSuggested = async (repo: string) => {
+    setAddingMp(true);
+    try {
+      const res = await fetch('/api/skill-catalog/marketplace/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo }),
+      });
+      if (res.ok) {
+        await fetchMarketplaces();
+      }
+    } finally {
+      setAddingMp(false);
+    }
+  };
+
   const filtered = useMemo(() => {
     if (!search.trim()) return plugins;
     const q = search.toLowerCase();
@@ -232,7 +261,42 @@ function SkillCatalog({ onInstallChanged }: { onInstallChanged: () => void }) {
       {/* Add marketplace form */}
       {showAddMp && (
         <Card>
-          <CardContent className="pt-4">
+          <CardContent className="pt-4 space-y-4">
+            {/* Suggested marketplaces */}
+            {suggestedMarketplaces.length > 0 && (
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">Suggested Marketplaces</Label>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {suggestedMarketplaces.map(mp => (
+                    <button
+                      key={mp.repo}
+                      onClick={() => handleAddSuggested(mp.repo)}
+                      disabled={addingMp}
+                      className="flex items-center gap-3 p-3 rounded-md border hover:bg-accent/50 text-left transition-colors disabled:opacity-50"
+                    >
+                      <Store className="h-4 w-4 text-muted-foreground shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium truncate">{mp.name}</p>
+                        <p className="text-xs text-muted-foreground truncate">{mp.description}</p>
+                        <p className="text-xs text-muted-foreground font-mono mt-0.5">{mp.repo}</p>
+                      </div>
+                      <Plus className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Separator */}
+            {suggestedMarketplaces.length > 0 && (
+              <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                <div className="flex-1 border-t" />
+                or add a custom marketplace
+                <div className="flex-1 border-t" />
+              </div>
+            )}
+
+            {/* Manual input */}
             <form onSubmit={handleAddMarketplace} className="flex items-end gap-3">
               <div className="flex-1 space-y-1">
                 <Label className="text-sm">GitHub Repository (owner/repo)</Label>

@@ -79,7 +79,7 @@ export default function AdminDaemonPage() {
   const exitedSessions = status?.sessions.filter(s => !s.alive) ?? [];
 
   return (
-    <div className="flex flex-col gap-6 p-8 max-w-4xl">
+    <div className="flex flex-col gap-6 p-8 max-w-4xl overflow-y-auto h-full">
       <div>
         <h2 className="text-2xl font-bold">Daemon Management</h2>
         <p className="text-muted-foreground mt-1">

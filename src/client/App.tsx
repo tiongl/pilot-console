@@ -9,7 +9,6 @@ import AgentsPage from './pages/AgentsPage';
 import NewProjectPage from './pages/NewProjectPage';
 import ProjectLayout from './pages/ProjectLayout';
 import ProjectChatPage from './pages/ProjectChatPage';
-import ProjectSessionsPage from './pages/ProjectSessionsPage';
 import ProjectSkillsPage from './pages/ProjectSkillsPage';
 import ProjectSettingsPage from './pages/ProjectSettingsPage';
 import AdminPage from './pages/AdminPage';
@@ -51,7 +50,6 @@ export function App() {
           <Route path="projects/:id" element={<ProjectLayout />}>
             <Route index element={<Navigate to="chat" replace />} />
             <Route path="chat" element={<ProjectChatPageKeyed />} />
-            <Route path="sessions" element={<ProjectSessionsPage />} />
             <Route path="skills" element={<ProjectSkillsPage />} />
             <Route path="settings" element={<ProjectSettingsPage />} />
           </Route>

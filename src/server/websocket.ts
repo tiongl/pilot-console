@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { IncomingMessage } from 'http';
 import { getUserFromToken, SESSION_COOKIE } from './middleware/auth';
-import { createCliSession, writeToSession, endCliSession, findActiveSession, detachSession, getSession } from '../shared/cli-bridge';
+import { createCliSession, writeToSession, endCliSession, findActiveSession, detachSession, getSession, type SessionMode } from '../shared/cli-bridge';
 import { getDaemonClient } from '../daemon/client';
 import type { WsClientMessage, WsServerMessage } from '../shared/types';
 
@@ -64,6 +64,8 @@ export function setupWebSocketServer(): WebSocketServer {
     const projectId = url.searchParams.get('projectId');
     const requestedSessionId = url.searchParams.get('sessionId');
     const forceNew = url.searchParams.get('new') === 'true';
+    const modeParam = url.searchParams.get('mode');
+    const mode = (['shell', 'powershell'].includes(modeParam!) ? modeParam : 'cli') as SessionMode;
 
     let managed;
     let isReconnect = false;
@@ -83,18 +85,18 @@ export function setupWebSocketServer(): WebSocketServer {
       }
     } else if (forceNew) {
       try {
-        managed = createCliSession(ws.userId, projectId);
+        managed = createCliSession(ws.userId, projectId, mode);
       } catch (err) {
         console.error('[ws] failed to create CLI session:', err);
         ws.close(4002, 'Failed to create session');
         return;
       }
     } else {
-      managed = findActiveSession(ws.userId, projectId ?? null);
+      managed = findActiveSession(ws.userId, projectId ?? null, mode);
       isReconnect = !!managed;
       if (!managed) {
         try {
-          managed = createCliSession(ws.userId, projectId);
+          managed = createCliSession(ws.userId, projectId, mode);
         } catch (err) {
           console.error('[ws] failed to create CLI session:', err);
           ws.close(4002, 'Failed to create session');

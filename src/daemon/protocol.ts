@@ -36,7 +36,7 @@ export interface CreateCmd {
   args: string[];
   cols: number;
   rows: number;
-  meta?: { userId?: string; projectId?: string | null };
+  meta?: { userId?: string; projectId?: string | null; mode?: string };
 }
 
 export interface WriteCmd {
@@ -125,9 +125,8 @@ export interface SessionInfo {
   lastOutputAt: number;
   bufferLength: number;
   seq: number;
-  meta?: { userId?: string; projectId?: string | null };
+  meta?: { userId?: string; projectId?: string | null; mode?: string };
 }
-
 export interface SessionsResp {
   type: 'sessions';
   reqId: string;

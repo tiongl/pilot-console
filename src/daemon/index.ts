@@ -38,7 +38,7 @@ interface DaemonSession {
   lastOutputAt: number;
   seq: number; // monotonic output sequence counter
   subscribers: Set<net.Socket>;
-  meta?: { userId?: string; projectId?: string | null };
+  meta?: { userId?: string; projectId?: string | null; mode?: string };
 }
 
 const sessions = new Map<string, DaemonSession>();

@@ -3,7 +3,7 @@ import { Outlet, Link, useNavigate, useLocation } from 'react-router';
 import { useAuth } from '../lib/auth-context';
 import { useTheme, THEMES, type ThemeId } from '../lib/theme-context';
 import { Button } from '../../../components/ui/button';
-import { Plus, Shield, LogOut, FolderOpen, Pin, Palette, Server } from 'lucide-react';
+import { Plus, Shield, LogOut, FolderOpen, Pin, Palette } from 'lucide-react';
 
 interface Project {
   id: string;
@@ -33,7 +33,7 @@ function StatusDot({ info }: { info: ProjectSessionInfo | undefined }) {
   if (info.status === 'busy') {
     return (
       <span
-        className="h-2 w-2 shrink-0 rounded-full bg-green-500 animate-pulse-dot"
+        className="h-2 w-2 shrink-0 rounded-full bg-yellow-400 animate-pulse-dot"
         title="Session active — working"
       />
     );
@@ -63,6 +63,7 @@ function StatusDot({ info }: { info: ProjectSessionInfo | undefined }) {
 }
 
 function ProjectNav({ projects }: { projects: Project[] }) {
+  const location = useLocation();
   const [projectStatuses, setProjectStatuses] = useState<Map<string, ProjectSessionInfo>>(new Map());
   const [pinnedIds, setPinnedIds] = useState<Set<string>>(
     new Set(projects.filter(p => p.pinned).map(p => p.id))
@@ -130,28 +131,35 @@ function ProjectNav({ projects }: { projects: Project[] }) {
 
   return (
     <>
-      {sorted.map((project) => (
-        <Link
-          key={project.id}
-          to={`/projects/${project.id}/chat`}
-          className="group flex items-center gap-3 rounded-lg px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors"
-        >
-          <FolderOpen className="h-4 w-4 shrink-0" />
-          <span className="truncate flex-1">{project.name}</span>
-          <button
-            onClick={(e) => togglePin(e, project.id)}
-            className={`h-4 w-4 shrink-0 transition-opacity ${
-              pinnedIds.has(project.id)
-                ? 'text-primary opacity-100'
-                : 'text-muted-foreground opacity-0 group-hover:opacity-100'
+      {sorted.map((project) => {
+        const isActive = location.pathname.startsWith(`/projects/${project.id}`);
+        return (
+          <Link
+            key={project.id}
+            to={`/projects/${project.id}/chat`}
+            className={`group flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
+              isActive
+                ? 'bg-accent text-accent-foreground font-medium'
+                : 'hover:bg-accent hover:text-accent-foreground'
             }`}
-            title={pinnedIds.has(project.id) ? 'Unpin' : 'Pin to top'}
           >
-            <Pin className="h-3.5 w-3.5" />
-          </button>
-          <StatusDot info={projectStatuses.get(project.id)} />
-        </Link>
-      ))}
+            <FolderOpen className="h-4 w-4 shrink-0" />
+            <span className="truncate flex-1">{project.name}</span>
+            <button
+              onClick={(e) => togglePin(e, project.id)}
+              className={`h-4 w-4 shrink-0 transition-opacity ${
+                pinnedIds.has(project.id)
+                  ? 'text-primary opacity-100'
+                  : 'text-muted-foreground opacity-0 group-hover:opacity-100'
+              }`}
+              title={pinnedIds.has(project.id) ? 'Unpin' : 'Pin to top'}
+            >
+              <Pin className="h-3.5 w-3.5" />
+            </button>
+            <StatusDot info={projectStatuses.get(project.id)} />
+          </Link>
+        );
+      })}
     </>
   );
 }
@@ -238,25 +246,25 @@ export default function DashboardLayout() {
               Admin
             </Link>
           )}
-          <Link
-            to="/daemon"
-            className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors"
-          >
-            <Server className="h-4 w-4" />
-            <span className="flex-1">Daemon</span>
-            <span
-              className={`h-2 w-2 shrink-0 rounded-full ${
-                daemonConnected === true ? 'bg-green-500' :
-                daemonConnected === false ? 'bg-red-500 animate-pulse' :
-                'bg-muted-foreground'
-              }`}
-              title={daemonConnected === true ? 'Daemon connected' : daemonConnected === false ? 'Daemon disconnected' : 'Checking...'}
-            />
-          </Link>
-          <Button variant="ghost" onClick={handleLogout} className="w-full justify-start gap-3 px-3">
-            <LogOut className="h-4 w-4" />
-            Sign out
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button variant="ghost" onClick={handleLogout} className="flex-1 justify-start gap-3 px-3">
+              <LogOut className="h-4 w-4" />
+              Sign out
+            </Button>
+            <Link
+              to="/daemon"
+              className="shrink-0 p-2 rounded-md hover:bg-accent transition-colors"
+              title={daemonConnected === true ? 'Daemon connected' : daemonConnected === false ? 'Daemon disconnected' : 'Checking daemon...'}
+            >
+              <span
+                className={`block h-2.5 w-2.5 rounded-full ${
+                  daemonConnected === true ? 'bg-green-500' :
+                  daemonConnected === false ? 'bg-red-500 animate-pulse' :
+                  'bg-muted-foreground'
+                }`}
+              />
+            </Link>
+          </div>
         </div>
       </aside>
 

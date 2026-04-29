@@ -96,13 +96,13 @@ export default function ProjectTodoPanel({ projectId, projectName }: Props) {
     };
 
     const rootItems = todos.filter(t => !t.parentId);
-    const md = `# Project Notes\n\n${buildMarkdown(rootItems)}\n`;
+    const md = `# Project TODOs\n\n${buildMarkdown(rootItems)}\n`;
 
     const blob = new Blob([md], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${projectName || 'project'}-notes.md`;
+    a.download = `${projectName || 'project'}-todos.md`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -180,7 +180,7 @@ export default function ProjectTodoPanel({ projectId, projectName }: Props) {
   return (
     <div className="flex flex-col h-full">
       <div className="px-3 py-2 border-b flex items-center gap-2">
-        <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Notes</h3>
+        <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">TODO</h3>
         {todos.length > 0 && (
           <Button variant="ghost" size="icon" className="h-6 w-6 ml-auto" onClick={exportToMarkdown} title="Export as Markdown">
             <Download className="h-3.5 w-3.5" />
@@ -190,7 +190,7 @@ export default function ProjectTodoPanel({ projectId, projectName }: Props) {
       <div className="flex-1 overflow-y-auto px-2 py-2 space-y-0">
         {rootTodos.map(todo => renderTodo(todo))}
         {todos.length === 0 && (
-          <p className="text-xs text-muted-foreground text-center py-4">No notes yet</p>
+          <p className="text-xs text-muted-foreground text-center py-4">No todos yet</p>
         )}
       </div>
       <div className="border-t px-2 py-2">

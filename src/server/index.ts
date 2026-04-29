@@ -138,7 +138,8 @@ app.delete('/api/projects/:id/session', (req, res) => {
 app.get('/api/projects/:id/sessions', (req, res) => {
   const project = getProjectById(req.params.id);
   if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
-  const sessions = listCopilotSessionsForProject(project.repoPath);
+  const search = (req.query.search as string) || undefined;
+  const sessions = listCopilotSessionsForProject(project.repoPath, 50, search);
   res.json({ sessions });
 });
 
@@ -267,6 +268,78 @@ app.get('/api/projects/:id/git-diff', (req, res) => {
     res.json({ diff: diff || 'No changes' });
   } catch (err) {
     res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get('/api/projects/:id/git-log', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const page = Math.max(1, parseInt(req.query.page as string) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 30));
+  const skip = (page - 1) * limit;
+  try {
+    const opts = { cwd: project.repoPath, encoding: 'utf-8' as const, timeout: 10000, maxBuffer: 2 * 1024 * 1024 };
+    // Use a unique delimiter to parse fields reliably
+    const SEP = '<<GCL_SEP>>';
+    const END = '<<GCL_END>>';
+    const format = [`%H`, `%h`, `%an`, `%ae`, `%aI`, `%s`].join(SEP) + END;
+    const raw = execSync(
+      `git log --format="${format}" --skip=${skip} --max-count=${limit + 1}`,
+      opts,
+    ).trim();
+    if (!raw) { res.json({ commits: [], hasMore: false }); return; }
+    const lines = raw.split(END).filter(l => l.trim());
+    const hasMore = lines.length > limit;
+    const commits = lines.slice(0, limit).map(line => {
+      const [hash, shortHash, author, authorEmail, date, message] = line.trim().split(SEP);
+      return { hash, shortHash, author, authorEmail, date, message };
+    });
+    res.json({ commits, hasMore, page });
+  } catch (err) {
+    res.status(500).json({ error: 'Git log failed', message: String(err) });
+  }
+});
+
+app.get('/api/projects/:id/git-commit/:hash', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const hash = req.params.hash.replace(/[^a-fA-F0-9]/g, '');
+  if (!hash) { res.status(400).json({ error: 'Invalid hash' }); return; }
+  try {
+    const opts = { cwd: project.repoPath, encoding: 'utf-8' as const, timeout: 10000, maxBuffer: 2 * 1024 * 1024 };
+    const SEP = '<<GCL_SEP>>';
+    const format = [`%H`, `%h`, `%an`, `%ae`, `%aI`, `%B`].join(SEP);
+    const meta = execSync(`git show -s --format="${format}" ${hash}`, opts).trim();
+    const [commitHash, shortHash, author, authorEmail, date, ...msgParts] = meta.split(SEP);
+    const message = msgParts.join(SEP).trim();
+
+    // Get changed files
+    let filesRaw = '';
+    try { filesRaw = execSync(`git diff-tree --no-commit-id -r --name-status ${hash}`, opts).trim(); } catch {}
+    const files = filesRaw ? filesRaw.split('\n').map(line => {
+      const [status, ...pathParts] = line.split('\t');
+      return { status: status.trim(), path: pathParts.join('\t') };
+    }) : [];
+
+    res.json({ hash: commitHash, shortHash, author, authorEmail, date, message, files });
+  } catch (err) {
+    res.status(500).json({ error: 'Git commit detail failed', message: String(err) });
+  }
+});
+
+app.get('/api/projects/:id/git-commit/:hash/diff', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const hash = req.params.hash.replace(/[^a-fA-F0-9]/g, '');
+  if (!hash) { res.status(400).json({ error: 'Invalid hash' }); return; }
+  const filePath = req.query.file as string | undefined;
+  try {
+    const opts = { cwd: project.repoPath, encoding: 'utf-8' as const, timeout: 10000, maxBuffer: 5 * 1024 * 1024 };
+    const fileArg = filePath ? ` -- "${filePath}"` : '';
+    const diff = execSync(`git show --format="" ${hash}${fileArg}`, opts).trim();
+    res.json({ diff: diff || 'No changes' });
+  } catch (err) {
+    res.status(500).json({ error: 'Git diff failed', message: String(err) });
   }
 });
 
@@ -459,7 +532,7 @@ app.post('/api/skill-catalog/marketplace/add', (req, res) => {
   const { repo } = req.body;
   if (!repo) { res.status(400).json({ error: 'Missing repo' }); return; }
   try {
-    const output = execSync(`gh copilot plugin marketplace register ${repo}`, { encoding: 'utf-8', timeout: 30000 });
+    const output = execSync(`gh copilot plugin marketplace add ${repo}`, { encoding: 'utf-8', timeout: 30000 });
     res.json({ ok: true, output: output.trim() });
   } catch (err) {
     res.status(500).json({ error: String(err) });
