@@ -17,6 +17,8 @@ export interface ManagedProcess {
   onExit: ((code: number) => void) | null;
   alive: boolean;
   lastOutputAt: number;
+  /** Timestamp of last resize — output right after resize is just a redraw, not real work */
+  lastResizeAt: number;
   lastExitCode: number | null;
   exitedAt: number | null;
   /** Tracks the currently active WebSocket connection (used to prevent stale detach) */
@@ -26,14 +28,19 @@ export interface ManagedProcess {
 const activeSessions = new Map<string, ManagedProcess>();
 const recentlyExited = new Map<string, ManagedProcess>();
 const EXITED_RETENTION_MS = 30_000;
-const BUSY_THRESHOLD_MS = 10_000;
+
+// Idle detection: session is "busy" only while it is actively producing output.
+// We use a simple time-since-last-output approach with a 5-second cooldown.
+const IDLE_AFTER_MS = 5_000;
 
 export type SessionStatus = 'idle' | 'busy' | 'exited';
 
 export function getSessionStatus(session: ManagedProcess): SessionStatus {
   if (!session.alive) return 'exited';
-  if (session.lastOutputAt > 0 && Date.now() - session.lastOutputAt < BUSY_THRESHOLD_MS) return 'busy';
-  return 'idle';
+
+  // If we've never seen output or last output was long enough ago → idle
+  if (!session.lastOutputAt) return 'idle';
+  return (Date.now() - session.lastOutputAt) < IDLE_AFTER_MS ? 'busy' : 'idle';
 }
 
 const CLI_COMMAND = process.env.COPILOT_CLI_COMMAND ?? 'gh';
@@ -85,7 +92,22 @@ function wireDaemonListeners(managed: ManagedProcess) {
     if (managed.outputBuffer.length > MAX_SCROLLBACK) {
       managed.outputBuffer = managed.outputBuffer.slice(-MAX_SCROLLBACK);
     }
-    managed.lastOutputAt = Date.now();
+    // Only count output with visible content for idle detection.
+    // Strip ANSI escapes, control chars, and whitespace — if nothing
+    // remains, this is just cursor/prompt noise, not real work.
+    const visible = data
+      .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')        // CSI sequences
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC (window title)
+      .replace(/\x1b[P_^][^\x1b]*\x1b\\/g, '')        // DCS/APC/PM
+      .replace(/\x1b[()][0-9A-Za-z]/g, '')             // Charset selection
+      .replace(/\x1b[=>NOcMDEHZ78]/g, '')              // Single-char escapes
+      .replace(/[\x07\x08\r\n\t ]/g, '')               // Control chars + whitespace
+      .trim();
+    // Ignore output that arrives within 2s of a resize — it's just a UI redraw
+    const sinceResize = managed.lastResizeAt ? Date.now() - managed.lastResizeAt : Infinity;
+    if (visible.length > 3 && sinceResize > 2_000) {
+      managed.lastOutputAt = Date.now();
+    }
     managed.onOutput?.(data);
     if (managed.mode === 'cli') {
       extractAndStoreSessionId(managed.sessionId, data);
@@ -159,6 +181,7 @@ export function createCliSession(userId: string, projectId?: string | null, mode
     onExit: null,
     alive: true,
     lastOutputAt: 0,
+    lastResizeAt: 0,
     lastExitCode: null,
     exitedAt: null,
     activeWsId: null,
@@ -250,12 +273,12 @@ export async function initDaemonBridge(): Promise<void> {
   const maxRetries = 3;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      await client.connect();
+      await client.connect(true); // auto-start daemon on server boot
       break;
     } catch (err) {
       console.error(`[cli-bridge] Failed to connect to daemon (attempt ${attempt}/${maxRetries}):`, err);
       if (attempt === maxRetries) {
-        console.error('[cli-bridge] Giving up on daemon connection. Terminals will not work.');
+        console.warn('[cli-bridge] Daemon not running. Start it from the Daemon page.');
         return;
       }
       await new Promise(r => setTimeout(r, 2000));
@@ -285,6 +308,7 @@ export async function initDaemonBridge(): Promise<void> {
       onExit: null,
       alive: true,
       lastOutputAt: info.lastOutputAt,
+      lastResizeAt: 0,
       lastExitCode: null,
       exitedAt: null,
       activeWsId: null,

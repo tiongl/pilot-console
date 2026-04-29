@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import { Bookmark, Plus, Trash2, Send, X } from 'lucide-react';
+import { Bookmark, Plus, Trash2, Send, X, Copy, Check } from 'lucide-react';
 
 interface Snippet {
   id: string;
@@ -25,6 +25,13 @@ export default function SnippetPanel({ projectId, onInsert }: Props) {
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(true);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const copySnippet = (text: string, id: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 1500);
+  };
 
   const fetchSnippets = useCallback(async () => {
     try {
@@ -95,7 +102,10 @@ export default function SnippetPanel({ projectId, onInsert }: Props) {
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-medium truncate">{s.title}</span>
                   <div className="hidden group-hover:flex items-center gap-0.5">
-                    {onInsert && (
+                      <button onClick={() => copySnippet(s.content, s.id)} className="h-5 w-5 flex items-center justify-center text-muted-foreground hover:text-foreground" title="Copy">
+                        {copiedId === s.id ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+                      </button>
+                      {onInsert && (
                       <button onClick={() => onInsert(s.content)} className="h-5 w-5 flex items-center justify-center text-muted-foreground hover:text-foreground" title="Insert into terminal">
                         <Send className="h-3 w-3" />
                       </button>

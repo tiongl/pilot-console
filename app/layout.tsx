@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "GC Clippy — GitHub Copilot CLI Web UI",
+  title: "Clippy — GitHub Copilot CLI Web UI",
   description: "Browser-based interface for GitHub Copilot CLI",
 };
 

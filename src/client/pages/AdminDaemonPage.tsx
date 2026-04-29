@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../lib/auth-context';
 import { Button } from '../../../components/ui/button';
-import { RefreshCw, Trash2, Server, Activity, AlertTriangle } from 'lucide-react';
+import { RefreshCw, Trash2, Server, Activity, AlertTriangle, Play } from 'lucide-react';
 
 interface DaemonSession {
   sessionId: string;
@@ -25,6 +25,7 @@ export default function AdminDaemonPage() {
   const [status, setStatus] = useState<DaemonStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [restarting, setRestarting] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchStatus = useCallback(async () => {
@@ -63,6 +64,23 @@ export default function AdminDaemonPage() {
       setError('Failed to restart daemon');
     } finally {
       setRestarting(false);
+    }
+  };
+
+  const handleStart = async () => {
+    setStarting(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/daemon/start', { method: 'POST' });
+      const data = await res.json();
+      if (!data.ok) {
+        setError(data.error ?? 'Start failed');
+      }
+      await fetchStatus();
+    } catch {
+      setError('Failed to start daemon');
+    } finally {
+      setStarting(false);
     }
   };
 
@@ -113,17 +131,30 @@ export default function AdminDaemonPage() {
               </div>
             </div>
           </div>
-          {isAdmin && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleRestart}
-              disabled={restarting}
-            >
-              <RefreshCw className={`h-4 w-4 mr-2 ${restarting ? 'animate-spin' : ''}`} />
-              {restarting ? 'Restarting...' : 'Restart Daemon'}
-            </Button>
-          )}
+          <div className="flex items-center gap-2">
+            {!loading && !status?.connected && (
+              <Button
+                variant="default"
+                size="sm"
+                onClick={handleStart}
+                disabled={starting}
+              >
+                <Play className={`h-4 w-4 mr-2 ${starting ? 'animate-pulse' : ''}`} />
+                {starting ? 'Starting...' : 'Start Daemon'}
+              </Button>
+            )}
+            {isAdmin && status?.connected && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRestart}
+                disabled={restarting}
+              >
+                <RefreshCw className={`h-4 w-4 mr-2 ${restarting ? 'animate-spin' : ''}`} />
+                {restarting ? 'Restarting...' : 'Restart Daemon'}
+              </Button>
+            )}
+          </div>
         </div>
         <div className="mt-4 grid grid-cols-3 gap-4 text-center">
           <div className="rounded-md bg-muted/50 px-3 py-2">

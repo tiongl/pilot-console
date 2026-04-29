@@ -587,6 +587,18 @@ app.get('/api/daemon/status', requireAuth, async (req, res) => {
   }
 });
 
+app.post('/api/daemon/start', requireAuth, async (req, res) => {
+  const { getDaemonClient } = await import('../daemon/client');
+  const client = getDaemonClient();
+  try {
+    await client.connect(true); // auto-start daemon
+    await initDaemonBridge();
+    res.json({ ok: true, connected: client.isConnected });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
 app.post('/api/daemon/restart', requireAdmin, async (req, res) => {
   const { getDaemonClient } = await import('../daemon/client');
   const client = getDaemonClient();
@@ -595,7 +607,7 @@ app.post('/api/daemon/restart', requireAdmin, async (req, res) => {
   const os = await import('os');
 
   // Kill existing daemon by PID
-  const pidPath = path.join(os.homedir(), '.gcclippy', 'daemon.pid');
+  const pidPath = path.join(os.homedir(), '.clippy', 'daemon.pid');
   try {
     if (fs.existsSync(pidPath)) {
       const daemonPid = parseInt(fs.readFileSync(pidPath, 'utf-8').trim(), 10);
@@ -607,8 +619,8 @@ app.post('/api/daemon/restart', requireAdmin, async (req, res) => {
   } catch { /* ok */ }
 
   // Clean up secret and lock so the new daemon generates fresh ones
-  const secretPath = path.join(os.homedir(), '.gcclippy', 'daemon.secret');
-  const lockPath = path.join(os.homedir(), '.gcclippy', 'daemon.lock');
+  const secretPath = path.join(os.homedir(), '.clippy', 'daemon.secret');
+  const lockPath = path.join(os.homedir(), '.clippy', 'daemon.lock');
   try { fs.unlinkSync(secretPath); } catch { /* ok */ }
   try { fs.unlinkSync(lockPath); } catch { /* ok */ }
 

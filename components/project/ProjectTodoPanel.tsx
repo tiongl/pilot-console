@@ -2,8 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Plus, Trash2, ChevronRight, ChevronDown, Download } from 'lucide-react';
+import { Plus, Trash2, ChevronRight, ChevronDown, Download, Copy, Check } from 'lucide-react';
 
 interface TodoItem {
   id: string;
@@ -24,7 +23,14 @@ export default function ProjectTodoPanel({ projectId, projectName }: Props) {
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [newText, setNewText] = useState('');
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  const copyTodo = (text: string, id: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 1500);
+  };
 
   const fetchTodos = useCallback(async () => {
     try {
@@ -118,10 +124,10 @@ export default function ProjectTodoPanel({ projectId, projectName }: Props) {
 
     return (
       <div key={todo.id} style={{ paddingLeft: depth * 16 }}>
-        <div className="group flex items-center gap-1 py-0.5 hover:bg-accent/50 rounded px-1">
+        <div className="group flex items-start gap-1 py-0.5 hover:bg-accent/50 rounded px-1">
           {/* Expand/collapse toggle */}
           <button
-            className="h-4 w-4 shrink-0 flex items-center justify-center text-muted-foreground"
+            className="h-5 w-4 shrink-0 flex items-center justify-center text-muted-foreground mt-0.5"
             onClick={() => hasChildren && toggleCollapse(todo.id)}
           >
             {hasChildren ? (
@@ -136,24 +142,39 @@ export default function ProjectTodoPanel({ projectId, projectName }: Props) {
             type="checkbox"
             checked={!!todo.done}
             onChange={(e) => updateTodo(todo.id, { done: e.target.checked })}
-            className="h-3.5 w-3.5 shrink-0 rounded border-muted-foreground/50"
+            className="h-3.5 w-3.5 shrink-0 rounded border-muted-foreground/50 mt-1"
           />
 
-          {/* Text — editable on blur */}
-          <input
-            type="text"
+          {/* Text — multi-line, auto-resize */}
+          <textarea
             defaultValue={todo.text}
+            rows={1}
             onBlur={(e) => {
               if (e.target.value !== todo.text) updateTodo(todo.id, { text: e.target.value });
             }}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); (e.target as HTMLTextAreaElement).blur(); }
             }}
-            className={`flex-1 bg-transparent text-xs outline-none border-none px-1 min-w-0 ${todo.done ? 'line-through text-muted-foreground' : ''}`}
+            onInput={(e) => {
+              const el = e.target as HTMLTextAreaElement;
+              el.style.height = 'auto';
+              el.style.height = el.scrollHeight + 'px';
+            }}
+            ref={(el) => {
+              if (el) { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; }
+            }}
+            className={`flex-1 bg-transparent text-xs outline-none border-none px-1 min-w-0 resize-none overflow-hidden leading-5 ${todo.done ? 'line-through text-muted-foreground' : ''}`}
           />
 
           {/* Actions */}
-          <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
+          <div className="hidden group-hover:flex items-center gap-0.5 shrink-0 mt-0.5">
+            <button
+              onClick={() => copyTodo(todo.text, todo.id)}
+              className="h-5 w-5 flex items-center justify-center text-muted-foreground hover:text-foreground rounded"
+              title="Copy"
+            >
+              {copiedId === todo.id ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+            </button>
             <button
               onClick={() => addTodo(todo.id)}
               className="h-5 w-5 flex items-center justify-center text-muted-foreground hover:text-foreground rounded"
@@ -180,7 +201,7 @@ export default function ProjectTodoPanel({ projectId, projectName }: Props) {
   return (
     <div className="flex flex-col h-full">
       <div className="px-3 py-2 border-b flex items-center gap-2">
-        <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">TODO</h3>
+        <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">TODO Prompt</h3>
         {todos.length > 0 && (
           <Button variant="ghost" size="icon" className="h-6 w-6 ml-auto" onClick={exportToMarkdown} title="Export as Markdown">
             <Download className="h-3.5 w-3.5" />
@@ -195,12 +216,15 @@ export default function ProjectTodoPanel({ projectId, projectName }: Props) {
       </div>
       <div className="border-t px-2 py-2">
         <form onSubmit={(e) => { e.preventDefault(); addTodo(); }} className="flex gap-1">
-          <Input
+          <textarea
             ref={inputRef}
             value={newText}
             onChange={(e) => setNewText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); addTodo(); } }}
+            onInput={(e) => { const el = e.target as HTMLTextAreaElement; el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 80) + 'px'; }}
             placeholder="Add a note..."
-            className="h-7 text-xs"
+            rows={1}
+            className="flex-1 bg-transparent text-xs outline-none border border-input rounded px-2 py-1.5 min-w-0 resize-none overflow-hidden leading-5"
           />
           <Button type="submit" size="icon" variant="ghost" className="h-7 w-7 shrink-0" disabled={!newText.trim()}>
             <Plus className="h-3.5 w-3.5" />

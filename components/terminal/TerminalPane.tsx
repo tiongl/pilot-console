@@ -56,6 +56,10 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
     // Prevent browser from intercepting Tab/Shift+Tab for focus navigation
     // and manually send the correct escape sequences
     term.attachCustomKeyEventHandler((e) => {
+      // Let Ctrl+Shift shortcuts pass through to app-level handlers
+      if (e.ctrlKey && e.shiftKey && e.type === 'keydown') {
+        return false;
+      }
       if (e.key === 'Tab' && e.shiftKey && e.type === 'keydown') {
         // Shift+Tab = backtab, send CSI Z
         onInputRef.current('\x1b[Z');
@@ -192,5 +196,7 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
     return () => window.removeEventListener('keydown', handleKeyDown, true);
   }, []);
 
-  return <div ref={containerRef} className="h-full w-full" onClick={handleClick} />;
+  const theme = getThemeByName(themeName ?? 'Catppuccin');
+
+  return <div ref={containerRef} className="h-full w-full" style={{ backgroundColor: theme.theme.background }} onClick={handleClick} />;
 }

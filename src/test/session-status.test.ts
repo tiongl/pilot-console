@@ -30,12 +30,12 @@ describe('session status logic', () => {
   });
 
   describe('getSessionStatus computation (mirrors cli-bridge)', () => {
-    const BUSY_THRESHOLD_MS = 10_000;
+    const IDLE_AFTER_MS = 5_000;
 
     function getSessionStatus(alive: boolean, lastOutputAt: number, now: number): SessionStatus {
       if (!alive) return 'exited';
-      if (lastOutputAt > 0 && now - lastOutputAt < BUSY_THRESHOLD_MS) return 'busy';
-      return 'idle';
+      if (!lastOutputAt) return 'idle';
+      return (now - lastOutputAt) < IDLE_AFTER_MS ? 'busy' : 'idle';
     }
 
     it('returns idle when alive with no output', () => {
@@ -44,24 +44,24 @@ describe('session status logic', () => {
 
     it('returns busy when alive with recent output', () => {
       const now = Date.now();
-      expect(getSessionStatus(true, now - 5000, now)).toBe('busy');
+      expect(getSessionStatus(true, now - 2000, now)).toBe('busy');
     });
 
     it('returns idle when alive with old output', () => {
       const now = Date.now();
-      expect(getSessionStatus(true, now - 15000, now)).toBe('idle');
+      expect(getSessionStatus(true, now - 10000, now)).toBe('idle');
     });
 
     it('returns busy at exactly threshold boundary', () => {
       const now = Date.now();
-      // At 9999ms, should still be busy
-      expect(getSessionStatus(true, now - 9999, now)).toBe('busy');
+      // At 4999ms, should still be busy
+      expect(getSessionStatus(true, now - 4999, now)).toBe('busy');
     });
 
     it('returns idle at exactly threshold', () => {
       const now = Date.now();
-      // At 10000ms, should be idle
-      expect(getSessionStatus(true, now - 10000, now)).toBe('idle');
+      // At 5000ms, should be idle
+      expect(getSessionStatus(true, now - 5000, now)).toBe('idle');
     });
 
     it('returns exited when not alive', () => {

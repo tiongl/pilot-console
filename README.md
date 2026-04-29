@@ -1,4 +1,4 @@
-# GCClippy
+# Clippy
 
 A GitHub Copilot CLI session manager with a web dashboard.
 
@@ -19,14 +19,14 @@ A GitHub Copilot CLI session manager with a web dashboard.
 **Option 1 — One-liner** (requires `gh`):
 
 ```bash
-gh repo clone tionglee_microsoft/gcclippy ~/.gcclippy/app && cd ~/.gcclippy/app && npm install && npm link
+gh repo clone tionglee_microsoft/clippy ~/.clippy/app && cd ~/.clippy/app && npm install && npm link
 ```
 
 **Option 2 — Manual:**
 
 ```bash
-git clone https://github.com/tionglee_microsoft/gcclippy.git ~/.gcclippy/app
-cd ~/.gcclippy/app
+git clone https://github.com/tionglee_microsoft/clippy.git ~/.clippy/app
+cd ~/.clippy/app
 npm install
 npm link
 ```
@@ -36,7 +36,7 @@ npm link
 **Option 1 — One-liner** (PowerShell, requires `gh`):
 
 ```powershell
-gh repo clone tionglee_microsoft/gcclippy $HOME\.gcclippy\app; cd $HOME\.gcclippy\app; npm install; npm link
+gh repo clone tionglee_microsoft/clippy $HOME\.clippy\app; cd $HOME\.clippy\app; npm install; npm link
 ```
 
 **Option 2 — Installer script** (from a local clone):
@@ -48,8 +48,8 @@ gh repo clone tionglee_microsoft/gcclippy $HOME\.gcclippy\app; cd $HOME\.gcclipp
 **Option 3 — Manual** (PowerShell):
 
 ```powershell
-git clone https://github.com/tionglee_microsoft/gcclippy.git $HOME\.gcclippy\app
-cd $HOME\.gcclippy\app
+git clone https://github.com/tionglee_microsoft/clippy.git $HOME\.clippy\app
+cd $HOME\.clippy\app
 npm install
 npm link
 ```

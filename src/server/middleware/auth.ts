@@ -56,7 +56,7 @@ export function getUserFromToken(token: string): User | null {
   return getUserById(row.user_id);
 }
 
-export const SESSION_COOKIE = 'gcclippy_session';
+export const SESSION_COOKIE = 'clippy_session';
 
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
   const token = req.cookies?.[SESSION_COOKIE];

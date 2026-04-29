@@ -1,14 +1,14 @@
 #!/usr/bin/env pwsh
-# GCClippy installer for Windows
+# Clippy installer for Windows
 # Usage: .\scripts\install.ps1  (from a local clone)
 #   or:  pwsh -File path\to\install.ps1
 
 $ErrorActionPreference = "Stop"
 
-$installDir = Join-Path $env:USERPROFILE ".gcclippy" "app"
-$repoUrl = "https://github.com/tionglee_microsoft/gcclippy.git"
+$installDir = Join-Path $env:USERPROFILE ".clippy" "app"
+$repoUrl = "https://github.com/tionglee_microsoft/clippy.git"
 
-Write-Host "`n=== GCClippy Installer ===" -ForegroundColor Cyan
+Write-Host "`n=== Clippy Installer ===" -ForegroundColor Cyan
 
 # Check prerequisites
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
@@ -30,7 +30,7 @@ if (Test-Path $installDir) {
     git pull --ff-only
     Pop-Location
 } else {
-    Write-Host "Cloning gcclippy..." -ForegroundColor Yellow
+    Write-Host "Cloning clippy..." -ForegroundColor Yellow
     New-Item -ItemType Directory -Force -Path (Split-Path $installDir) | Out-Null
     git clone $repoUrl $installDir
 }

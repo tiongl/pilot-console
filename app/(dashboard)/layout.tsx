@@ -19,7 +19,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
       {/* Sidebar */}
       <aside className="flex w-60 flex-col border-r bg-muted/40 px-3 py-4">
         <div className="mb-4 px-3">
-          <h1 className="text-lg font-bold">GC Clippy</h1>
+          <h1 className="text-lg font-bold">Clippy</h1>
           <p className="text-xs text-muted-foreground truncate">{session.user?.name ?? session.user?.email}</p>
         </div>
 

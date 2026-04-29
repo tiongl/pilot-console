@@ -317,3 +317,109 @@
 .animate-pulse-dot {
   animation: pulse-dot 1.5s ease-in-out infinite;
 }
+
+/* Terminal padding */
+.xterm {
+  padding: 8px;
+  box-sizing: border-box;
+}
+.xterm-viewport {
+  background-color: inherit !important;
+}
+
+/* diff2html theme overrides */
+.diff-viewer-container .d2h-wrapper {
+  background: transparent;
+}
+.diff-viewer-container .d2h-file-header,
+.diff-viewer-container .d2h-file-diff {
+  background: hsl(var(--card));
+  border-color: hsl(var(--border));
+}
+.diff-viewer-container .d2h-file-header {
+  color: hsl(var(--foreground));
+}
+.diff-viewer-container .d2h-diff-table {
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+}
+.diff-viewer-container .d2h-code-line,
+.diff-viewer-container .d2h-code-side-line {
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+}
+.diff-viewer-container .d2h-code-line-prefix {
+  color: hsl(var(--muted-foreground));
+}
+.diff-viewer-container .d2h-code-linenumber {
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  border-color: hsl(var(--border));
+}
+/* Light theme diff colors */
+.diff-viewer-container .d2h-ins,
+.diff-viewer-container .d2h-ins .d2h-code-line,
+.diff-viewer-container .d2h-ins .d2h-code-side-line {
+  background: rgba(34, 134, 58, 0.08);
+  color: #1a7f37;
+}
+.diff-viewer-container .d2h-ins .d2h-code-line-prefix { color: #1a7f37; }
+.diff-viewer-container .d2h-code-line-ctn ins,
+.diff-viewer-container .d2h-code-side-line ins {
+  background: rgba(34, 134, 58, 0.18);
+  text-decoration: none;
+  color: #1a7f37;
+}
+.diff-viewer-container .d2h-del,
+.diff-viewer-container .d2h-del .d2h-code-line,
+.diff-viewer-container .d2h-del .d2h-code-side-line {
+  background: rgba(207, 34, 46, 0.08);
+  color: #cf222e;
+}
+.diff-viewer-container .d2h-del .d2h-code-line-prefix { color: #cf222e; }
+.diff-viewer-container .d2h-code-line-ctn del,
+.diff-viewer-container .d2h-code-side-line del {
+  background: rgba(207, 34, 46, 0.18);
+  text-decoration: none;
+  color: #cf222e;
+}
+.diff-viewer-container .d2h-info,
+.diff-viewer-container .d2h-info .d2h-code-line {
+  background: rgba(54, 120, 198, 0.08);
+  color: #0969da;
+}
+.diff-viewer-container .d2h-emptyplaceholder {
+  background: rgba(128, 128, 128, 0.06);
+}
+/* Dark theme diff colors */
+.dark .diff-viewer-container .d2h-ins,
+.dark .diff-viewer-container .d2h-ins .d2h-code-line,
+.dark .diff-viewer-container .d2h-ins .d2h-code-side-line {
+  background: rgba(166, 227, 161, 0.12);
+  color: #a6e3a1;
+}
+.dark .diff-viewer-container .d2h-ins .d2h-code-line-prefix { color: #a6e3a1; }
+.dark .diff-viewer-container .d2h-code-line-ctn ins,
+.dark .diff-viewer-container .d2h-code-side-line ins {
+  background: rgba(166, 227, 161, 0.25);
+  color: #a6e3a1;
+}
+.dark .diff-viewer-container .d2h-del,
+.dark .diff-viewer-container .d2h-del .d2h-code-line,
+.dark .diff-viewer-container .d2h-del .d2h-code-side-line {
+  background: rgba(243, 139, 168, 0.12);
+  color: #f38ba8;
+}
+.dark .diff-viewer-container .d2h-del .d2h-code-line-prefix { color: #f38ba8; }
+.dark .diff-viewer-container .d2h-code-line-ctn del,
+.dark .diff-viewer-container .d2h-code-side-line del {
+  background: rgba(243, 139, 168, 0.25);
+  color: #f38ba8;
+}
+.dark .diff-viewer-container .d2h-info,
+.dark .diff-viewer-container .d2h-info .d2h-code-line {
+  background: rgba(137, 180, 250, 0.1);
+  color: #89b4fa;
+}
+.dark .diff-viewer-container .d2h-emptyplaceholder {
+  background: rgba(88, 91, 112, 0.15);
+}

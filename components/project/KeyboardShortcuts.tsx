@@ -23,8 +23,10 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
 
   useEffect(() => {
     function handler(e: KeyboardEvent) {
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      const target = e.target as HTMLElement;
+      const tag = target?.tagName;
+      const isXterm = target?.classList?.contains('xterm-helper-textarea');
+      if ((tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') && !isXterm) return;
 
       if (e.ctrlKey && e.shiftKey) {
         switch (e.key) {

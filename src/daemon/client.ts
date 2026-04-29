@@ -1,5 +1,5 @@
 /**
- * Client for the gcclippy session daemon.
+ * Client for the Clippy session daemon.
  *
  * Provides an async API for creating/managing PTY sessions that are owned
  * by the daemon process. The client auto-starts the daemon if it isn't
@@ -33,10 +33,11 @@ export class DaemonClient {
   private exitListeners = new Map<string, (code: number) => void>();
   private connected = false;
   private connecting = false;
+  private intentionalDisconnect = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /** Connect to the daemon, starting it if necessary. */
-  async connect(): Promise<void> {
+  /** Connect to the daemon. If autoStart is true (default), starts daemon if not running. */
+  async connect(autoStart = true): Promise<void> {
     if (this.connected) return;
     if (this.connecting) {
       // Wait for existing connection attempt
@@ -50,9 +51,14 @@ export class DaemonClient {
     }
 
     this.connecting = true;
+    this.intentionalDisconnect = false;
     try {
       await this.tryConnect();
     } catch {
+      if (!autoStart) {
+        this.connecting = false;
+        throw new Error('Daemon not running');
+      }
       // Daemon not running — start it
       console.log('[daemon-client] Daemon not running, starting...');
       await this.startDaemon();
@@ -118,7 +124,9 @@ export class DaemonClient {
       this.connected = false;
       this.socket = null;
       console.log('[daemon-client] Disconnected from daemon');
-      this.scheduleReconnect();
+      if (!this.intentionalDisconnect) {
+        this.scheduleReconnect();
+      }
     });
 
     socket.on('error', (err) => {
@@ -152,9 +160,9 @@ export class DaemonClient {
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
       try {
-        await this.connect();
-      } catch (err) {
-        console.error('[daemon-client] Reconnect failed:', (err as Error).message);
+        await this.connect(false); // don't auto-start on reconnect
+      } catch {
+        // Daemon not running — just schedule another check
         this.scheduleReconnect();
       }
     }, 3_000);
@@ -351,12 +359,13 @@ export class DaemonClient {
 
   private async ensureConnected(): Promise<void> {
     if (!this.connected) {
-      await this.connect();
+      throw new Error('Not connected to daemon');
     }
   }
 
   /** Disconnect from daemon (doesn't kill the daemon). */
   disconnect() {
+    this.intentionalDisconnect = true;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

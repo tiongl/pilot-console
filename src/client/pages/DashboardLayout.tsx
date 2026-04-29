@@ -3,7 +3,9 @@ import { Outlet, Link, useNavigate, useLocation } from 'react-router';
 import { useAuth } from '../lib/auth-context';
 import { useTheme, THEMES, type ThemeId } from '../lib/theme-context';
 import { Button } from '../../../components/ui/button';
-import { Plus, Shield, LogOut, FolderOpen, Pin, Palette } from 'lucide-react';
+import { Plus, Shield, LogOut, FolderOpen, Pin, Palette, Settings } from 'lucide-react';
+import { SkillCatalog, InstalledSkillsPanel } from '../pages/ProjectSkillsPage';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../../components/ui/dialog';
 
 interface Project {
   id: string;
@@ -171,6 +173,8 @@ export default function DashboardLayout() {
   const location = useLocation();
   const [projects, setProjects] = useState<Project[]>([]);
   const [daemonConnected, setDaemonConnected] = useState<boolean | null>(null);
+  const [showSkillsDialog, setShowSkillsDialog] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<'skills' | 'marketplace'>('skills');
 
   useEffect(() => {
     fetch('/api/projects')
@@ -206,10 +210,23 @@ export default function DashboardLayout() {
   return (
     <div className="flex h-screen bg-background">
       <aside className="flex w-60 flex-col border-r bg-muted/40 px-3 py-4">
-        <div className="mb-4 px-3">
-          <h1 className="text-lg font-bold">GC Clippy</h1>
-          <p className="text-xs text-muted-foreground truncate">{user?.displayName ?? user?.email}</p>
+        <div className="mb-2 px-3">
+          <div className="flex items-center gap-2">
+            <img src="/clippy-logo.svg" alt="Clippy" className="h-7 w-7" />
+            <h1 className="text-lg font-bold flex-1">Clippy</h1>
+          </div>
+          <div className="flex items-center gap-1 mt-1">
+            <p className="text-xs text-muted-foreground truncate flex-1">{user?.displayName ?? user?.email}</p>
+            <button
+              onClick={() => setShowSkillsDialog(true)}
+              className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
+              title="Settings"
+            >
+              <Settings className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
+        <div className="border-t mx-3 mb-2" />
 
         <div className="flex items-center justify-between px-3 mb-2">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Projects</span>
@@ -254,7 +271,7 @@ export default function DashboardLayout() {
             <Link
               to="/daemon"
               className="shrink-0 p-2 rounded-md hover:bg-accent transition-colors"
-              title={daemonConnected === true ? 'Daemon connected' : daemonConnected === false ? 'Daemon disconnected' : 'Checking daemon...'}
+              title={daemonConnected === true ? 'Daemon connected' : daemonConnected === false ? 'Daemon not running — click to start' : 'Checking daemon...'}
             >
               <span
                 className={`block h-2.5 w-2.5 rounded-full ${
@@ -271,6 +288,35 @@ export default function DashboardLayout() {
       <main className="flex flex-1 flex-col overflow-hidden">
         <Outlet />
       </main>
+
+      <Dialog open={showSkillsDialog} onOpenChange={setShowSkillsDialog}>
+        <DialogContent className="sm:max-w-2xl max-h-[80vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>Settings</DialogTitle>
+          </DialogHeader>
+          <div className="flex gap-1 border-b">
+            <button
+              onClick={() => setSettingsTab('skills')}
+              className={`px-3 py-1.5 text-sm transition-colors ${settingsTab === 'skills' ? 'border-b-2 border-primary font-medium' : 'text-muted-foreground hover:text-foreground'}`}
+            >
+              Skills & MCP
+            </button>
+            <button
+              onClick={() => setSettingsTab('marketplace')}
+              className={`px-3 py-1.5 text-sm transition-colors ${settingsTab === 'marketplace' ? 'border-b-2 border-primary font-medium' : 'text-muted-foreground hover:text-foreground'}`}
+            >
+              Marketplace
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto pt-2">
+            {settingsTab === 'skills' && (() => {
+              const match = location.pathname.match(/^\/projects\/([^/]+)/);
+              return match ? <InstalledSkillsPanel projectId={match[1]} /> : <p className="text-sm text-muted-foreground">Select a project first.</p>;
+            })()}
+            {settingsTab === 'marketplace' && <SkillCatalog onInstallChanged={() => {}} />}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

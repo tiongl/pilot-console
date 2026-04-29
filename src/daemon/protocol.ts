@@ -1,5 +1,5 @@
 /**
- * Shared protocol types for the gcclippy session daemon.
+ * Shared protocol types for the Clippy session daemon.
  *
  * Communication between the Express server and the daemon uses
  * newline-delimited JSON (NDJSON) over a named pipe (Windows)
@@ -15,13 +15,13 @@ import os from 'os';
 
 const IS_WINDOWS = process.platform === 'win32';
 export const DAEMON_SOCKET_PATH = IS_WINDOWS
-  ? '\\\\.\\pipe\\gcclippy-daemon'
-  : path.join(os.tmpdir(), 'gcclippy-daemon.sock');
+  ? '\\\\.\\pipe\\clippy-daemon'
+  : path.join(os.tmpdir(), 'clippy-daemon.sock');
 
 // Simple shared secret file-based auth (daemon writes, client reads)
-export const DAEMON_SECRET_PATH = path.join(os.homedir(), '.gcclippy', 'daemon.secret');
-export const DAEMON_PID_PATH = path.join(os.homedir(), '.gcclippy', 'daemon.pid');
-export const DAEMON_LOCK_PATH = path.join(os.homedir(), '.gcclippy', 'daemon.lock');
+export const DAEMON_SECRET_PATH = path.join(os.homedir(), '.clippy', 'daemon.secret');
+export const DAEMON_PID_PATH = path.join(os.homedir(), '.clippy', 'daemon.pid');
+export const DAEMON_LOCK_PATH = path.join(os.homedir(), '.clippy', 'daemon.lock');
 
 // ---------------------------------------------------------------------------
 // Client → Daemon commands

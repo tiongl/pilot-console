@@ -4,14 +4,15 @@ import { useParams } from 'react-router';
 import { useCliSocket } from '../../../hooks/useCliSocket';
 import TerminalPane, { type TerminalPaneAPI, TERMINAL_FONTS } from '../../../components/terminal/TerminalPane';
 import { Button } from '../../../components/ui/button';
-import { Square, Minus, Plus, Palette, Type, X as XIcon, Terminal, Bot, GitCommitHorizontal } from 'lucide-react';
+import { Square, Minus, Plus, Palette, Type, X as XIcon, Terminal, Bot, GitCommitHorizontal, GitBranch } from 'lucide-react';
 import { THEMES } from '../../../lib/terminal-themes';
 import GitLogTab from '../../../components/project/GitLogTab';
+import GitPanel from '../../../components/project/GitPanel';
 
 interface TabMeta {
   id: string;
   label: string;
-  mode: 'cli' | 'shell' | 'powershell' | 'git';
+  mode: 'cli' | 'shell' | 'powershell' | 'git' | 'git-status';
   themeName: string;
   fontFamily: string;
   sessionId?: string;
@@ -55,7 +56,6 @@ function TerminalTab({
       termApiRef.current.write(data);
     } else {
       pendingOutput.current.push(data);
-      console.log(`[TerminalTab] buffered ${data.length} chars (terminal not ready)`);
     }
   }, []);
 
@@ -65,7 +65,6 @@ function TerminalTab({
     forceNew: !initialSessionId && forceNew,
     mode,
     onOutput: (data) => {
-      console.log(`[TerminalTab] onOutput: ${data.length} chars, termApi=${!!termApiRef.current}`);
       writeToTerm(data);
     },
     onError: (data) => {
@@ -140,8 +139,8 @@ function TerminalTab({
 export default function ProjectChatPage() {
   const { id: projectId } = useParams<{ id: string }>();
 
-  const defaultTheme = localStorage.getItem('gcclippy-theme') || 'Catppuccin';
-  const defaultFont = localStorage.getItem('gcclippy-font') || TERMINAL_FONTS[0].family;
+  const defaultTheme = localStorage.getItem('clippy-theme') || 'Catppuccin';
+  const defaultFont = localStorage.getItem('clippy-font') || TERMINAL_FONTS[0].family;
 
   // Restore persisted tab state for this project, or create fresh
   const [tabs, setTabs] = useState<TabMeta[]>(() => {
@@ -194,14 +193,18 @@ export default function ProjectChatPage() {
     return () => document.removeEventListener('mousedown', handler);
   }, [showNewMenu]);
 
-  const addTab = useCallback((mode: 'cli' | 'shell' | 'powershell' | 'git' = 'cli') => {
+  const addTab = useCallback((mode: 'cli' | 'shell' | 'powershell' | 'git' | 'git-status' = 'cli') => {
     if (mode === 'git') {
       // Only allow one git tab
       const existing = tabs.find(t => t.mode === 'git');
       if (existing) { setActiveTabId(existing.id); return; }
     }
+    if (mode === 'git-status') {
+      const existing = tabs.find(t => t.mode === 'git-status');
+      if (existing) { setActiveTabId(existing.id); return; }
+    }
     tabCounter++;
-    const label = mode === 'shell' ? `Shell ${tabCounter}` : mode === 'powershell' ? `PS ${tabCounter}` : mode === 'git' ? 'Git Log' : `Copilot ${tabCounter}`;
+    const label = mode === 'shell' ? `Shell ${tabCounter}` : mode === 'powershell' ? `PS ${tabCounter}` : mode === 'git' ? 'Git Log' : mode === 'git-status' ? 'Git Status' : `Copilot ${tabCounter}`;
     const newTab: TabMeta = { id: `tab-${tabCounter}`, label, mode, themeName: defaultTheme, fontFamily: defaultFont };
     setTabs(prev => [...prev, newTab]);
     setActiveTabId(newTab.id);
@@ -246,8 +249,10 @@ export default function ProjectChatPage() {
 
   useEffect(() => {
     function handler(e: KeyboardEvent) {
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      const target = e.target as HTMLElement;
+      const tag = target?.tagName;
+      const isXterm = target?.classList?.contains('xterm-helper-textarea');
+      if ((tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') && !isXterm) return;
       if (e.ctrlKey && !e.shiftKey) {
         if (e.key === '=' || e.key === '+') { e.preventDefault(); setFontSize(s => Math.min(24, s + 1)); }
         if (e.key === '-') { e.preventDefault(); setFontSize(s => Math.max(10, s - 1)); }
@@ -269,12 +274,12 @@ export default function ProjectChatPage() {
 
   const setActiveTheme = useCallback((name: string) => {
     setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, themeName: name } : t));
-    localStorage.setItem('gcclippy-theme', name);
+    localStorage.setItem('clippy-theme', name);
   }, [activeTabId]);
 
   const setActiveFont = useCallback((family: string) => {
     setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, fontFamily: family } : t));
-    localStorage.setItem('gcclippy-font', family);
+    localStorage.setItem('clippy-font', family);
   }, [activeTabId]);
 
   if (!projectId) return <div className="p-6 text-muted-foreground">Project not found</div>;
@@ -297,8 +302,8 @@ export default function ProjectChatPage() {
                 }`}
                 onClick={() => setActiveTabId(tab.id)}
               >
-                {tab.mode !== 'git' && <div className={`h-1.5 w-1.5 rounded-full ${stColor}`} />}
-                {tab.mode === 'powershell' ? <span className="h-3 w-3 text-[9px] font-bold leading-3 text-center shrink-0">PS</span> : tab.mode === 'shell' ? <Terminal className="h-3 w-3 shrink-0" /> : tab.mode === 'git' ? <GitCommitHorizontal className="h-3 w-3 shrink-0" /> : <Bot className="h-3 w-3 shrink-0" />}
+                {tab.mode !== 'git' && tab.mode !== 'git-status' && <div className={`h-1.5 w-1.5 rounded-full ${stColor}`} />}
+                {tab.mode === 'powershell' ? <span className="h-3 w-3 text-[9px] font-bold leading-3 text-center shrink-0">PS</span> : tab.mode === 'shell' ? <Terminal className="h-3 w-3 shrink-0" /> : tab.mode === 'git' ? <GitCommitHorizontal className="h-3 w-3 shrink-0" /> : tab.mode === 'git-status' ? <GitBranch className="h-3 w-3 shrink-0" /> : <Bot className="h-3 w-3 shrink-0" />}
                 <span className="truncate max-w-[100px]">{tab.label}</span>
                 <button
                   onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
@@ -349,6 +354,12 @@ export default function ProjectChatPage() {
               className="flex items-center gap-2 w-full rounded px-2 py-1.5 hover:bg-accent text-left"
             >
               <GitCommitHorizontal className="h-3.5 w-3.5" /> Git Log
+            </button>
+            <button
+              onClick={() => { addTab('git-status'); setShowNewMenu(false); }}
+              className="flex items-center gap-2 w-full rounded px-2 py-1.5 hover:bg-accent text-left"
+            >
+              <GitBranch className="h-3.5 w-3.5" /> Git Status
             </button>
           </div>,
           document.body
@@ -402,6 +413,18 @@ export default function ProjectChatPage() {
                 visibility: tab.id === activeTabId ? 'visible' : 'hidden',
               }}>
                 <GitLogTab projectId={projectId} />
+              </div>
+            );
+          }
+
+          // Git Status tab renders GitPanel
+          if (tab.mode === 'git-status') {
+            return (
+              <div key={tab.id} className="absolute inset-0" style={{
+                zIndex: tab.id === activeTabId ? 1 : 0,
+                visibility: tab.id === activeTabId ? 'visible' : 'hidden',
+              }}>
+                <GitPanel projectId={projectId} />
               </div>
             );
           }

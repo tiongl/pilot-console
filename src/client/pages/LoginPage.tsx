@@ -32,7 +32,8 @@ export default function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-background">
       <Card className="w-[380px]">
         <CardHeader className="space-y-1 text-center">
-          <CardTitle className="text-2xl font-bold">GC Clippy</CardTitle>
+          <img src="/clippy-logo.svg" alt="Clippy" className="h-10 w-10 mx-auto mb-2" />
+          <CardTitle className="text-2xl font-bold">Clippy</CardTitle>
           <CardDescription>
             Sign in using your local GitHub CLI session
           </CardDescription>

@@ -135,6 +135,7 @@ export function setupWebSocketServer(): WebSocketServer {
         if (!ok) console.warn(`[ws] writeToSession failed for ${ws.sessionId} (session gone?)`);
       } else if (msg.type === 'resize') {
         if (managed && msg.cols && msg.rows) {
+          managed.lastResizeAt = Date.now();
           getDaemonClient().resizeSession(managed.sessionId, msg.cols, msg.rows).catch(() => {});
         }
       } else if (msg.type === 'ping') {

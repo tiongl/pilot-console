@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * gcclippy session daemon — a standalone process that owns PTY sessions
+ * Clippy session daemon — a standalone process that owns PTY sessions
  * so they survive Express server restarts.
  *
  * Communicates via NDJSON over a named pipe (Windows) / Unix domain socket.

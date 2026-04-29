@@ -104,8 +104,8 @@ function TerminalTab({
 }
 
 export default function ChatClient({ userName: _userName, projectId }: Props) {
-  const defaultTheme = typeof window !== 'undefined' ? localStorage.getItem('gcclippy-theme') || 'Catppuccin' : 'Catppuccin';
-  const defaultFont = typeof window !== 'undefined' ? localStorage.getItem('gcclippy-font') || TERMINAL_FONTS[0].family : TERMINAL_FONTS[0].family;
+  const defaultTheme = typeof window !== 'undefined' ? localStorage.getItem('clippy-theme') || 'Catppuccin' : 'Catppuccin';
+  const defaultFont = typeof window !== 'undefined' ? localStorage.getItem('clippy-font') || TERMINAL_FONTS[0].family : TERMINAL_FONTS[0].family;
 
   const [tabs, setTabs] = useState<TabMeta[]>(() => {
     tabCounter++;
@@ -197,12 +197,12 @@ export default function ChatClient({ userName: _userName, projectId }: Props) {
 
   const setActiveTheme = useCallback((name: string) => {
     setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, themeName: name } : t));
-    localStorage.setItem('gcclippy-theme', name);
+    localStorage.setItem('clippy-theme', name);
   }, [activeTabId]);
 
   const setActiveFont = useCallback((family: string) => {
     setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, fontFamily: family } : t));
-    localStorage.setItem('gcclippy-font', family);
+    localStorage.setItem('clippy-font', family);
   }, [activeTabId]);
 
   return (
