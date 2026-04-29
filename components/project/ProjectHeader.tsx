@@ -1,9 +1,13 @@
 'use client';
 
-import { useCallback, useState } from 'react';
-import { Link, useLocation } from 'react-router';
+import { useCallback, useState, useEffect } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router';
 import { Wrench, ListTodo, History, Keyboard, Bookmark } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import SessionHistory from './SessionHistory';
 import SnippetPanel from './SnippetPanel';
 import { useKeyboardShortcuts, ShortcutsHelpOverlay } from './KeyboardShortcuts';
@@ -27,6 +31,53 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
   const { showHelp, setShowHelp } = useKeyboardShortcuts({
     onToggleNotes: toggleNotes,
   });
+
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsName, setSettingsName] = useState('');
+  const [settingsRepoPath, setSettingsRepoPath] = useState('');
+  const [settingsDesc, setSettingsDesc] = useState('');
+  const [settingsError, setSettingsError] = useState('');
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (showSettings) {
+      setSettingsName(projectName);
+      setSettingsRepoPath(repoPath);
+      setSettingsDesc('');
+      setSettingsError('');
+      fetch(`/api/projects/${projectId}`).then(r => r.json()).then(p => {
+        setSettingsDesc(p.description ?? '');
+      }).catch(() => {});
+    }
+  }, [showSettings, projectId, projectName, repoPath]);
+
+  const handleSettingsSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSettingsError('');
+    setSettingsSaving(true);
+    try {
+      const res = await fetch(`/api/projects/${projectId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: settingsName, repoPath: settingsRepoPath, description: settingsDesc || null }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setShowSettings(false);
+      window.location.reload();
+    } catch (err) {
+      setSettingsError((err as Error).message);
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!confirm('Delete this project from Clippy? Your git repository will not be affected.')) return;
+    await fetch(`/api/projects/${projectId}`, { method: 'DELETE' });
+    navigate('/');
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -79,11 +130,15 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
           >
             <Keyboard className="h-4 w-4" />
           </Button>
-          <Link to={`${basePath}/settings`}>
-            <Button variant={pathname.includes('/settings') ? 'secondary' : 'ghost'} size="icon" className="h-8 w-8" title="Settings">
-              <Wrench className="h-4 w-4" />
-            </Button>
-          </Link>
+          <Button
+            variant={showSettings ? 'secondary' : 'ghost'}
+            size="icon"
+            className="h-8 w-8"
+            onClick={() => setShowSettings(v => !v)}
+            title="Project Settings"
+          >
+            <Wrench className="h-4 w-4" />
+          </Button>
         </div>
       </div>
 
@@ -101,6 +156,37 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
         </div>
       </div>
       {showHelp && <ShortcutsHelpOverlay onClose={() => setShowHelp(false)} />}
+
+      <Dialog open={showSettings} onOpenChange={setShowSettings}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Project Settings</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleSettingsSave} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="settings-name">Name</Label>
+              <Input id="settings-name" value={settingsName} onChange={e => setSettingsName(e.target.value)} required />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="settings-repo">Repository Path</Label>
+              <Input id="settings-repo" value={settingsRepoPath} onChange={e => setSettingsRepoPath(e.target.value)} className="font-mono text-sm" required />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="settings-desc">Description</Label>
+              <Textarea id="settings-desc" value={settingsDesc} onChange={e => setSettingsDesc(e.target.value)} rows={2} />
+            </div>
+            {settingsError && <p className="text-sm text-destructive">{settingsError}</p>}
+            <div className="flex items-center justify-between">
+              <Button type="submit" disabled={settingsSaving}>
+                {settingsSaving ? 'Saving…' : 'Save'}
+              </Button>
+              <Button type="button" variant="destructive" size="sm" onClick={handleDelete}>
+                Delete Project
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

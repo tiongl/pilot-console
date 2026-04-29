@@ -4,15 +4,16 @@ import { useParams } from 'react-router';
 import { useCliSocket } from '../../../hooks/useCliSocket';
 import TerminalPane, { type TerminalPaneAPI, TERMINAL_FONTS } from '../../../components/terminal/TerminalPane';
 import { Button } from '../../../components/ui/button';
-import { Square, Minus, Plus, Palette, Type, X as XIcon, Terminal, Bot, GitCommitHorizontal, GitBranch } from 'lucide-react';
+import { Square, Minus, Plus, Palette, Type, X as XIcon, Terminal, Bot, GitCommitHorizontal, GitBranch, FolderOpen } from 'lucide-react';
 import { THEMES } from '../../../lib/terminal-themes';
 import GitLogTab from '../../../components/project/GitLogTab';
 import GitPanel from '../../../components/project/GitPanel';
+import FileExplorer from '../../../components/project/FileExplorer';
 
 interface TabMeta {
   id: string;
   label: string;
-  mode: 'cli' | 'shell' | 'powershell' | 'git' | 'git-status';
+  mode: 'cli' | 'shell' | 'powershell' | 'git' | 'git-status' | 'files';
   themeName: string;
   fontFamily: string;
   sessionId?: string;
@@ -115,8 +116,8 @@ function TerminalTab({
 
   return (
     <div className="absolute inset-0" style={{
-      zIndex: active ? 1 : 0,
-      visibility: active ? 'visible' : 'hidden',
+      zIndex: active ? 2 : 0,
+      display: active ? 'block' : 'none',
     }}>
       <TerminalPane
         onInput={(data) => {
@@ -193,9 +194,8 @@ export default function ProjectChatPage() {
     return () => document.removeEventListener('mousedown', handler);
   }, [showNewMenu]);
 
-  const addTab = useCallback((mode: 'cli' | 'shell' | 'powershell' | 'git' | 'git-status' = 'cli') => {
+  const addTab = useCallback((mode: 'cli' | 'shell' | 'powershell' | 'git' | 'git-status' | 'files' = 'cli') => {
     if (mode === 'git') {
-      // Only allow one git tab
       const existing = tabs.find(t => t.mode === 'git');
       if (existing) { setActiveTabId(existing.id); return; }
     }
@@ -203,8 +203,12 @@ export default function ProjectChatPage() {
       const existing = tabs.find(t => t.mode === 'git-status');
       if (existing) { setActiveTabId(existing.id); return; }
     }
+    if (mode === 'files') {
+      const existing = tabs.find(t => t.mode === 'files');
+      if (existing) { setActiveTabId(existing.id); return; }
+    }
     tabCounter++;
-    const label = mode === 'shell' ? `Shell ${tabCounter}` : mode === 'powershell' ? `PS ${tabCounter}` : mode === 'git' ? 'Git Log' : mode === 'git-status' ? 'Git Status' : `Copilot ${tabCounter}`;
+    const label = mode === 'shell' ? `Shell ${tabCounter}` : mode === 'powershell' ? `PS ${tabCounter}` : mode === 'git' ? 'Git Log' : mode === 'git-status' ? 'Git Status' : mode === 'files' ? 'Files' : `Copilot ${tabCounter}`;
     const newTab: TabMeta = { id: `tab-${tabCounter}`, label, mode, themeName: defaultTheme, fontFamily: defaultFont };
     setTabs(prev => [...prev, newTab]);
     setActiveTabId(newTab.id);
@@ -266,8 +270,6 @@ export default function ProjectChatPage() {
     return () => window.removeEventListener('keydown', handler);
   }, [handleKillActive, addTab]);
 
-  const activeStatus = tabStatuses[activeTabId] || 'closed';
-  const statusColor = { open: 'bg-green-500', connecting: 'bg-yellow-500', closed: 'bg-gray-400', error: 'bg-red-500' }[activeStatus] ?? 'bg-gray-400';
   const activeTab = tabs.find(t => t.id === activeTabId);
   const activeThemeName = activeTab?.themeName ?? defaultTheme;
   const activeFontFamily = activeTab?.fontFamily ?? defaultFont;
@@ -289,7 +291,7 @@ export default function ProjectChatPage() {
       {/* Tab bar + controls */}
       <div className="flex items-center border-b bg-muted/30">
         <div className="flex items-center flex-1 overflow-x-auto min-w-0">
-          {tabs.map(tab => {
+          {tabs.filter(tab => tab.mode !== 'git' && tab.mode !== 'git-status' && tab.mode !== 'files').map(tab => {
             const st = tabStatuses[tab.id] || 'closed';
             const stColor = { open: 'bg-green-500', connecting: 'bg-yellow-500', closed: 'bg-gray-400', error: 'bg-red-500' }[st] ?? 'bg-gray-400';
             return (
@@ -297,13 +299,13 @@ export default function ProjectChatPage() {
                 key={tab.id}
                 className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs cursor-pointer border-r shrink-0 ${
                   tab.id === activeTabId
-                    ? 'bg-background text-foreground'
+                    ? 'bg-accent text-foreground font-semibold border-b-2 border-b-primary'
                     : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
                 }`}
                 onClick={() => setActiveTabId(tab.id)}
               >
-                {tab.mode !== 'git' && tab.mode !== 'git-status' && <div className={`h-1.5 w-1.5 rounded-full ${stColor}`} />}
-                {tab.mode === 'powershell' ? <span className="h-3 w-3 text-[9px] font-bold leading-3 text-center shrink-0">PS</span> : tab.mode === 'shell' ? <Terminal className="h-3 w-3 shrink-0" /> : tab.mode === 'git' ? <GitCommitHorizontal className="h-3 w-3 shrink-0" /> : tab.mode === 'git-status' ? <GitBranch className="h-3 w-3 shrink-0" /> : <Bot className="h-3 w-3 shrink-0" />}
+                <div className={`h-1.5 w-1.5 rounded-full ${stColor}`} />
+                {tab.mode === 'powershell' ? <span className="h-3 w-3 text-[9px] font-bold leading-3 text-center shrink-0">PS</span> : tab.mode === 'shell' ? <Terminal className="h-3 w-3 shrink-0" /> : <Bot className="h-3 w-3 shrink-0" />}
                 <span className="truncate max-w-[100px]">{tab.label}</span>
                 <button
                   onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
@@ -323,6 +325,41 @@ export default function ProjectChatPage() {
               +
             </button>
           </div>
+        </div>
+        {/* Permanent icon buttons for Git Log, Git Status, Files */}
+        <div className="flex items-center shrink-0 border-l gap-0.5 px-1">
+          {([
+            { mode: 'git' as const, icon: GitCommitHorizontal, title: 'Git Log' },
+            { mode: 'git-status' as const, icon: GitBranch, title: 'Git Status' },
+            { mode: 'files' as const, icon: FolderOpen, title: 'Files' },
+          ]).map(({ mode, icon: Icon, title }) => {
+            const existing = tabs.find(t => t.mode === mode);
+            const isActive = existing && existing.id === activeTabId;
+            return (
+              <button
+                key={mode}
+                onClick={() => {
+                  if (isActive) {
+                    closeTab(existing.id);
+                  } else if (existing) {
+                    setActiveTabId(existing.id);
+                  } else {
+                    addTab(mode);
+                  }
+                }}
+                className={`p-1.5 rounded transition-colors ${
+                  isActive
+                    ? 'bg-accent text-foreground'
+                    : existing
+                    ? 'text-foreground/70 hover:bg-accent/50'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
+                }`}
+                title={title}
+              >
+                <Icon className="h-3.5 w-3.5" />
+              </button>
+            );
+          })}
         </div>
         {showNewMenu && createPortal(
           <div
@@ -348,23 +385,14 @@ export default function ProjectChatPage() {
             >
               <span className="h-3.5 w-3.5 text-[10px] font-bold leading-[14px] text-center">PS</span> PowerShell
             </button>
-            <div className="border-t my-1" />
-            <button
-              onClick={() => { addTab('git'); setShowNewMenu(false); }}
-              className="flex items-center gap-2 w-full rounded px-2 py-1.5 hover:bg-accent text-left"
-            >
-              <GitCommitHorizontal className="h-3.5 w-3.5" /> Git Log
-            </button>
-            <button
-              onClick={() => { addTab('git-status'); setShowNewMenu(false); }}
-              className="flex items-center gap-2 w-full rounded px-2 py-1.5 hover:bg-accent text-left"
-            >
-              <GitBranch className="h-3.5 w-3.5" /> Git Status
-            </button>
           </div>,
           document.body
         )}
-        <div className="flex items-center gap-2 px-3 shrink-0 border-l">
+      </div>
+
+      {/* Terminal controls — only shown for terminal tabs */}
+      {activeTab && activeTab.mode !== 'git' && activeTab.mode !== 'git-status' && activeTab.mode !== 'files' && (
+        <div className="flex items-center justify-end gap-2 px-3 py-1 border-b bg-muted/20">
           <div className="flex items-center gap-1 border rounded-md px-1">
             <Type className="h-3 w-3 text-muted-foreground ml-1" />
             <select
@@ -395,7 +423,7 @@ export default function ProjectChatPage() {
             </Button>
           </div>
         </div>
-      </div>
+      )}
 
       {/* Terminal content — all tabs stay mounted, hidden via CSS */}
       <div className="flex-1 overflow-hidden relative">
@@ -409,8 +437,8 @@ export default function ProjectChatPage() {
           if (tab.mode === 'git') {
             return (
               <div key={tab.id} className="absolute inset-0" style={{
-                zIndex: tab.id === activeTabId ? 1 : 0,
-                visibility: tab.id === activeTabId ? 'visible' : 'hidden',
+                zIndex: tab.id === activeTabId ? 2 : 0,
+                display: tab.id === activeTabId ? 'block' : 'none',
               }}>
                 <GitLogTab projectId={projectId} />
               </div>
@@ -421,10 +449,22 @@ export default function ProjectChatPage() {
           if (tab.mode === 'git-status') {
             return (
               <div key={tab.id} className="absolute inset-0" style={{
-                zIndex: tab.id === activeTabId ? 1 : 0,
-                visibility: tab.id === activeTabId ? 'visible' : 'hidden',
+                zIndex: tab.id === activeTabId ? 2 : 0,
+                display: tab.id === activeTabId ? 'block' : 'none',
               }}>
                 <GitPanel projectId={projectId} />
+              </div>
+            );
+          }
+
+          // Files tab renders FileExplorer embedded
+          if (tab.mode === 'files') {
+            return (
+              <div key={tab.id} className="absolute inset-0" style={{
+                zIndex: tab.id === activeTabId ? 2 : 0,
+                display: tab.id === activeTabId ? 'block' : 'none',
+              }}>
+                <FileExplorer projectId={projectId} embedded />
               </div>
             );
           }

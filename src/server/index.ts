@@ -343,6 +343,138 @@ app.get('/api/projects/:id/git-commit/:hash/diff', (req, res) => {
   }
 });
 
+// --- Project File Explorer ---
+app.get('/api/projects/:id/files', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const relDir = (req.query.path as string) || '';
+  const absDir = path.resolve(project.repoPath, relDir);
+  // Security: ensure resolved path is within the project
+  if (!absDir.startsWith(path.resolve(project.repoPath))) {
+    res.status(403).json({ error: 'Access denied' }); return;
+  }
+  try {
+    const entries = fs.readdirSync(absDir, { withFileTypes: true });
+    const items = entries
+      .filter(e => !e.name.startsWith('.'))
+      .map(e => ({
+        name: e.name,
+        type: e.isDirectory() ? 'dir' as const : 'file' as const,
+        size: e.isFile() ? fs.statSync(path.join(absDir, e.name)).size : undefined,
+      }))
+      .sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+        return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+      });
+    res.json({ path: relDir, items });
+  } catch {
+    res.status(400).json({ error: 'Cannot read directory' });
+  }
+});
+
+app.get('/api/projects/:id/files-search', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const query = (req.query.q as string || '').trim();
+  if (!query) { res.json({ results: [] }); return; }
+  // Convert glob pattern to regex: ** -> .*, * -> [^/]*, ? -> .
+  // Handle ** before escaping special chars
+  const withGlobstar = query.replace(/\*\*/g, '\x00GLOBSTAR\x00');
+  const escaped = withGlobstar.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  const regexStr = escaped.replace(/\*/g, '[^/]*').replace(/\?/g, '.').replace(/\x00GLOBSTAR\x00/g, '.*');
+  let regex: RegExp;
+  try { regex = new RegExp(regexStr, 'i'); } catch { res.json({ results: [] }); return; }
+
+  const results: { path: string; type: 'file' | 'dir'; size?: number }[] = [];
+  const MAX_RESULTS = 200;
+  const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', '__pycache__', '.venv', 'venv', 'coverage']);
+
+  function walk(dir: string, rel: string) {
+    if (results.length >= MAX_RESULTS) return;
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (results.length >= MAX_RESULTS) return;
+      if (e.name.startsWith('.') && e.name !== '.env') continue;
+      const relPath = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        if (SKIP_DIRS.has(e.name)) continue;
+        if (regex.test(relPath) || regex.test(e.name)) {
+          results.push({ path: relPath, type: 'dir' });
+        }
+        walk(path.join(dir, e.name), relPath);
+      } else if (e.isFile()) {
+        if (regex.test(relPath) || regex.test(e.name)) {
+          try {
+            const size = fs.statSync(path.join(dir, e.name)).size;
+            results.push({ path: relPath, type: 'file', size });
+          } catch {
+            results.push({ path: relPath, type: 'file' });
+          }
+        }
+      }
+    }
+  }
+  walk(path.resolve(project.repoPath), '');
+  res.json({ results, truncated: results.length >= MAX_RESULTS });
+});
+
+app.get('/api/projects/:id/file', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const filePath = req.query.path as string;
+  if (!filePath) { res.status(400).json({ error: 'path required' }); return; }
+  const absPath = path.resolve(project.repoPath, filePath);
+  if (!absPath.startsWith(path.resolve(project.repoPath))) {
+    res.status(403).json({ error: 'Access denied' }); return;
+  }
+  try {
+    const stat = fs.statSync(absPath);
+    if (!stat.isFile()) { res.status(400).json({ error: 'Not a file' }); return; }
+    const MAX_FILE_SIZE = 512 * 1024; // 512KB
+    if (stat.size > MAX_FILE_SIZE) {
+      res.json({ path: filePath, truncated: true, size: stat.size, content: fs.readFileSync(absPath, 'utf-8').slice(0, MAX_FILE_SIZE) });
+      return;
+    }
+    // Try to read as text; if it fails or looks binary, report it
+    const buf = fs.readFileSync(absPath);
+    const isBinary = buf.includes(0);
+    if (isBinary) {
+      res.json({ path: filePath, binary: true, size: stat.size });
+      return;
+    }
+    res.json({ path: filePath, content: buf.toString('utf-8'), size: stat.size });
+  } catch {
+    res.status(400).json({ error: 'Cannot read file' });
+  }
+});
+
+app.get('/api/projects/:id/file-raw', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const filePath = req.query.path as string;
+  if (!filePath) { res.status(400).json({ error: 'path required' }); return; }
+  const absPath = path.resolve(project.repoPath, filePath);
+  if (!absPath.startsWith(path.resolve(project.repoPath))) {
+    res.status(403).json({ error: 'Access denied' }); return;
+  }
+  try {
+    const stat = fs.statSync(absPath);
+    if (!stat.isFile()) { res.status(400).json({ error: 'Not a file' }); return; }
+    const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
+    const mimeTypes: Record<string, string> = {
+      png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+      webp: 'image/webp', bmp: 'image/bmp', ico: 'image/x-icon', svg: 'image/svg+xml',
+      pdf: 'application/pdf',
+    };
+    res.setHeader('Content-Type', mimeTypes[ext] || 'application/octet-stream');
+    res.setHeader('Content-Length', stat.size);
+    fs.createReadStream(absPath).pipe(res);
+  } catch {
+    res.status(400).json({ error: 'Cannot read file' });
+  }
+});
+
 // --- Browse ---
 app.get('/api/browse', (req, res) => {
   const dirParam = (req.query.dir as string) || os.homedir();
@@ -566,25 +698,47 @@ app.delete('/api/admin/sessions/:id', requireAdmin, (req, res) => {
 // --- Daemon management ---
 app.get('/api/daemon/status', requireAuth, async (req, res) => {
   const { getDaemonClient } = await import('../daemon/client');
+  const { DAEMON_SOCKET_PATH } = await import('../daemon/protocol');
+  const net = await import('net');
   const client = getDaemonClient();
-  try {
-    const sessions = await client.listSessions();
-    res.json({
-      connected: client.isConnected,
-      sessions: sessions.map(s => ({
-        sessionId: s.sessionId,
-        alive: s.alive,
-        exitCode: s.exitCode,
-        exitedAt: s.exitedAt,
-        lastOutputAt: s.lastOutputAt,
-        bufferLength: s.bufferLength,
-        userId: s.meta?.userId ?? null,
-        projectId: s.meta?.projectId ?? null,
-      })),
-    });
-  } catch {
-    res.json({ connected: false, sessions: [] });
+
+  // Fast path: client already connected
+  if (client.isConnected) {
+    try {
+      const sessions = await client.listSessions();
+      res.json({
+        connected: true,
+        sessions: sessions.map(s => ({
+          sessionId: s.sessionId,
+          alive: s.alive,
+          exitCode: s.exitCode,
+          exitedAt: s.exitedAt,
+          lastOutputAt: s.lastOutputAt,
+          bufferLength: s.bufferLength,
+          userId: s.meta?.userId ?? null,
+          projectId: s.meta?.projectId ?? null,
+        })),
+      });
+      return;
+    } catch {
+      // listSessions failed — fall through to probe
+    }
   }
+
+  // Probe: can we reach the daemon pipe?
+  const alive = await new Promise<boolean>((resolve) => {
+    const probe = net.createConnection(DAEMON_SOCKET_PATH);
+    const timer = setTimeout(() => { probe.destroy(); resolve(false); }, 2000);
+    probe.on('connect', () => { clearTimeout(timer); probe.destroy(); resolve(true); });
+    probe.on('error', () => { clearTimeout(timer); resolve(false); });
+  });
+
+  if (alive && !client.isConnected) {
+    // Daemon is running but client isn't connected — try to connect
+    try { await client.connect(false); } catch { /* ignore */ }
+  }
+
+  res.json({ connected: alive, sessions: [] });
 });
 
 app.post('/api/daemon/start', requireAuth, async (req, res) => {
@@ -690,6 +844,7 @@ httpServer.listen(port, hostname, async () => {
   // Connect to daemon and recover surviving sessions
   try {
     await initDaemonBridge();
+    console.log('[server] Daemon bridge initialized successfully');
   } catch (err) {
     console.error('Failed to initialize daemon bridge:', err);
   }

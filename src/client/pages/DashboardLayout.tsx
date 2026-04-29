@@ -218,8 +218,8 @@ export default function DashboardLayout() {
           <div className="flex items-center gap-1 mt-1">
             <p className="text-xs text-muted-foreground truncate flex-1">{user?.displayName ?? user?.email}</p>
             <button
-              onClick={() => setShowSkillsDialog(true)}
-              className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
+              onClick={() => setShowSkillsDialog(v => !v)}
+              className={`relative z-[60] transition-colors shrink-0 ${showSkillsDialog ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
               title="Settings"
             >
               <Settings className="h-3.5 w-3.5" />
