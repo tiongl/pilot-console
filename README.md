@@ -53,6 +53,10 @@ This starts the web dashboard at [http://localhost:3001](http://localhost:3001).
 
 On first launch a default admin account is created — check the terminal output for credentials.
 
+> **Important:** Clippy runs a **background daemon** process that manages terminal sessions.
+> The daemon keeps running even if you navigate away from the browser.
+> To fully shut down Clippy, **close the terminal window** where you ran the `clippy` command (or press `Ctrl+C` in that terminal).
+
 ## Development
 
 ```bash
