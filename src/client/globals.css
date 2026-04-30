@@ -318,10 +318,13 @@
   animation: pulse-dot 1.5s ease-in-out infinite;
 }
 
-/* Terminal padding */
+/* Terminal padding – no padding on .xterm so scrollbar spans full height;
+   text padding applied to .xterm-screen only */
 .xterm {
-  padding: 8px;
   box-sizing: border-box;
+}
+.xterm .xterm-screen {
+  padding: 8px 0 8px 8px;
 }
 .xterm-viewport {
   background-color: inherit !important;

@@ -6,6 +6,7 @@ import { Button } from '../../../components/ui/button';
 import { Plus, Shield, LogOut, FolderOpen, Pin, Palette, Settings } from 'lucide-react';
 import { SkillCatalog, InstalledSkillsPanel } from '../pages/ProjectSkillsPage';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../../components/ui/dialog';
+import { ClippyLogo } from '../components/ClippyLogo';
 
 interface Project {
   id: string;
@@ -212,11 +213,8 @@ export default function DashboardLayout() {
       <aside className="flex w-60 flex-col border-r bg-muted/40 px-3 py-4">
         <div className="mb-2 px-3">
           <div className="flex items-center gap-2">
-            <img src="/clippy-logo.svg" alt="Clippy" className="h-7 w-7" />
+            <ClippyLogo className="h-10 w-10" />
             <h1 className="text-lg font-bold flex-1">Clippy</h1>
-          </div>
-          <div className="flex items-center gap-1 mt-1">
-            <p className="text-xs text-muted-foreground truncate flex-1">{user?.displayName ?? user?.email}</p>
             <button
               onClick={() => setShowSkillsDialog(v => !v)}
               className={`relative z-[60] transition-colors shrink-0 ${showSkillsDialog ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
