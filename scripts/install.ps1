@@ -27,6 +27,8 @@ Write-Host "Using Node.js $nodeVersion" -ForegroundColor Gray
 if (Test-Path $installDir) {
     Write-Host "Updating existing installation..." -ForegroundColor Yellow
     Push-Location $installDir
+    # Remove stale global link before updating
+    npm unlink -g clippy 2>$null
     git pull --ff-only
     Pop-Location
 } else {

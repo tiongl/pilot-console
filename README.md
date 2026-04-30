@@ -2,6 +2,9 @@
 
 A GitHub Copilot CLI session manager with a web dashboard.
 
+## Features
+![Clippy features](screenshot.png "Features")
+
 ## Prerequisites
 
 - **Node.js** ≥ 18
@@ -16,42 +19,24 @@ A GitHub Copilot CLI session manager with a web dashboard.
 
 ### Linux / macOS
 
-**Option 1 — One-liner** (requires `gh`):
+**One-liner** (install or update):
 
 ```bash
-gh repo clone tionglee_microsoft/clippy ~/.clippy/app && cd ~/.clippy/app && npm install && npm link
-```
-
-**Option 2 — Manual:**
-
-```bash
-git clone https://github.com/tionglee_microsoft/clippy.git ~/.clippy/app
-cd ~/.clippy/app
-npm install
-npm link
+cd ~/.clippy/app 2>/dev/null && git pull --ff-only || gh repo clone tionglee_microsoft/clippy ~/.clippy/app && cd ~/.clippy/app && npm install && npm link
 ```
 
 ### Windows
 
-**Option 1 — One-liner** (PowerShell, requires `gh`):
+**One-liner** (PowerShell, install or update):
 
 ```powershell
-gh repo clone tionglee_microsoft/clippy $HOME\.clippy\app; cd $HOME\.clippy\app; npm install; npm link
+if (Test-Path $HOME\.clippy\app) { cd $HOME\.clippy\app; git pull --ff-only } else { gh repo clone tionglee_microsoft/clippy $HOME\.clippy\app; cd $HOME\.clippy\app }; npm install; npm link
 ```
 
-**Option 2 — Installer script** (from a local clone):
+**Installer script** (from a local clone, handles re-installs):
 
 ```powershell
 .\scripts\install.ps1
-```
-
-**Option 3 — Manual** (PowerShell):
-
-```powershell
-git clone https://github.com/tionglee_microsoft/clippy.git $HOME\.clippy\app
-cd $HOME\.clippy\app
-npm install
-npm link
 ```
 
 > **Note:** `npm install -g "github:..."` does not work on Windows due to
