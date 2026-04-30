@@ -326,6 +326,40 @@ export default function ProjectChatPage() {
             </button>
           </div>
         </div>
+        {/* Terminal controls — only shown when a terminal tab is active */}
+        {activeTab && activeTab.mode !== 'git' && activeTab.mode !== 'git-status' && activeTab.mode !== 'files' && (
+          <div className="flex items-center shrink-0 border-l gap-1 px-1.5">
+            <div className="flex items-center gap-0.5 border rounded px-1">
+              <Type className="h-3 w-3 text-muted-foreground" />
+              <select
+                value={activeFontFamily}
+                onChange={(e) => setActiveFont(e.target.value)}
+                className="h-6 text-xs bg-transparent border-none outline-none px-0.5 text-foreground"
+              >
+                {TERMINAL_FONTS.map(f => <option key={f.id} value={f.family}>{f.label}</option>)}
+              </select>
+            </div>
+            <div className="flex items-center gap-0.5 border rounded px-1">
+              <Palette className="h-3 w-3 text-muted-foreground" />
+              <select
+                value={activeThemeName}
+                onChange={(e) => setActiveTheme(e.target.value)}
+                className="h-6 text-xs bg-transparent border-none outline-none px-0.5 text-foreground"
+              >
+                {THEMES.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
+              </select>
+            </div>
+            <div className="flex items-center gap-0.5 border rounded px-1">
+              <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => setFontSize(s => Math.max(10, s - 1))} disabled={fontSize <= 10}>
+                <Minus className="h-3 w-3" />
+              </Button>
+              <span className="text-xs w-5 text-center tabular-nums">{fontSize}</span>
+              <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => setFontSize(s => Math.min(24, s + 1))} disabled={fontSize >= 24}>
+                <Plus className="h-3 w-3" />
+              </Button>
+            </div>
+          </div>
+        )}
         {/* Permanent icon buttons for Git Log, Git Status, Files */}
         <div className="flex items-center shrink-0 border-l gap-0.5 px-1">
           {([
@@ -389,41 +423,6 @@ export default function ProjectChatPage() {
           document.body
         )}
       </div>
-
-      {/* Terminal controls — only shown for terminal tabs */}
-      {activeTab && activeTab.mode !== 'git' && activeTab.mode !== 'git-status' && activeTab.mode !== 'files' && (
-        <div className="flex items-center justify-end gap-2 px-3 py-1 border-b bg-muted/20">
-          <div className="flex items-center gap-1 border rounded-md px-1">
-            <Type className="h-3 w-3 text-muted-foreground ml-1" />
-            <select
-              value={activeFontFamily}
-              onChange={(e) => setActiveFont(e.target.value)}
-              className="h-6 text-xs bg-transparent border-none outline-none px-1 text-foreground"
-            >
-              {TERMINAL_FONTS.map(f => <option key={f.id} value={f.family}>{f.label}</option>)}
-            </select>
-          </div>
-          <div className="flex items-center gap-1 border rounded-md px-1">
-            <Palette className="h-3 w-3 text-muted-foreground ml-1" />
-            <select
-              value={activeThemeName}
-              onChange={(e) => setActiveTheme(e.target.value)}
-              className="h-6 text-xs bg-transparent border-none outline-none px-1 text-foreground"
-            >
-              {THEMES.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
-            </select>
-          </div>
-          <div className="flex items-center gap-1 border rounded-md px-1">
-            <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => setFontSize(s => Math.max(10, s - 1))} disabled={fontSize <= 10}>
-              <Minus className="h-3 w-3" />
-            </Button>
-            <span className="text-xs w-5 text-center tabular-nums">{fontSize}</span>
-            <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => setFontSize(s => Math.min(24, s + 1))} disabled={fontSize >= 24}>
-              <Plus className="h-3 w-3" />
-            </Button>
-          </div>
-        </div>
-      )}
 
       {/* Terminal content — all tabs stay mounted, hidden via CSS */}
       <div className="flex-1 overflow-hidden relative">
