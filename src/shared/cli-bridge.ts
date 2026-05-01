@@ -15,7 +15,7 @@ export interface ManagedProcess {
   outputBuffer: string;
   onOutput: ((data: string) => void) | null;
   onError: ((data: string) => void) | null;
-  onExit: ((code: number) => void) | null;
+  onExit: ((code: number, reason?: 'normal' | 'daemon-lost') => void) | null;
   alive: boolean;
   lastOutputAt: number;
   /** Timestamp of last resize — output right after resize is just a redraw, not real work */
@@ -81,6 +81,26 @@ export function detachSession(sessionId: string, wsId?: number): void {
 }
 
 /**
+ * Shared exit cleanup — used for both normal daemon exit events
+ * and synthetic exits when the daemon restarts or connection is lost.
+ * Idempotent: safe to call multiple times for the same session.
+ */
+function finalizeSessionExit(managed: ManagedProcess, code: number, reason: 'normal' | 'daemon-lost' = 'normal') {
+  if (!managed.alive && managed.exitedAt) return; // already finalized
+  managed.alive = false;
+  managed.lastExitCode = code;
+  managed.exitedAt = Date.now();
+  managed.onExit?.(code, reason);
+  activeSessions.delete(managed.sessionId);
+  recentlyExited.set(managed.sessionId, managed);
+  setTimeout(() => recentlyExited.delete(managed.sessionId), EXITED_RETENTION_MS);
+  getDaemonClient().removeListeners(managed.sessionId);
+  getDb()
+    .prepare("UPDATE cli_sessions SET ended_at = datetime('now'), output_log = ? WHERE id = ?")
+    .run(managed.outputBuffer || null, managed.sessionId);
+}
+
+/**
  * Wire a ManagedProcess to the daemon's output/exit streams.
  * Whenever the daemon sends output for this session, it arrives through the
  * client singleton and is forwarded to the ManagedProcess callbacks.
@@ -116,17 +136,7 @@ function wireDaemonListeners(managed: ManagedProcess) {
   });
 
   client.onExit(managed.sessionId, (code: number) => {
-    managed.alive = false;
-    managed.lastExitCode = code;
-    managed.exitedAt = Date.now();
-    managed.onExit?.(code);
-    activeSessions.delete(managed.sessionId);
-    recentlyExited.set(managed.sessionId, managed);
-    setTimeout(() => recentlyExited.delete(managed.sessionId), EXITED_RETENTION_MS);
-    client.removeListeners(managed.sessionId);
-    getDb()
-      .prepare("UPDATE cli_sessions SET ended_at = datetime('now'), output_log = ? WHERE id = ?")
-      .run(managed.outputBuffer || null, managed.sessionId);
+    finalizeSessionExit(managed, code);
   });
 }
 
@@ -302,7 +312,52 @@ export async function initDaemonBridge(): Promise<void> {
     }
   }
 
+  // --- Daemon lifecycle callbacks ---
+
+  // When connection drops, immediately mark all sessions as disconnected.
+  // The onExit callbacks will notify WebSocket clients.
+  client.onConnectionLost(() => {
+    console.warn('[cli-bridge] Daemon connection lost — marking all active sessions as dead');
+    const sessions = [...activeSessions.values()];
+    for (const s of sessions) {
+      finalizeSessionExit(s, -1, 'daemon-lost');
+    }
+  });
+
+  // When we reconnect to a different daemon, sessions are already cleaned up
+  // by onConnectionLost above. Nothing extra needed.
+  client.onDaemonRestarted(() => {
+    console.log('[cli-bridge] Daemon restarted — previous sessions already cleaned up');
+  });
+
+  // When we reconnect to the same daemon (transient socket drop),
+  // re-attach to all sessions that the daemon still owns.
+  client.onReconnected(async (sameDaemon: boolean) => {
+    if (!sameDaemon) return; // handled by onDaemonRestarted
+    console.log('[cli-bridge] Re-attaching to surviving daemon sessions...');
+    const surviving = [...activeSessions.values()].filter(s => s.alive);
+    for (const s of surviving) {
+      try {
+        const attached = await client.attachSession(s.sessionId);
+        s.outputBuffer = attached.buffer;
+        if (!attached.alive) {
+          finalizeSessionExit(s, attached.exitCode ?? -1);
+        }
+      } catch {
+        console.warn(`[cli-bridge] Failed to re-attach session ${s.sessionId}, marking dead`);
+        finalizeSessionExit(s, -1);
+      }
+    }
+  });
+
   // Discover sessions that survived the server restart
+  await reconcileDaemonSessions(client);
+}
+
+/**
+ * Reconcile active sessions from the daemon (used at startup and after reconnect).
+ */
+async function reconcileDaemonSessions(client: ReturnType<typeof getDaemonClient>): Promise<void> {
   const daemonSessions = await client.listSessions();
   const db = getDb();
   let recovered = 0;

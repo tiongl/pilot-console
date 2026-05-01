@@ -7,15 +7,35 @@ import type { WsClientMessage, WsServerMessage } from '../shared/types';
 
 interface AuthedSocket extends WebSocket {
   userId?: string;
+  userRole?: string;
   sessionId?: string;
   isAlive?: boolean;
   wsId?: number;
 }
 
 let wsIdCounter = 0;
+let _wss: WebSocketServer | null = null;
+
+/** Broadcast a report-ready event to all connected users */
+export function broadcastReportReady(payload: {
+  runId: string;
+  scheduleId: string;
+  scheduleName: string;
+  status: string;
+}): void {
+  if (!_wss) return;
+  const msg = JSON.stringify({ type: 'report-ready', ...payload });
+  _wss.clients.forEach((ws) => {
+    const socket = ws as AuthedSocket;
+    if (socket.readyState === WebSocket.OPEN && socket.userId) {
+      socket.send(msg);
+    }
+  });
+}
 
 export function setupWebSocketServer(): WebSocketServer {
   const wss = new WebSocketServer({ noServer: true });
+  _wss = wss;
 
   const heartbeat = setInterval(() => {
     wss.clients.forEach((ws) => {
@@ -59,6 +79,7 @@ export function setupWebSocketServer(): WebSocketServer {
     }
 
     ws.userId = user.id;
+    ws.userRole = user.role;
 
     const url = new URL(req.url ?? '', `http://${req.headers.host}`);
     const projectId = url.searchParams.get('projectId');
@@ -76,7 +97,7 @@ export function setupWebSocketServer(): WebSocketServer {
       if (managed && managed.alive) {
         // Verify ownership
         if (managed.userId !== ws.userId) {
-          ws.close(4003, 'Not your session');
+          ws.close(4005, 'Not your session');
           return;
         }
         isReconnect = true;
@@ -116,9 +137,12 @@ export function setupWebSocketServer(): WebSocketServer {
     managed.activeWsId = ws.wsId!;
     managed.onOutput = (data) => send({ type: 'output', data });
     managed.onError = (data) => send({ type: 'error', data });
-    managed.onExit = (code) => {
-      console.log(`[ws] session ${managed!.sessionId} exited: code=${code}`);
+    managed.onExit = (code, reason) => {
+      console.log(`[ws] session ${managed!.sessionId} exited: code=${code} reason=${reason ?? 'normal'}`);
       send({ type: 'exit', code });
+      if (reason === 'daemon-lost') {
+        ws.close(4010, 'Daemon session lost');
+      }
     };
 
     console.log(`[ws] WS ${ws.wsId} session ready: ${managed.sessionId}, isReconnect=${isReconnect}, alive=${managed.alive}, bufferLen=${managed.outputBuffer?.length ?? 0}`);
