@@ -69,8 +69,9 @@ export function setupWebSocketServer(): WebSocketServer {
 
     ws.userId = decoded.userId as string;
 
-    // Reuse existing PTY session for this user+project, or create a new one
+    // Reuse existing PTY session for this user+project+worktree, or create a new one
     const projectId = url.searchParams.get('projectId');
+    const worktreeId = url.searchParams.get('worktreeId');
     const requestedSessionId = url.searchParams.get('sessionId');
     const forceNew = url.searchParams.get('new') === 'true';
 
@@ -89,7 +90,7 @@ export function setupWebSocketServer(): WebSocketServer {
     } else if (forceNew) {
       // Always create new
       try {
-        managed = createCliSession(ws.userId, projectId);
+        managed = createCliSession(ws.userId, projectId, worktreeId);
       } catch (err) {
         console.error('[ws] failed to create CLI session:', err);
         ws.close(4002, 'Failed to create session');
@@ -97,11 +98,11 @@ export function setupWebSocketServer(): WebSocketServer {
       }
     } else {
       // Legacy: find existing or create
-      managed = findActiveSession(ws.userId, projectId ?? null);
+      managed = findActiveSession(ws.userId, projectId ?? null, worktreeId);
       isReconnect = !!managed;
       if (!managed) {
         try {
-          managed = createCliSession(ws.userId, projectId);
+          managed = createCliSession(ws.userId, projectId, worktreeId);
         } catch (err) {
           console.error('[ws] failed to create CLI session:', err);
           ws.close(4002, 'Failed to create session');

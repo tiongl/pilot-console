@@ -10,6 +10,7 @@ import { THEMES } from '@/lib/terminal-themes';
 interface Props {
   userName: string | null;
   projectId?: string;
+  worktreeId?: string;
 }
 
 interface TabMeta {
@@ -26,9 +27,10 @@ let tabCounter = 0;
  * Parent only manages tab list and active tab — no output flows through parent state.
  */
 function TerminalTab({
-  projectId, fontSize, fontFamily, themeName, active, forceNew, onStatusChange, onKill,
+  projectId, worktreeId, fontSize, fontFamily, themeName, active, forceNew, onStatusChange, onKill,
 }: {
   projectId?: string;
+  worktreeId?: string;
   fontSize: number;
   fontFamily: string;
   themeName: string;
@@ -51,6 +53,7 @@ function TerminalTab({
 
   const { state, send } = useCliSocket({
     projectId,
+    worktreeId,
     forceNew,
     onOutput: writeToTerm,
     onError: (data) => writeToTerm(`\x1b[31m${data}\x1b[0m`),
@@ -103,7 +106,7 @@ function TerminalTab({
   );
 }
 
-export default function ChatClient({ userName: _userName, projectId }: Props) {
+export default function ChatClient({ userName: _userName, projectId, worktreeId }: Props) {
   const defaultTheme = typeof window !== 'undefined' ? localStorage.getItem('clippy-theme') || 'Catppuccin' : 'Catppuccin';
   const defaultFont = typeof window !== 'undefined' ? localStorage.getItem('clippy-font') || TERMINAL_FONTS[0].family : TERMINAL_FONTS[0].family;
 
@@ -296,6 +299,7 @@ export default function ChatClient({ userName: _userName, projectId }: Props) {
             <TerminalTab
               key={tab.id}
               projectId={projectId}
+              worktreeId={worktreeId}
               fontSize={fontSize}
               fontFamily={tab.fontFamily || defaultFont}
               themeName={tab.themeName || defaultTheme}

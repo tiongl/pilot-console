@@ -84,6 +84,18 @@ function initSchema(db: Database.Database) {
     );
 
     CREATE INDEX IF NOT EXISTS idx_project_snippets_project_id ON project_snippets(project_id);
+
+    CREATE TABLE IF NOT EXISTS worktrees (
+      id            TEXT PRIMARY KEY,
+      project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      name          TEXT NOT NULL,
+      branch        TEXT NOT NULL,
+      worktree_path TEXT NOT NULL UNIQUE,
+      created_at    TEXT DEFAULT (datetime('now')),
+      UNIQUE(project_id, name)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_worktrees_project_id ON worktrees(project_id);
   `);
 
   // Migrations: add columns that may not exist in older DBs

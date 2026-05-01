@@ -11,6 +11,8 @@ import ProjectLayout from './pages/ProjectLayout';
 import ProjectChatPage from './pages/ProjectChatPage';
 import ProjectSkillsPage from './pages/ProjectSkillsPage';
 import ProjectSettingsPage from './pages/ProjectSettingsPage';
+import WorktreeLayout from './pages/WorktreeLayout';
+import WorktreeChatPage from './pages/WorktreeChatPage';
 import AdminPage from './pages/AdminPage';
 import AdminSessionsPage from './pages/AdminSessionsPage';
 import AdminDaemonPage from './pages/AdminDaemonPage';
@@ -52,6 +54,10 @@ export function App() {
             <Route path="chat" element={<ProjectChatPageKeyed />} />
             <Route path="skills" element={<ProjectSkillsPage />} />
             <Route path="settings" element={<ProjectSettingsPage />} />
+          </Route>
+          <Route path="projects/:id/worktrees/:worktreeId" element={<WorktreeLayout />}>
+            <Route index element={<Navigate to="chat" replace />} />
+            <Route path="chat" element={<WorktreeChatPage />} />
           </Route>
           <Route path="admin" element={<AdminRoute><AdminPage /></AdminRoute>} />
           <Route path="admin/sessions" element={<AdminRoute><AdminSessionsPage /></AdminRoute>} />

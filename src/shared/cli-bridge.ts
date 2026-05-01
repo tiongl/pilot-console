@@ -1,5 +1,5 @@
 import { getDb } from './db';
-import { getProjectById } from './project-store';
+import { getProjectById, getWorktreeById } from './project-store';
 import { getDaemonClient } from '../daemon/client';
 
 const MAX_SCROLLBACK = 100_000; // chars to buffer for reconnection replay
@@ -10,6 +10,7 @@ export interface ManagedProcess {
   sessionId: string;
   userId: string;
   projectId: string | null;
+  worktreeId: string | null;
   mode: SessionMode;
   outputBuffer: string;
   onOutput: ((data: string) => void) | null;
@@ -51,10 +52,10 @@ const SHELL = IS_WINDOWS
   ? (process.env.COMSPEC || 'cmd.exe')
   : (process.env.SHELL || '/bin/bash');
 
-/** Find an existing live session for a user+project+mode combo */
-export function findActiveSession(userId: string, projectId: string | null, mode: SessionMode = 'cli'): ManagedProcess | undefined {
+/** Find an existing live session for a user+project+worktree+mode combo */
+export function findActiveSession(userId: string, projectId: string | null, mode: SessionMode = 'cli', worktreeId?: string | null): ManagedProcess | undefined {
   for (const s of activeSessions.values()) {
-    if (s.userId === userId && s.projectId === projectId && s.mode === mode && s.alive) return s;
+    if (s.userId === userId && s.projectId === projectId && s.mode === mode && (s.worktreeId ?? null) === (worktreeId ?? null) && s.alive) return s;
   }
   return undefined;
 }
@@ -129,11 +130,26 @@ function wireDaemonListeners(managed: ManagedProcess) {
   });
 }
 
-export function createCliSession(userId: string, projectId?: string | null, mode: SessionMode = 'cli'): ManagedProcess {
+export function createCliSession(userId: string, projectId?: string | null, mode: SessionMode = 'cli', worktreeId?: string | null): ManagedProcess {
   const sessionId = crypto.randomUUID();
 
   let cwd: string | undefined;
-  if (projectId) {
+  if (worktreeId) {
+    const wt = getWorktreeById(worktreeId);
+    if (wt?.worktreePath) {
+      try {
+        const fs = require('fs');
+        if (fs.existsSync(wt.worktreePath)) {
+          cwd = wt.worktreePath;
+        } else {
+          console.warn(`[cli-bridge] Worktree path does not exist: ${wt.worktreePath}, using project repoPath`);
+        }
+      } catch {
+        console.warn(`[cli-bridge] Failed to check worktree path: ${wt.worktreePath}`);
+      }
+    }
+  }
+  if (!cwd && projectId) {
     const project = getProjectById(projectId);
     if (project?.repoPath) {
       try {
@@ -174,6 +190,7 @@ export function createCliSession(userId: string, projectId?: string | null, mode
     sessionId,
     userId,
     projectId: projectId ?? null,
+    worktreeId: worktreeId ?? null,
     mode,
     outputBuffer: '',
     onOutput: null,
@@ -196,7 +213,7 @@ export function createCliSession(userId: string, projectId?: string | null, mode
     args: shellArgs,
     cols: 120,
     rows: 30,
-    meta: { userId, projectId: projectId ?? null, mode },
+    meta: { userId, projectId: projectId ?? null, worktreeId: worktreeId ?? null, mode },
   }).then(() => {
     // Attach to receive output
     return client.attachSession(sessionId);
@@ -296,11 +313,13 @@ export async function initDaemonBridge(): Promise<void> {
 
     const userId = info.meta?.userId ?? 'unknown';
     const projectId = info.meta?.projectId ?? null;
+    const worktreeId = info.meta?.worktreeId ?? null;
 
     const managed: ManagedProcess = {
       sessionId: info.sessionId,
       userId,
       projectId,
+      worktreeId,
       mode: (info.meta?.mode as SessionMode) || 'cli',
       outputBuffer: '',
       onOutput: null,

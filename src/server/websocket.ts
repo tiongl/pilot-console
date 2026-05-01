@@ -62,6 +62,7 @@ export function setupWebSocketServer(): WebSocketServer {
 
     const url = new URL(req.url ?? '', `http://${req.headers.host}`);
     const projectId = url.searchParams.get('projectId');
+    const worktreeId = url.searchParams.get('worktreeId');
     const requestedSessionId = url.searchParams.get('sessionId');
     const forceNew = url.searchParams.get('new') === 'true';
     const modeParam = url.searchParams.get('mode');
@@ -85,18 +86,18 @@ export function setupWebSocketServer(): WebSocketServer {
       }
     } else if (forceNew) {
       try {
-        managed = createCliSession(ws.userId, projectId, mode);
+        managed = createCliSession(ws.userId, projectId, mode, worktreeId);
       } catch (err) {
         console.error('[ws] failed to create CLI session:', err);
         ws.close(4002, 'Failed to create session');
         return;
       }
     } else {
-      managed = findActiveSession(ws.userId, projectId ?? null, mode);
+      managed = findActiveSession(ws.userId, projectId ?? null, mode, worktreeId);
       isReconnect = !!managed;
       if (!managed) {
         try {
-          managed = createCliSession(ws.userId, projectId, mode);
+          managed = createCliSession(ws.userId, projectId, mode, worktreeId);
         } catch (err) {
           console.error('[ws] failed to create CLI session:', err);
           ws.close(4002, 'Failed to create session');

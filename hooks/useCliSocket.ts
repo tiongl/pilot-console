@@ -7,6 +7,7 @@ export type ConnectionState = 'connecting' | 'open' | 'closed' | 'error';
 
 interface UseCliSocketOptions {
   projectId?: string;
+  worktreeId?: string;
   sessionId?: string;
   forceNew?: boolean;
   mode?: 'cli' | 'shell' | 'powershell';
@@ -32,6 +33,7 @@ export function useCliSocket(options: UseCliSocketOptions = {}) {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const urlParams = new URLSearchParams();
     if (optionsRef.current.projectId) urlParams.set('projectId', optionsRef.current.projectId);
+    if (optionsRef.current.worktreeId) urlParams.set('worktreeId', optionsRef.current.worktreeId);
     if (optionsRef.current.mode && optionsRef.current.mode !== 'cli') urlParams.set('mode', optionsRef.current.mode);
 
     if (knownSessionId.current) {

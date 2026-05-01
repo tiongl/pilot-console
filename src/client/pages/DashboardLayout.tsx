@@ -3,9 +3,11 @@ import { Outlet, Link, useNavigate, useLocation } from 'react-router';
 import { useAuth } from '../lib/auth-context';
 import { useTheme, THEMES, type ThemeId } from '../lib/theme-context';
 import { Button } from '../../../components/ui/button';
-import { Plus, Shield, LogOut, FolderOpen, Pin, Palette, Settings } from 'lucide-react';
+import { Plus, Shield, LogOut, FolderOpen, Pin, Palette, Settings, ChevronRight, ChevronDown, GitBranch, Trash2 } from 'lucide-react';
 import { SkillCatalog, InstalledSkillsPanel } from '../pages/ProjectSkillsPage';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../../components/ui/dialog';
+import { Input } from '../../../components/ui/input';
+import { Label } from '../../../components/ui/label';
 import { ClippyLogo } from '../components/ClippyLogo';
 
 interface Project {
@@ -13,6 +15,14 @@ interface Project {
   name: string;
   repoPath: string;
   pinned?: number;
+}
+
+interface Worktree {
+  id: string;
+  projectId: string;
+  name: string;
+  branch: string;
+  worktreePath: string;
 }
 
 function statusPriority(status: SessionStatus): number {
@@ -71,6 +81,14 @@ function ProjectNav({ projects }: { projects: Project[] }) {
   const [pinnedIds, setPinnedIds] = useState<Set<string>>(
     new Set(projects.filter(p => p.pinned).map(p => p.id))
   );
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [worktreeMap, setWorktreeMap] = useState<Record<string, Worktree[]>>({});
+  const [showAddDialog, setShowAddDialog] = useState<string | null>(null);
+  const [wtName, setWtName] = useState('');
+  const [wtBranch, setWtBranch] = useState('');
+  const [wtCreateNew, setWtCreateNew] = useState(false);
+  const [wtError, setWtError] = useState('');
+  const [wtSaving, setWtSaving] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -82,7 +100,6 @@ function ProjectNav({ projects }: { projects: Project[] }) {
           if (!cancelled) {
             const statuses = new Map<string, ProjectSessionInfo>();
             for (const s of data.sessions || []) {
-              // If multiple sessions for same project, prefer busy > idle > exited
               const existing = statuses.get(s.projectId);
               if (!existing || statusPriority(s.status) > statusPriority(existing.status)) {
                 statuses.set(s.projectId, { status: s.status, exitCode: s.exitCode });
@@ -97,6 +114,29 @@ function ProjectNav({ projects }: { projects: Project[] }) {
     const interval = setInterval(poll, 3000);
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
+
+  const fetchWorktrees = useCallback(async (projectId: string) => {
+    try {
+      const res = await fetch(`/api/projects/${projectId}/worktrees`);
+      if (res.ok) {
+        const data = await res.json();
+        setWorktreeMap(prev => ({ ...prev, [projectId]: data.worktrees || [] }));
+      }
+    } catch {}
+  }, []);
+
+  const toggleExpanded = useCallback((projectId: string) => {
+    setExpandedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(projectId)) {
+        next.delete(projectId);
+      } else {
+        next.add(projectId);
+        fetchWorktrees(projectId);
+      }
+      return next;
+    });
+  }, [fetchWorktrees]);
 
   const togglePin = useCallback(async (e: React.MouseEvent, projectId: string) => {
     e.preventDefault();
@@ -115,6 +155,49 @@ function ProjectNav({ projects }: { projects: Project[] }) {
       });
     } catch {}
   }, [pinnedIds]);
+
+  const openAddDialog = useCallback((e: React.MouseEvent, projectId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setWtName('');
+    setWtBranch('');
+    setWtCreateNew(false);
+    setWtError('');
+    setShowAddDialog(projectId);
+  }, []);
+
+  const handleAddWorktree = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!showAddDialog) return;
+    setWtError('');
+    setWtSaving(true);
+    try {
+      const res = await fetch(`/api/projects/${showAddDialog}/worktrees`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: wtName, branch: wtBranch, createNewBranch: wtCreateNew }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setExpandedIds(prev => new Set(prev).add(showAddDialog));
+      await fetchWorktrees(showAddDialog);
+      setShowAddDialog(null);
+    } catch (err) {
+      setWtError((err as Error).message);
+    } finally {
+      setWtSaving(false);
+    }
+  };
+
+  const handleDeleteWorktree = async (e: React.MouseEvent, projectId: string, worktreeId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!confirm('Remove this worktree? The worktree directory will be deleted.')) return;
+    try {
+      await fetch(`/api/projects/${projectId}/worktrees/${worktreeId}`, { method: 'DELETE' });
+      await fetchWorktrees(projectId);
+    } catch {}
+  };
 
   if (projects.length === 0) {
     return (
@@ -136,33 +219,131 @@ function ProjectNav({ projects }: { projects: Project[] }) {
     <>
       {sorted.map((project) => {
         const isActive = location.pathname.startsWith(`/projects/${project.id}`);
+        const isExpanded = expandedIds.has(project.id);
+        const worktrees = worktreeMap[project.id] || [];
+
         return (
-          <Link
-            key={project.id}
-            to={`/projects/${project.id}/chat`}
-            className={`group flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
-              isActive
-                ? 'bg-accent text-accent-foreground font-medium'
-                : 'hover:bg-accent hover:text-accent-foreground'
-            }`}
-          >
-            <FolderOpen className="h-4 w-4 shrink-0" />
-            <span className="truncate flex-1">{project.name}</span>
-            <button
-              onClick={(e) => togglePin(e, project.id)}
-              className={`h-4 w-4 shrink-0 transition-opacity ${
-                pinnedIds.has(project.id)
-                  ? 'text-primary opacity-100'
-                  : 'text-muted-foreground opacity-0 group-hover:opacity-100'
-              }`}
-              title={pinnedIds.has(project.id) ? 'Unpin' : 'Pin to top'}
-            >
-              <Pin className="h-3.5 w-3.5" />
-            </button>
-            <StatusDot info={projectStatuses.get(project.id)} />
-          </Link>
+          <div key={project.id}>
+            <div className={`group flex items-center gap-1 rounded-lg px-1 py-1 text-sm transition-colors ${
+              isActive ? 'bg-accent text-accent-foreground font-medium' : 'hover:bg-accent hover:text-accent-foreground'
+            }`}>
+              <button
+                onClick={() => toggleExpanded(project.id)}
+                className="h-5 w-5 flex items-center justify-center shrink-0 text-muted-foreground hover:text-foreground"
+              >
+                {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+              </button>
+              <Link
+                to={`/projects/${project.id}/chat`}
+                className="flex items-center gap-2 flex-1 min-w-0 py-0.5"
+              >
+                <FolderOpen className="h-4 w-4 shrink-0" />
+                <span className="truncate flex-1">{project.name}</span>
+              </Link>
+              <button
+                onClick={(e) => openAddDialog(e, project.id)}
+                className="h-4 w-4 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-foreground transition-opacity"
+                title="Add worktree"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={(e) => togglePin(e, project.id)}
+                className={`h-4 w-4 shrink-0 transition-opacity ${
+                  pinnedIds.has(project.id)
+                    ? 'text-primary opacity-100'
+                    : 'text-muted-foreground opacity-0 group-hover:opacity-100'
+                }`}
+                title={pinnedIds.has(project.id) ? 'Unpin' : 'Pin to top'}
+              >
+                <Pin className="h-3.5 w-3.5" />
+              </button>
+              <StatusDot info={projectStatuses.get(project.id)} />
+            </div>
+            {isExpanded && worktrees.length > 0 && (
+              <div className="ml-4 border-l pl-2 mb-1">
+                {worktrees.map(wt => (
+                  <Link
+                    key={wt.id}
+                    to={`/projects/${project.id}/worktrees/${wt.id}/chat`}
+                    className={`group/wt flex items-center gap-2 rounded-md px-2 py-1 text-xs transition-colors ${
+                      location.pathname.includes(`/worktrees/${wt.id}`)
+                        ? 'bg-accent text-accent-foreground font-medium'
+                        : 'hover:bg-accent hover:text-accent-foreground'
+                    }`}
+                  >
+                    <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <span className="truncate flex-1">{wt.name}</span>
+                    <span className="text-[10px] text-muted-foreground truncate max-w-[60px]">{wt.branch}</span>
+                    <button
+                      onClick={(e) => handleDeleteWorktree(e, project.id, wt.id)}
+                      className="h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 group-hover/wt:opacity-100 hover:text-destructive transition-opacity"
+                      title="Remove worktree"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </Link>
+                ))}
+              </div>
+            )}
+            {isExpanded && worktrees.length === 0 && (
+              <div className="ml-4 border-l pl-2 mb-1">
+                <p className="px-2 py-1 text-[10px] text-muted-foreground">No worktrees</p>
+              </div>
+            )}
+          </div>
         );
       })}
+
+      <Dialog open={!!showAddDialog} onOpenChange={(open) => !open && setShowAddDialog(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add Worktree</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleAddWorktree} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="wt-name">Name</Label>
+              <Input
+                id="wt-name"
+                value={wtName}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWtName(e.target.value)}
+                placeholder="e.g. feature-auth"
+                required
+              />
+              <p className="text-[10px] text-muted-foreground">Used as directory suffix and display name</p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="wt-branch">Branch</Label>
+              <Input
+                id="wt-branch"
+                value={wtBranch}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWtBranch(e.target.value)}
+                placeholder="e.g. feature/auth or main"
+                required
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="wt-create-new"
+                checked={wtCreateNew}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWtCreateNew(e.target.checked)}
+                className="h-4 w-4 rounded border-gray-300"
+              />
+              <Label htmlFor="wt-create-new" className="text-sm font-normal">Create new branch</Label>
+            </div>
+            {wtError && <p className="text-sm text-destructive">{wtError}</p>}
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setShowAddDialog(null)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={wtSaving}>
+                {wtSaving ? 'Creating…' : 'Add Worktree'}
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

@@ -1,6 +1,6 @@
 import * as pty from 'node-pty';
 import { getDb } from './app-db';
-import { getProjectById } from './project-store';
+import { getProjectById, getWorktreeById } from './project-store';
 
 const MAX_SCROLLBACK = 100_000; // chars to buffer for reconnection replay
 
@@ -8,6 +8,7 @@ export interface ManagedProcess {
   sessionId: string;
   userId: string;
   projectId: string | null;
+  worktreeId: string | null;
   ptyProcess: pty.IPty;
   outputBuffer: string;
   onOutput: ((data: string) => void) | null;
@@ -25,10 +26,10 @@ const CLI_ARGS = (process.env.COPILOT_CLI_ARGS ?? 'copilot').split(' ').filter(B
 const IS_WINDOWS = process.platform === 'win32';
 const SHELL = IS_WINDOWS ? 'cmd.exe' : '/bin/bash';
 
-/** Find an existing live session for a user+project combo */
-export function findActiveSession(userId: string, projectId: string | null): ManagedProcess | undefined {
+/** Find an existing live session for a user+project+worktree combo */
+export function findActiveSession(userId: string, projectId: string | null, worktreeId?: string | null): ManagedProcess | undefined {
   for (const s of activeSessions.values()) {
-    if (s.userId === userId && s.projectId === projectId && s.alive) return s;
+    if (s.userId === userId && s.projectId === projectId && (s.worktreeId ?? null) === (worktreeId ?? null) && s.alive) return s;
   }
   return undefined;
 }
@@ -48,11 +49,16 @@ export function detachSession(sessionId: string): void {
   }
 }
 
-export function createCliSession(userId: string, projectId?: string | null): ManagedProcess {
+export function createCliSession(userId: string, projectId?: string | null, worktreeId?: string | null): ManagedProcess {
   const sessionId = crypto.randomUUID();
 
   let cwd: string | undefined;
-  if (projectId) {
+  if (worktreeId) {
+    const wt = getWorktreeById(worktreeId);
+    if (wt) {
+      cwd = wt.worktreePath;
+    }
+  } else if (projectId) {
     const project = getProjectById(projectId);
     if (project) {
       cwd = project.repoPath;
@@ -76,6 +82,7 @@ export function createCliSession(userId: string, projectId?: string | null): Man
     sessionId,
     userId,
     projectId: projectId ?? null,
+    worktreeId: worktreeId ?? null,
     ptyProcess: ptyProc,
     outputBuffer: '',
     onOutput: null,

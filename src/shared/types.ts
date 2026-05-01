@@ -61,6 +61,15 @@ export type WsServerMessage =
   | { type: 'ready'; sessionId: string }
   | { type: 'pong' };
 
+export interface Worktree {
+  id: string;
+  projectId: string;
+  name: string;
+  branch: string;
+  worktreePath: string;
+  createdAt: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';

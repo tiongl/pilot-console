@@ -34,9 +34,10 @@ const projectTabStates = new Map<string, ProjectTabState>();
  * Output is written directly to xterm (no React state accumulation).
  */
 function TerminalTab({
-  projectId, fontSize, fontFamily, themeName, active, forceNew, mode, sessionId: initialSessionId, onStatusChange, onKill, onSessionId,
+  projectId, worktreeId, fontSize, fontFamily, themeName, active, forceNew, mode, sessionId: initialSessionId, onStatusChange, onKill, onSessionId,
 }: {
   projectId?: string;
+  worktreeId?: string;
   fontSize: number;
   fontFamily: string;
   themeName: string;
@@ -62,6 +63,7 @@ function TerminalTab({
 
   const { state, send } = useCliSocket({
     projectId,
+    worktreeId,
     sessionId: initialSessionId,
     forceNew: !initialSessionId && forceNew,
     mode,
@@ -137,7 +139,7 @@ function TerminalTab({
   );
 }
 
-export default function ProjectChatPage() {
+export default function ProjectChatPage({ worktreeId }: { worktreeId?: string }) {
   const { id: projectId } = useParams<{ id: string }>();
 
   const defaultTheme = localStorage.getItem('clippy-theme') || 'Catppuccin';
@@ -478,6 +480,7 @@ export default function ProjectChatPage() {
             <TerminalTab
               key={tab.id}
               projectId={projectId}
+              worktreeId={worktreeId}
               fontSize={fontSize}
               fontFamily={tab.fontFamily || defaultFont}
               themeName={tab.themeName || defaultTheme}

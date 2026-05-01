@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
+import { execFileSync } from 'child_process';
 import { getDb } from './db';
-import type { Project, ProjectSkill, SkillType } from './types';
+import type { Project, ProjectSkill, SkillType, Worktree } from './types';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -162,4 +163,115 @@ export function updateSkill(
 
 export function deleteSkill(id: string): void {
   getDb().prepare('DELETE FROM project_skills WHERE id = ?').run(id);
+}
+
+// ---------------------------------------------------------------------------
+// Worktrees CRUD
+// ---------------------------------------------------------------------------
+
+function rowToWorktree(row: Record<string, unknown>): Worktree {
+  return {
+    id: row.id as string,
+    projectId: row.project_id as string,
+    name: row.name as string,
+    branch: row.branch as string,
+    worktreePath: row.worktree_path as string,
+    createdAt: row.created_at as string,
+  };
+}
+
+/** Sanitize a worktree name into a filesystem-safe slug */
+function sanitizeWorktreeName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+export function createWorktree(
+  projectId: string,
+  name: string,
+  branch: string,
+  createNewBranch: boolean = false,
+): Worktree {
+  const project = getProjectById(projectId);
+  if (!project) throw new Error('Project not found');
+
+  const slug = sanitizeWorktreeName(name);
+  if (!slug) throw new Error('Invalid worktree name');
+  if (!branch.trim()) throw new Error('Branch is required');
+
+  // Derive worktree path as sibling to main repo
+  const repoDir = path.basename(project.repoPath);
+  const wtPath = path.resolve(project.repoPath, '..', `${repoDir}-wt-${slug}`);
+
+  if (fs.existsSync(wtPath)) {
+    throw new Error(`Path already exists: ${wtPath}`);
+  }
+
+  // Run git worktree add
+  const args = ['worktree', 'add'];
+  if (createNewBranch) {
+    args.push('-b', branch.trim());
+  }
+  args.push(wtPath);
+  if (!createNewBranch) {
+    args.push(branch.trim());
+  }
+
+  try {
+    execFileSync('git', args, {
+      cwd: project.repoPath,
+      timeout: 30_000,
+      stdio: 'pipe',
+    });
+  } catch (err) {
+    const msg = (err as { stderr?: Buffer }).stderr?.toString() || (err as Error).message;
+    throw new Error(`git worktree add failed: ${msg}`);
+  }
+
+  const id = crypto.randomUUID();
+  getDb()
+    .prepare('INSERT INTO worktrees (id, project_id, name, branch, worktree_path) VALUES (?, ?, ?, ?, ?)')
+    .run(id, projectId, slug, branch.trim(), wtPath);
+
+  return getWorktreeById(id)!;
+}
+
+export function listWorktrees(projectId: string): Worktree[] {
+  const rows = getDb()
+    .prepare('SELECT * FROM worktrees WHERE project_id = ? ORDER BY created_at')
+    .all(projectId) as Record<string, unknown>[];
+  return rows.map(rowToWorktree);
+}
+
+export function getWorktreeById(id: string): Worktree | null {
+  const row = getDb()
+    .prepare('SELECT * FROM worktrees WHERE id = ?')
+    .get(id) as Record<string, unknown> | undefined;
+  return row ? rowToWorktree(row) : null;
+}
+
+export function deleteWorktree(id: string, projectId: string): void {
+  const wt = getWorktreeById(id);
+  if (!wt) throw new Error('Worktree not found');
+  if (wt.projectId !== projectId) throw new Error('Worktree does not belong to this project');
+
+  // Run git worktree remove
+  const project = getProjectById(wt.projectId);
+  if (project) {
+    try {
+      execFileSync('git', ['worktree', 'remove', wt.worktreePath, '--force'], {
+        cwd: project.repoPath,
+        timeout: 30_000,
+        stdio: 'pipe',
+      });
+    } catch {
+      // If git remove fails (e.g., already gone), still clean up DB
+    }
+  }
+
+  getDb().prepare('DELETE FROM worktrees WHERE id = ?').run(id);
 }
