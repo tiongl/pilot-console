@@ -1,6 +1,6 @@
 import { useCallback, useRef } from 'react';
-import TerminalPane, { type TerminalPaneAPI } from '../../../components/terminal/TerminalPane';
-import { useCliSocket } from '../../../hooks/useCliSocket';
+import TerminalPane, { type TerminalPaneAPI } from '../components/terminal/TerminalPane';
+import { useCliSocket } from '../hooks/useCliSocket';
 
 export default function ChatPage() {
   const termApiRef = useRef<TerminalPaneAPI | null>(null);

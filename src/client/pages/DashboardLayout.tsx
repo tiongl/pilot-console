@@ -2,12 +2,12 @@ import { useEffect, useState, useCallback } from 'react';
 import { Outlet, Link, useNavigate, useLocation } from 'react-router';
 import { useAuth } from '../lib/auth-context';
 import { useTheme, THEMES, type ThemeId } from '../lib/theme-context';
-import { Button } from '../../../components/ui/button';
+import { Button } from '../components/ui/button';
 import { Plus, Shield, LogOut, FolderOpen, Pin, Palette, Settings, ChevronRight, ChevronDown, GitBranch, Trash2 } from 'lucide-react';
 import { SkillCatalog, InstalledSkillsPanel } from '../pages/ProjectSkillsPage';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../../components/ui/dialog';
-import { Input } from '../../../components/ui/input';
-import { Label } from '../../../components/ui/label';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
+import { Input } from '../components/ui/input';
+import { Label } from '../components/ui/label';
 import { ClippyLogo } from '../components/ClippyLogo';
 
 interface Project {

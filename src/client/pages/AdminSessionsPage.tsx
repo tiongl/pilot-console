@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import ActiveSessionsTable from '../../../components/admin/ActiveSessionsTable';
+import ActiveSessionsTable from '../components/admin/ActiveSessionsTable';
 
 interface SessionInfo {
   id: string;

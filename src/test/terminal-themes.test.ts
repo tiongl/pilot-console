@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { THEMES, getThemeByName } from '@/lib/terminal-themes';
+import { THEMES, getThemeByName } from '../shared/terminal-themes';
 
 describe('terminal-themes', () => {
   it('exports a non-empty array of themes', () => {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import UserTable from '../../../components/admin/UserTable';
+import UserTable from '../components/admin/UserTable';
 
 interface User {
   id: string;

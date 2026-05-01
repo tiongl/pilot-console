@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Outlet, useParams } from 'react-router';
-import ProjectHeader from '../../../components/project/ProjectHeader';
-import ProjectTodoPanel from '../../../components/project/ProjectTodoPanel';
+import ProjectHeader from '../components/project/ProjectHeader';
+import ProjectTodoPanel from '../components/project/ProjectTodoPanel';
 
 interface Worktree {
   id: string;

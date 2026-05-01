@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../lib/auth-context';
-import { Button } from '../../../components/ui/button';
+import { Button } from '../components/ui/button';
 import { RefreshCw, Trash2, Server, Activity, AlertTriangle, Play } from 'lucide-react';
 
 interface DaemonSession {

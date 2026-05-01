@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { useAuth } from '../lib/auth-context';
-import { Button } from '../../../components/ui/button';
-import { Card, CardDescription, CardHeader, CardTitle } from '../../../components/ui/card';
+import { Button } from '../components/ui/button';
+import { Card, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { FolderOpen, Plus } from 'lucide-react';
 
 interface Project {

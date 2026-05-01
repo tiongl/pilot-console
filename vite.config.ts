@@ -8,7 +8,7 @@ export default defineConfig({
   publicDir: '../../public',
   resolve: {
     alias: {
-      '@': path.resolve(__dirname),
+      '@': path.resolve(__dirname, 'src/client'),
     },
   },
   build: {
