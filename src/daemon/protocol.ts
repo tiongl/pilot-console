@@ -27,6 +27,14 @@ export const DAEMON_LOCK_PATH = path.join(os.homedir(), '.clippy', 'daemon.lock'
 // Client → Daemon commands
 // ---------------------------------------------------------------------------
 
+export interface SessionMeta {
+  userId?: string;
+  projectId?: string | null;
+  mode?: string;
+  source?: string;
+  worktreeId?: string | null;
+}
+
 export interface CreateCmd {
   cmd: 'create';
   reqId: string;
@@ -36,7 +44,7 @@ export interface CreateCmd {
   args: string[];
   cols: number;
   rows: number;
-  meta?: { userId?: string; projectId?: string | null; mode?: string };
+  meta?: SessionMeta;
 }
 
 export interface WriteCmd {
@@ -84,6 +92,25 @@ export interface AuthCmd {
   secret: string;
 }
 
+export interface RunOnceCmd {
+  cmd: 'runOnce';
+  reqId: string;
+  sessionId: string;
+  cwd: string;
+  shell: string;
+  args: string[];
+  prompt: string;
+  timeoutMs: number;
+  maxOutputBytes?: number; // default 1MB
+  meta?: SessionMeta;
+}
+
+export interface PeekCmd {
+  cmd: 'peek';
+  reqId: string;
+  sessionId: string;
+}
+
 export type DaemonCommand =
   | CreateCmd
   | WriteCmd
@@ -92,7 +119,9 @@ export type DaemonCommand =
   | ListCmd
   | AttachCmd
   | DetachCmd
-  | AuthCmd;
+  | AuthCmd
+  | RunOnceCmd
+  | PeekCmd;
 
 // ---------------------------------------------------------------------------
 // Daemon → Client responses
@@ -125,7 +154,7 @@ export interface SessionInfo {
   lastOutputAt: number;
   bufferLength: number;
   seq: number;
-  meta?: { userId?: string; projectId?: string | null; mode?: string };
+  meta?: SessionMeta;
 }
 export interface SessionsResp {
   type: 'sessions';
@@ -149,10 +178,21 @@ export interface DetachedResp {
   sessionId: string;
 }
 
+export interface PeekedResp {
+  type: 'peeked';
+  reqId: string;
+  sessionId: string;
+  buffer: string;
+  lastSeq: number;
+  alive: boolean;
+  exitCode: number | null;
+}
+
 export interface AuthResp {
   type: 'auth';
   reqId: string;
   ok: boolean;
+  daemonId?: string;
 }
 
 export interface ErrorResp {
@@ -166,6 +206,23 @@ export interface OkResp {
   reqId: string;
 }
 
+export interface RunOnceOutputResp {
+  type: 'runOnceOutput';
+  reqId: string;
+  sessionId: string;
+  data: string;
+}
+
+export interface RunOnceCompleteResp {
+  type: 'runOnceComplete';
+  reqId: string;
+  sessionId: string;
+  exitCode: number;
+  timedOut: boolean;
+  wasTruncated: boolean;
+  totalBytes: number;
+}
+
 export type DaemonResponse =
   | CreatedResp
   | OutputResp
@@ -173,9 +230,12 @@ export type DaemonResponse =
   | SessionsResp
   | AttachedResp
   | DetachedResp
+  | PeekedResp
   | AuthResp
   | ErrorResp
-  | OkResp;
+  | OkResp
+  | RunOnceOutputResp
+  | RunOnceCompleteResp;
 
 // ---------------------------------------------------------------------------
 // Helpers

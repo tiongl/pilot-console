@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import { useAuth } from '../lib/auth-context';
 import { Button } from '../components/ui/button';
-import { RefreshCw, Trash2, Server, Activity, AlertTriangle, Play } from 'lucide-react';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
+import { RefreshCw, Trash2, Server, Activity, AlertTriangle, Play, Terminal, Maximize2 } from 'lucide-react';
+import { stripAnsi } from '@/lib/strip-ansi';
 
 interface DaemonSession {
   sessionId: string;
@@ -12,6 +14,7 @@ interface DaemonSession {
   bufferLength: number;
   userId: string | null;
   projectId: string | null;
+  source: string | null;
 }
 
 interface DaemonStatus {
@@ -27,6 +30,12 @@ export default function AdminDaemonPage() {
   const [restarting, setRestarting] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [viewingSession, setViewingSession] = useState<string | null>(null);
+  const [fullscreenSession, setFullscreenSession] = useState<string | null>(null);
+  const [sessionBuffer, setSessionBuffer] = useState<string | null>(null);
+  const [bufferLoading, setBufferLoading] = useState(false);
+  const bufferRef = useRef<HTMLPreElement>(null);
+  const fullscreenRef = useRef<HTMLPreElement>(null);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -93,11 +102,33 @@ export default function AdminDaemonPage() {
     }
   };
 
+  // Fetch buffer when a session is selected for viewing
+  const activeViewId = viewingSession ?? fullscreenSession;
+  useEffect(() => {
+    if (!activeViewId) { setSessionBuffer(null); return; }
+    let cancelled = false;
+    const fetchBuffer = async () => {
+      setBufferLoading(true);
+      try {
+        const res = await fetch(`/api/daemon/sessions/${activeViewId}/buffer`);
+        if (res.ok && !cancelled) {
+          const data = await res.json();
+          setSessionBuffer(data.buffer ?? '');
+        }
+      } catch { /* ignore */ }
+      if (!cancelled) setBufferLoading(false);
+    };
+    fetchBuffer();
+    // Re-fetch periodically for live sessions
+    const interval = setInterval(fetchBuffer, 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [activeViewId]);
+
   const aliveSessions = status?.sessions.filter(s => s.alive) ?? [];
   const exitedSessions = status?.sessions.filter(s => !s.alive) ?? [];
 
   return (
-    <div className="flex flex-col gap-6 p-8 max-w-4xl overflow-y-auto h-full">
+    <div className="flex flex-col gap-6 p-8 max-w-6xl overflow-y-auto h-full">
       <div>
         <h2 className="text-2xl font-bold">Daemon Management</h2>
         <p className="text-muted-foreground mt-1">
@@ -183,54 +214,62 @@ export default function AdminDaemonPage() {
           </div>
           <div className="divide-y">
             {aliveSessions.map(session => (
-              <div key={session.sessionId} className="flex items-center gap-4 px-6 py-3">
-                <div className="flex-1 min-w-0">
-                  <div className="font-mono text-sm truncate">{session.sessionId}</div>
-                  <div className="text-xs text-muted-foreground flex gap-3 mt-0.5">
-                    <span>User: {session.userId ?? 'unknown'}</span>
-                    <span>Project: {session.projectId ?? 'none'}</span>
-                    <span>Buffer: {Math.round(session.bufferLength / 1024)}KB</span>
-                    {session.lastOutputAt > 0 && (
-                      <span>Last output: {formatRelativeTime(session.lastOutputAt)}</span>
-                    )}
+              <div key={session.sessionId}>
+                <div className="flex items-center gap-4 px-6 py-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="font-mono text-sm truncate">{session.sessionId}</div>
+                    <div className="text-xs text-muted-foreground flex gap-3 mt-0.5">
+                      <span>User: {session.userId ?? 'unknown'}</span>
+                      <span>Source: {session.source ?? 'interactive'}</span>
+                      <span>Project: {session.projectId ?? 'none'}</span>
+                      <span>Buffer: {Math.round(session.bufferLength / 1024)}KB</span>
+                      {session.lastOutputAt > 0 && (
+                        <span>Last output: {formatRelativeTime(session.lastOutputAt)}</span>
+                      )}
+                    </div>
                   </div>
-                </div>
-                {isAdmin && (
+                  {isAdmin && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive hover:text-destructive hover:bg-destructive/10 shrink-0"
+                      onClick={() => handleKillSession(session.sessionId)}
+                    >
+                      <Trash2 className="h-4 w-4 mr-1" />
+                      Kill
+                    </Button>
+                  )}
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="text-destructive hover:text-destructive hover:bg-destructive/10 shrink-0"
-                    onClick={() => handleKillSession(session.sessionId)}
+                    onClick={() => setViewingSession(viewingSession === session.sessionId ? null : session.sessionId)}
+                    title="View terminal state"
                   >
-                    <Trash2 className="h-4 w-4 mr-1" />
-                    Kill
+                    <Terminal className="h-4 w-4" />
                   </Button>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Exited sessions */}
-      {exitedSessions.length > 0 && (
-        <div className="rounded-lg border bg-card">
-          <div className="flex items-center gap-2 px-6 py-4 border-b">
-            <Activity className="h-4 w-4 text-muted-foreground" />
-            <h3 className="font-semibold text-muted-foreground">Recently Exited</h3>
-          </div>
-          <div className="divide-y">
-            {exitedSessions.map(session => (
-              <div key={session.sessionId} className="flex items-center gap-4 px-6 py-3 opacity-60">
-                <div className="flex-1 min-w-0">
-                  <div className="font-mono text-sm truncate">{session.sessionId}</div>
-                  <div className="text-xs text-muted-foreground flex gap-3 mt-0.5">
-                    <span>Exit code: {session.exitCode ?? '?'}</span>
-                    {session.exitedAt && (
-                      <span>Exited: {formatRelativeTime(session.exitedAt)}</span>
-                    )}
-                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setFullscreenSession(session.sessionId)}
+                    title="Full terminal view"
+                  >
+                    <Maximize2 className="h-4 w-4" />
+                  </Button>
                 </div>
+                {viewingSession === session.sessionId && (
+                  <div className="px-6 pb-3">
+                    <div className="text-xs font-medium text-muted-foreground mb-1 flex items-center gap-1">
+                      <Terminal className="h-3 w-3" /> Terminal State
+                      {session.alive && <span className="ml-auto animate-pulse text-green-500">● live</span>}
+                    </div>
+                    <pre
+                      ref={bufferRef}
+                      className="bg-zinc-950 text-green-400 border rounded-lg p-3 text-xs font-mono max-h-96 overflow-auto whitespace-pre-wrap"
+                    >
+                      {bufferLoading && !sessionBuffer ? 'Loading...' : sessionBuffer ? stripAnsi(sessionBuffer) : '(empty)'}
+                    </pre>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -243,6 +282,35 @@ export default function AdminDaemonPage() {
           <p>No sessions in daemon. Sessions will appear when a terminal is opened.</p>
         </div>
       )}
+
+      {/* Fullscreen terminal dialog */}
+      <Dialog open={!!fullscreenSession} onOpenChange={(open) => { if (!open) setFullscreenSession(null); }}>
+        <DialogContent className="!max-w-[90vw] w-full h-[80vh] flex flex-col">
+          <DialogHeader className="flex-none">
+            <DialogTitle className="flex items-center gap-2">
+              <Terminal className="h-5 w-5" />
+              Terminal State
+              <span className="font-mono text-sm font-normal text-muted-foreground truncate max-w-md">
+                {fullscreenSession}
+              </span>
+              {fullscreenSession && status?.sessions.find(s => s.sessionId === fullscreenSession)?.alive && (
+                <span className="animate-pulse text-green-500 text-sm font-normal ml-2">● live</span>
+              )}
+            </DialogTitle>
+          </DialogHeader>
+          <pre
+            ref={fullscreenRef}
+            className="flex-1 bg-zinc-950 text-green-400 rounded-lg p-4 text-sm font-mono overflow-auto whitespace-pre-wrap"
+          >
+            {bufferLoading && !sessionBuffer ? 'Loading...' : sessionBuffer ? stripAnsi(sessionBuffer) : '(empty)'}
+          </pre>
+          <div className="flex-none flex justify-end gap-2 pt-2">
+            <Button variant="outline" size="sm" onClick={() => setFullscreenSession(null)}>
+              Close
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

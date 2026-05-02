@@ -7,7 +7,7 @@ import os from 'os';
 import crypto from 'crypto';
 import { execSync } from 'child_process';
 import { parse } from 'url';
-import { requireAuth, requireAdmin, SESSION_COOKIE, createSession, destroySession, getUserFromToken } from './middleware/auth';
+import { requireAuth, SESSION_COOKIE, createSession, destroySession, getUserFromToken } from './middleware/auth';
 import { getGitHubCliProfile } from '../shared/gh-cli-auth';
 import { upsertUser, listUsers, updateUserRole, deleteUser } from '../shared/user-store';
 import { createProject, listProjects, getProjectById, updateProject, deleteProject, addSkill, listSkills, updateSkill, deleteSkill, listWorktrees, createWorktree, getWorktreeById, deleteWorktree } from '../shared/project-store';
@@ -15,6 +15,9 @@ import { listSessionsForUser, listAllSessions, getCopilotSessionDetail, listCopi
 import { setupWebSocketServer } from './websocket';
 import { getAllSessions, getAllSessionsWithExited, getSessionStatus, endCliSession, endSessionByProject, initDaemonBridge } from '../shared/cli-bridge';
 import { getDb } from '../shared/db';
+import scheduleRoutes from './routes/schedules';
+import { startScheduler } from './scheduler';
+import './renderers'; // register built-in renderers
 
 const app = express();
 app.use(express.json());
@@ -711,28 +714,31 @@ app.post('/api/skill-catalog/marketplace/add', (req, res) => {
 });
 
 // --- Admin ---
-app.get('/api/admin/users', requireAdmin, (req, res) => {
+app.get('/api/admin/users', requireAuth, (req, res) => {
   res.json(listUsers());
 });
 
-app.patch('/api/admin/users/:id', requireAdmin, (req, res) => {
+app.patch('/api/admin/users/:id', requireAuth, (req, res) => {
   updateUserRole(String(req.params.id), req.body.role);
   res.json({ ok: true });
 });
 
-app.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
+app.delete('/api/admin/users/:id', requireAuth, (req, res) => {
   deleteUser(String(req.params.id));
   res.json({ ok: true });
 });
 
-app.get('/api/admin/sessions', requireAdmin, (req, res) => {
+app.get('/api/admin/sessions', requireAuth, (req, res) => {
   res.json(listAllSessions());
 });
 
-app.delete('/api/admin/sessions/:id', requireAdmin, (req, res) => {
+app.delete('/api/admin/sessions/:id', requireAuth, (req, res) => {
   endCliSession(String(req.params.id));
   res.json({ ok: true });
 });
+
+// --- Scheduled Reports ---
+app.use('/api/admin', scheduleRoutes);
 
 // --- Daemon management ---
 app.get('/api/daemon/status', requireAuth, async (req, res) => {
@@ -756,6 +762,7 @@ app.get('/api/daemon/status', requireAuth, async (req, res) => {
           bufferLength: s.bufferLength,
           userId: s.meta?.userId ?? null,
           projectId: s.meta?.projectId ?? null,
+          source: s.meta?.source ?? null,
         })),
       });
       return;
@@ -792,7 +799,7 @@ app.post('/api/daemon/start', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/daemon/restart', requireAdmin, async (req, res) => {
+app.post('/api/daemon/restart', requireAuth, async (req, res) => {
   const { getDaemonClient } = await import('../daemon/client');
   const client = getDaemonClient();
   const fs = await import('fs');
@@ -832,7 +839,24 @@ app.post('/api/daemon/restart', requireAdmin, async (req, res) => {
   }
 });
 
-app.delete('/api/daemon/sessions/:id', requireAdmin, async (req, res) => {
+app.get('/api/daemon/sessions/:id/buffer', requireAuth, async (req, res) => {
+  const { getDaemonClient } = await import('../daemon/client');
+  const client = getDaemonClient();
+  try {
+    const peeked = await client.peekSession(String(req.params.id));
+    res.json({
+      sessionId: peeked.sessionId,
+      buffer: peeked.buffer,
+      alive: peeked.alive,
+      exitCode: peeked.exitCode,
+      lastSeq: peeked.lastSeq,
+    });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+app.delete('/api/daemon/sessions/:id', requireAuth, async (req, res) => {
   const { getDaemonClient } = await import('../daemon/client');
   const client = getDaemonClient();
   try {
@@ -884,6 +908,8 @@ httpServer.listen(port, hostname, async () => {
   try {
     await initDaemonBridge();
     console.log('[server] Daemon bridge initialized successfully');
+    // Start the report scheduler after daemon is ready
+    startScheduler();
   } catch (err) {
     console.error('Failed to initialize daemon bridge:', err);
   }

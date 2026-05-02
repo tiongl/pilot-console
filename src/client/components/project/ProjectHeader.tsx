@@ -164,6 +164,10 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
           </DialogHeader>
           <form onSubmit={handleSettingsSave} className="space-y-4">
             <div className="space-y-2">
+              <Label htmlFor="settings-name">Name</Label>
+              <Input id="settings-name" value={settingsName} onChange={e => setSettingsName(e.target.value)} required />
+            </div>
+            <div className="space-y-2">
               <Label htmlFor="settings-repo">Repository Path</Label>
               <Input id="settings-repo" value={settingsRepoPath} onChange={e => setSettingsRepoPath(e.target.value)} className="font-mono text-sm" required />
             </div>

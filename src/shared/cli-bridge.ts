@@ -223,7 +223,7 @@ export function createCliSession(userId: string, projectId?: string | null, mode
     args: shellArgs,
     cols: 120,
     rows: 30,
-    meta: { userId, projectId: projectId ?? null, worktreeId: worktreeId ?? null, mode },
+    meta: { userId, projectId: projectId ?? null, worktreeId: worktreeId ?? null, mode, source: 'interactive' },
   }).then(() => {
     // Attach to receive output
     return client.attachSession(sessionId);

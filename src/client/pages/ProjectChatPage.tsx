@@ -5,7 +5,7 @@ import { useCliSocket } from '../hooks/useCliSocket';
 import TerminalPane, { type TerminalPaneAPI, TERMINAL_FONTS } from '../components/terminal/TerminalPane';
 import { Button } from '../components/ui/button';
 import { Square, Minus, Plus, Palette, Type, X as XIcon, Terminal, Bot, GitCommitHorizontal, GitBranch, FolderOpen } from 'lucide-react';
-import { THEMES } from '../../../lib/terminal-themes';
+import { THEMES } from '../lib/terminal-themes';
 import GitLogTab from '../components/project/GitLogTab';
 import GitPanel from '../components/project/GitPanel';
 import FileExplorer from '../components/project/FileExplorer';

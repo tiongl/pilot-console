@@ -1,15 +1,11 @@
 'use client';
 
 import { cn } from '@/lib/utils';
+import { stripAnsi } from '@/lib/strip-ansi';
 import type { ChatMessage } from '@/types';
 
 interface Props {
   message: ChatMessage;
-}
-
-function stripAnsi(text: string): string {
-  // eslint-disable-next-line no-control-regex
-  return text.replace(/\x1B\[[0-9;]*[mGKHF]/g, '');
 }
 
 export default function MessageBubble({ message }: Props) {

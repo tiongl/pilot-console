@@ -2,8 +2,8 @@
   "name": "clippy",
   "version": "0.2.0",
   "scripts": {
-    "dev": "concurrently -n server,client \"npx tsx src/server/index.ts\" \"npx vite\"",
-    "dev:server": "npx tsx src/server/index.ts",
+    "dev": "concurrently -n server,client \"npx tsx --watch src/server/index.ts\" \"npx vite\"",
+    "dev:server": "npx tsx --watch src/server/index.ts",
     "dev:client": "npx vite",
     "daemon": "npx tsx src/daemon/index.ts",
     "build": "npx vite build",
@@ -24,6 +24,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cookie-parser": "^1.4.7",
+    "cron-parser": "^5.5.0",
     "diff2html": "^3.4.56",
     "express": "^5.2.1",
     "lucide-react": "^1.7.0",

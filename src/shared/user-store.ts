@@ -28,9 +28,9 @@ export function upsertUser(
     return rowToUser({ ...existing, github_login: githubLogin, email, display_name: displayName });
   }
 
-  // First user ever becomes admin automatically
-  const count = (db.prepare('SELECT COUNT(*) as c FROM users').get() as { c: number }).c;
-  const role = count === 0 ? 'admin' : 'user';
+  // First user with a real GitHub login becomes admin if no admin exists
+  const adminCount = (db.prepare("SELECT COUNT(*) as c FROM users WHERE role = 'admin'").get() as { c: number }).c;
+  const role = adminCount === 0 ? 'admin' : 'user';
   const id = crypto.randomUUID();
 
   db.prepare('INSERT INTO users (id, github_id, github_login, email, display_name, role) VALUES (?, ?, ?, ?, ?, ?)')

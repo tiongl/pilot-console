@@ -1,5 +1,6 @@
 import { Routes, Route, Navigate, useParams } from 'react-router';
 import { AuthProvider, useAuth } from './lib/auth-context';
+import { AutomationProvider } from './lib/automation-context';
 import LoginPage from './pages/LoginPage';
 import DashboardLayout from './pages/DashboardLayout';
 import HomePage from './pages/HomePage';
@@ -16,6 +17,12 @@ import WorktreeChatPage from './pages/WorktreeChatPage';
 import AdminPage from './pages/AdminPage';
 import AdminSessionsPage from './pages/AdminSessionsPage';
 import AdminDaemonPage from './pages/AdminDaemonPage';
+import SchedulesPage from './pages/SchedulesPage';
+import ScheduleRunsPage from './pages/ScheduleRunsPage';
+import ReportViewerPage from './pages/ReportViewerPage';
+import AutomationHistoryPage from './pages/AutomationHistoryPage';
+import { Toaster } from './components/ui/sonner';
+import { useReportNotifications } from './hooks/useReportNotifications';
 
 /** Forces ProjectChatPage to remount when switching projects */
 function ProjectChatPageKeyed() {
@@ -30,40 +37,46 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-function AdminRoute({ children }: { children: React.ReactNode }) {
-  const { user, loading } = useAuth();
-  if (loading) return <div className="p-8">Loading...</div>;
-  if (!user) return <Navigate to="/login" replace />;
-  if (user.role !== 'admin') return <Navigate to="/" replace />;
-  return <>{children}</>;
+function ReportNotificationListener() {
+  useReportNotifications();
+  return null;
 }
 
 export function App() {
   return (
     <AuthProvider>
-      <Routes>
-        <Route path="/login" element={<LoginPage />} />
-        <Route element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
-          <Route index element={<HomePage />} />
-          <Route path="chat" element={<ChatPage />} />
-          <Route path="sessions" element={<SessionsPage />} />
-          <Route path="agents" element={<AgentsPage />} />
-          <Route path="projects/new" element={<NewProjectPage />} />
-          <Route path="projects/:id" element={<ProjectLayout />}>
-            <Route index element={<Navigate to="chat" replace />} />
-            <Route path="chat" element={<ProjectChatPageKeyed />} />
-            <Route path="skills" element={<ProjectSkillsPage />} />
-            <Route path="settings" element={<ProjectSettingsPage />} />
+      <AutomationProvider>
+        <Toaster />
+        <ReportNotificationListener />
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
+            <Route index element={<HomePage />} />
+            <Route path="chat" element={<ChatPage />} />
+            <Route path="sessions" element={<SessionsPage />} />
+            <Route path="agents" element={<AgentsPage />} />
+            <Route path="projects/new" element={<NewProjectPage />} />
+            <Route path="projects/:id" element={<ProjectLayout />}>
+              <Route index element={<Navigate to="chat" replace />} />
+              <Route path="chat" element={<ProjectChatPageKeyed />} />
+              <Route path="skills" element={<ProjectSkillsPage />} />
+              <Route path="settings" element={<ProjectSettingsPage />} />
+            </Route>
+            <Route path="projects/:id/worktrees/:worktreeId" element={<WorktreeLayout />}>
+              <Route index element={<Navigate to="chat" replace />} />
+              <Route path="chat" element={<WorktreeChatPage />} />
+            </Route>
+            <Route path="automation" element={<AutomationHistoryPage />} />
+            <Route path="automation/config" element={<SchedulesPage />} />
+            <Route path="admin" element={<AdminPage />} />
+            <Route path="admin/sessions" element={<AdminSessionsPage />} />
+            <Route path="admin/schedules" element={<Navigate to="/automation/config" replace />} />
+            <Route path="admin/schedules/:id/runs" element={<ScheduleRunsPage />} />
+            <Route path="admin/reports/:id" element={<ReportViewerPage />} />
+            <Route path="daemon" element={<AdminDaemonPage />} />
           </Route>
-          <Route path="projects/:id/worktrees/:worktreeId" element={<WorktreeLayout />}>
-            <Route index element={<Navigate to="chat" replace />} />
-            <Route path="chat" element={<WorktreeChatPage />} />
-          </Route>
-          <Route path="admin" element={<AdminRoute><AdminPage /></AdminRoute>} />
-          <Route path="admin/sessions" element={<AdminRoute><AdminSessionsPage /></AdminRoute>} />
-          <Route path="daemon" element={<AdminDaemonPage />} />
-        </Route>
-      </Routes>
+        </Routes>
+      </AutomationProvider>
     </AuthProvider>
   );
 }

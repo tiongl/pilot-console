@@ -96,6 +96,42 @@ function initSchema(db: Database.Database) {
     );
 
     CREATE INDEX IF NOT EXISTS idx_worktrees_project_id ON worktrees(project_id);
+
+    CREATE TABLE IF NOT EXISTS report_schedules (
+      id                TEXT PRIMARY KEY,
+      name              TEXT NOT NULL,
+      prompt            TEXT NOT NULL,
+      cron_expression   TEXT NOT NULL,
+      renderer_type     TEXT NOT NULL DEFAULT 'plaintext',
+      enabled           INTEGER NOT NULL DEFAULT 1,
+      cwd               TEXT,
+      max_runtime_ms    INTEGER NOT NULL DEFAULT 300000,
+      max_runs_retained INTEGER NOT NULL DEFAULT 50,
+      created_by        TEXT REFERENCES users(id) ON DELETE SET NULL,
+      next_run_at       TEXT,
+      last_started_at   TEXT,
+      created_at        TEXT DEFAULT (datetime('now')),
+      updated_at        TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS report_runs (
+      id              TEXT PRIMARY KEY,
+      schedule_id     TEXT NOT NULL REFERENCES report_schedules(id) ON DELETE CASCADE,
+      status          TEXT NOT NULL DEFAULT 'pending',
+      triggered_by    TEXT NOT NULL DEFAULT 'scheduler',
+      started_at      TEXT,
+      completed_at    TEXT,
+      raw_output      TEXT,
+      rendered_output TEXT,
+      renderer_type   TEXT,
+      exit_code       INTEGER,
+      was_truncated   INTEGER NOT NULL DEFAULT 0,
+      error           TEXT,
+      prompt_snapshot TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_report_runs_schedule_id ON report_runs(schedule_id);
+    CREATE INDEX IF NOT EXISTS idx_report_runs_status ON report_runs(status);
   `);
 
   // Migrations: add columns that may not exist in older DBs
@@ -121,5 +157,17 @@ function initSchema(db: Database.Database) {
   }
   if (!projectColNames.has('sort_order')) {
     db.exec('ALTER TABLE projects ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
+  }
+
+  // Migration: add daemon_session_id to report_runs
+  const runCols = db.pragma('table_info(report_runs)') as Array<{ name: string }>;
+  const runColNames = new Set(runCols.map((c) => c.name));
+  if (!runColNames.has('daemon_session_id')) {
+    db.exec('ALTER TABLE report_runs ADD COLUMN daemon_session_id TEXT');
+  }
+
+  // Migration: add read column to report_runs
+  if (!runColNames.has('read')) {
+    db.exec('ALTER TABLE report_runs ADD COLUMN read INTEGER NOT NULL DEFAULT 0');
   }
 }

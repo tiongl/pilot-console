@@ -59,7 +59,8 @@ export type WsServerMessage =
   | { type: 'error'; data: string }
   | { type: 'exit'; code: number }
   | { type: 'ready'; sessionId: string }
-  | { type: 'pong' };
+  | { type: 'pong' }
+  | { type: 'report-ready'; runId: string; scheduleId: string; scheduleName: string; status: string };
 
 export interface Worktree {
   id: string;

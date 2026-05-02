@@ -86,8 +86,15 @@ export function setupWebSocketServer(): WebSocketServer {
     const worktreeId = url.searchParams.get('worktreeId');
     const requestedSessionId = url.searchParams.get('sessionId');
     const forceNew = url.searchParams.get('new') === 'true';
+    const notifyOnly = url.searchParams.get('notify') === 'true';
     const modeParam = url.searchParams.get('mode');
     const mode = (['shell', 'powershell'].includes(modeParam!) ? modeParam : 'cli') as SessionMode;
+
+    // Notify-only connections just receive broadcasts (e.g. report-ready) — no CLI session
+    if (notifyOnly) {
+      ws.isAlive = true;
+      return;
+    }
 
     let managed;
     let isReconnect = false;

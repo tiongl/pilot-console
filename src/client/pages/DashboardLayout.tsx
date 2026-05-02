@@ -3,12 +3,13 @@ import { Outlet, Link, useNavigate, useLocation } from 'react-router';
 import { useAuth } from '../lib/auth-context';
 import { useTheme, THEMES, type ThemeId } from '../lib/theme-context';
 import { Button } from '../components/ui/button';
-import { Plus, Shield, LogOut, FolderOpen, Pin, Palette, Settings, ChevronRight, ChevronDown, GitBranch, Trash2 } from 'lucide-react';
+import { Plus, Shield, LogOut, FolderOpen, Pin, Palette, Settings, ChevronRight, ChevronDown, GitBranch, Trash2, Clock, Zap } from 'lucide-react';
 import { SkillCatalog, InstalledSkillsPanel } from '../pages/ProjectSkillsPage';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { ClippyLogo } from '../components/ClippyLogo';
+import { useAutomation } from '../lib/automation-context';
 
 interface Project {
   id: string;
@@ -357,6 +358,7 @@ export default function DashboardLayout() {
   const [daemonConnected, setDaemonConnected] = useState<boolean | null>(null);
   const [showSkillsDialog, setShowSkillsDialog] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'skills' | 'marketplace'>('skills');
+  const { badgeCount } = useAutomation();
 
   useEffect(() => {
     fetch('/api/projects')
@@ -433,15 +435,25 @@ export default function DashboardLayout() {
             </select>
           </div>
 
-          {user?.role === 'admin' && (
-            <Link
-              to="/admin"
-              className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors"
-            >
-              <Shield className="h-4 w-4" />
-              Admin
-            </Link>
-          )}
+          <Link
+            to="/admin"
+            className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors"
+          >
+            <Shield className="h-4 w-4" />
+            Admin
+          </Link>
+          <Link
+            to="/automation"
+            className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors"
+          >
+            <Zap className="h-4 w-4" />
+            Automation
+            {badgeCount > 0 && (
+              <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-medium px-1.5">
+                {badgeCount > 99 ? '99+' : badgeCount}
+              </span>
+            )}
+          </Link>
           <div className="flex items-center gap-1">
             <Button variant="ghost" onClick={handleLogout} className="flex-1 justify-start gap-3 px-3">
               <LogOut className="h-4 w-4" />

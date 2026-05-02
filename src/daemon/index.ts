@@ -20,6 +20,7 @@ import {
   type DaemonCommand,
   type DaemonResponse,
   type SessionInfo,
+  type SessionMeta,
 } from './protocol';
 import path from 'path';
 import os from 'os';
@@ -38,7 +39,7 @@ interface DaemonSession {
   lastOutputAt: number;
   seq: number; // monotonic output sequence counter
   subscribers: Set<net.Socket>;
-  meta?: { userId?: string; projectId?: string | null; mode?: string };
+  meta?: SessionMeta;
 }
 
 const sessions = new Map<string, DaemonSession>();
@@ -49,6 +50,7 @@ const EXITED_RETENTION_MS = 5 * 60_000; // keep exited sessions 5 min for reconc
 // ---------------------------------------------------------------------------
 
 const secret = crypto.randomBytes(32).toString('hex');
+const daemonId = crypto.randomUUID();
 
 function writeSecret() {
   const dir = path.dirname(DAEMON_SECRET_PATH);
@@ -129,13 +131,17 @@ function handleCommand(socket: net.Socket, cmd: DaemonCommand) {
       return handleAttach(socket, cmd);
     case 'detach':
       return handleDetach(socket, cmd);
+    case 'peek':
+      return handlePeek(socket, cmd);
+    case 'runOnce':
+      return handleRunOnce(socket, cmd);
   }
 }
 
 function handleAuth(socket: net.Socket, cmd: DaemonCommand & { cmd: 'auth' }) {
   if (cmd.secret === secret) {
     authenticatedClients.add(socket);
-    send(socket, { type: 'auth', reqId: cmd.reqId, ok: true });
+    send(socket, { type: 'auth', reqId: cmd.reqId, ok: true, daemonId });
   } else {
     send(socket, { type: 'auth', reqId: cmd.reqId, ok: false });
   }
@@ -285,6 +291,120 @@ function handleDetach(socket: net.Socket, cmd: DaemonCommand & { cmd: 'detach' }
     session.subscribers.delete(socket);
   }
   send(socket, { type: 'detached', reqId: cmd.reqId, sessionId: cmd.sessionId });
+}
+
+// Read-only buffer snapshot — does not subscribe to output
+function handlePeek(socket: net.Socket, cmd: DaemonCommand & { cmd: 'peek' }) {
+  const session = sessions.get(cmd.sessionId);
+  if (!session) {
+    send(socket, { type: 'error', reqId: cmd.reqId, error: 'Session not found' });
+    return;
+  }
+  send(socket, {
+    type: 'peeked',
+    reqId: cmd.reqId,
+    sessionId: session.sessionId,
+    buffer: session.outputBuffer,
+    lastSeq: session.seq,
+    alive: session.alive,
+    exitCode: session.exitCode,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// One-shot execution (for scheduled reports)
+// ---------------------------------------------------------------------------
+
+function handleRunOnce(socket: net.Socket, cmd: DaemonCommand & { cmd: 'runOnce' }) {
+  const DEFAULT_MAX_OUTPUT = 1_048_576; // 1MB
+  const maxOutput = cmd.maxOutputBytes ?? DEFAULT_MAX_OUTPUT;
+
+  console.log(`[daemon] runOnce: shell=${cmd.shell}, args=${JSON.stringify(cmd.args)}, cwd=${cmd.cwd}, timeout=${cmd.timeoutMs}ms`);
+
+  try {
+    const proc = pty.spawn(cmd.shell, cmd.args, {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 40,
+      cwd: cmd.cwd,
+      env: { ...process.env } as Record<string, string>,
+    });
+
+    console.log(`[daemon] runOnce: spawned PID ${proc.pid}`);
+
+    let output = '';
+    let wasTruncated = false;
+    let timedOut = false;
+    let finished = false;
+
+    const timeoutHandle = setTimeout(() => {
+      if (finished) return;
+      timedOut = true;
+      finished = true;
+      try { proc.kill(); } catch { /* ok */ }
+      send(socket, {
+        type: 'runOnceComplete',
+        reqId: cmd.reqId,
+        sessionId: cmd.sessionId,
+        exitCode: -1,
+        timedOut: true,
+        wasTruncated,
+        totalBytes: output.length,
+      });
+    }, cmd.timeoutMs);
+
+    // Write the prompt to stdin after a brief delay (skip if empty — prompt may be in CLI args)
+    if (cmd.prompt) {
+      setTimeout(() => {
+        if (!finished) {
+          try {
+            proc.write(cmd.prompt + '\n');
+          } catch { /* process may have exited */ }
+        }
+      }, 500);
+    }
+
+    proc.onData((data: string) => {
+      if (finished) return;
+      if (output.length + data.length > maxOutput) {
+        const remaining = maxOutput - output.length;
+        if (remaining > 0) output += data.slice(0, remaining);
+        wasTruncated = true;
+      } else {
+        output += data;
+      }
+      // Stream output chunks to caller
+      send(socket, {
+        type: 'runOnceOutput',
+        reqId: cmd.reqId,
+        sessionId: cmd.sessionId,
+        data,
+      });
+    });
+
+    proc.onExit(({ exitCode }) => {
+      console.log(`[daemon] runOnce: PID exited, exitCode=${exitCode}, outputLen=${output.length}`);
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeoutHandle);
+      send(socket, {
+        type: 'runOnceComplete',
+        reqId: cmd.reqId,
+        sessionId: cmd.sessionId,
+        exitCode,
+        timedOut: false,
+        wasTruncated,
+        totalBytes: output.length,
+      });
+    });
+  } catch (err) {
+    console.error(`[daemon] runOnce: spawn failed:`, (err as Error).message);
+    send(socket, {
+      type: 'error',
+      reqId: cmd.reqId,
+      error: `Failed to run: ${(err as Error).message}`,
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------

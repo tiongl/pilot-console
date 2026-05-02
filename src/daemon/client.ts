@@ -21,6 +21,9 @@ import {
   type DaemonResponse,
   type SessionInfo,
   type AttachedResp,
+  type PeekedResp,
+  type RunOnceCompleteResp,
+  type SessionMeta,
 } from './protocol';
 
 type ResponseHandler = (resp: DaemonResponse) => void;
@@ -31,10 +34,19 @@ export class DaemonClient {
   private pendingRequests = new Map<string, ResponseHandler>();
   private outputListeners = new Map<string, (data: string, seq: number) => void>();
   private exitListeners = new Map<string, (code: number) => void>();
+  private runOnceHandlers = new Map<string, {
+    onOutput: (data: string) => void;
+    onComplete: (resp: RunOnceCompleteResp) => void;
+  }>();
   private connected = false;
   private connecting = false;
   private intentionalDisconnect = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastDaemonId: string | null = null;
+  private generation = 0; // bumped on each disconnect to dedupe cleanup
+  private _onDaemonRestarted: (() => void) | null = null;
+  private _onConnectionLost: (() => void) | null = null;
+  private _onReconnected: ((sameDaemon: boolean) => void) | null = null;
 
   /** Connect to the daemon. If autoStart is true (default), starts daemon if not running. */
   async connect(autoStart = true): Promise<void> {
@@ -52,8 +64,9 @@ export class DaemonClient {
 
     this.connecting = true;
     this.intentionalDisconnect = false;
+    let result: { daemonId?: string };
     try {
-      await this.tryConnect();
+      result = await this.tryConnect();
     } catch {
       if (!autoStart) {
         this.connecting = false;
@@ -62,13 +75,27 @@ export class DaemonClient {
       // Daemon not running — start it
       console.log('[daemon-client] Daemon not running, starting...');
       await this.startDaemon();
-      await this.tryConnect();
+      result = await this.tryConnect();
     }
     this.connecting = false;
+
+    // Detect daemon restart
+    const newDaemonId = result.daemonId ?? null;
+    if (this.lastDaemonId !== null && newDaemonId !== this.lastDaemonId) {
+      console.log(`[daemon-client] Daemon restarted (old=${this.lastDaemonId}, new=${newDaemonId})`);
+      this.lastDaemonId = newDaemonId;
+      try { this._onDaemonRestarted?.(); } catch (e) { console.error('[daemon-client] onDaemonRestarted error:', e); }
+      try { this._onReconnected?.(false); } catch (e) { console.error('[daemon-client] onReconnected error:', e); }
+    } else if (this.lastDaemonId !== null && newDaemonId === this.lastDaemonId) {
+      // Same daemon — reconnected after transient socket loss
+      console.log('[daemon-client] Reconnected to same daemon');
+      try { this._onReconnected?.(true); } catch (e) { console.error('[daemon-client] onReconnected error:', e); }
+    }
+    this.lastDaemonId = newDaemonId;
   }
 
-  private async tryConnect(): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
+  private async tryConnect(): Promise<{ daemonId?: string }> {
+    return new Promise<{ daemonId?: string }>((resolve, reject) => {
       const socket = net.createConnection(DAEMON_SOCKET_PATH);
       const timeout = setTimeout(() => {
         socket.destroy();
@@ -86,8 +113,9 @@ export class DaemonClient {
           const resp = await this.request({ cmd: 'auth', reqId: this.nextReqId(), secret });
           if (resp.type === 'auth' && resp.ok) {
             this.connected = true;
-            console.log('[daemon-client] Connected and authenticated');
-            resolve();
+            const daemonId = resp.daemonId;
+            console.log(`[daemon-client] Connected and authenticated (daemonId=${daemonId ?? 'unknown'})`);
+            resolve({ daemonId });
           } else {
             socket.destroy();
             reject(new Error('Authentication failed'));
@@ -123,7 +151,15 @@ export class DaemonClient {
     socket.on('close', () => {
       this.connected = false;
       this.socket = null;
+      this.generation++;
       console.log('[daemon-client] Disconnected from daemon');
+
+      // Immediately fail all in-flight requests — they can't be resumed
+      this.rejectAllPending('Daemon connection lost');
+
+      // Notify connection loss
+      try { this._onConnectionLost?.(); } catch (e) { console.error('[daemon-client] onConnectionLost error:', e); }
+
       if (!this.intentionalDisconnect) {
         this.scheduleReconnect();
       }
@@ -134,6 +170,29 @@ export class DaemonClient {
     });
   }
 
+  /** Reject all pending request-response and runOnce handlers */
+  private rejectAllPending(reason: string) {
+    // Reject request-response handlers
+    for (const [reqId, handler] of this.pendingRequests) {
+      handler({ type: 'error', reqId, error: reason });
+    }
+    this.pendingRequests.clear();
+
+    // Fail all runOnce handlers immediately
+    for (const [reqId, handler] of this.runOnceHandlers) {
+      handler.onComplete({
+        type: 'runOnceComplete',
+        reqId,
+        sessionId: '',
+        exitCode: -1,
+        timedOut: false,
+        wasTruncated: false,
+        totalBytes: 0,
+      });
+    }
+    this.runOnceHandlers.clear();
+  }
+
   private handleResponse(resp: DaemonResponse) {
     // Output and exit are subscription-based (no reqId)
     if (resp.type === 'output') {
@@ -142,6 +201,20 @@ export class DaemonClient {
     }
     if (resp.type === 'exit') {
       this.exitListeners.get(resp.sessionId)?.(resp.code);
+      return;
+    }
+
+    // RunOnce streaming responses (keyed by reqId)
+    if (resp.type === 'runOnceOutput') {
+      this.runOnceHandlers.get(resp.reqId)?.onOutput(resp.data);
+      return;
+    }
+    if (resp.type === 'runOnceComplete') {
+      const handler = this.runOnceHandlers.get(resp.reqId);
+      if (handler) {
+        this.runOnceHandlers.delete(resp.reqId);
+        handler.onComplete(resp);
+      }
       return;
     }
 
@@ -268,7 +341,7 @@ export class DaemonClient {
     args: string[];
     cols: number;
     rows: number;
-    meta?: { userId?: string; projectId?: string | null; mode?: string };
+    meta?: SessionMeta;
   }): Promise<string> {
     await this.ensureConnected();
     const resp = await this.request({
@@ -341,6 +414,18 @@ export class DaemonClient {
     });
   }
 
+  /** Read-only buffer snapshot — does not subscribe to output */
+  async peekSession(sessionId: string): Promise<PeekedResp> {
+    await this.ensureConnected();
+    const resp = await this.request({
+      cmd: 'peek',
+      reqId: this.nextReqId(),
+      sessionId,
+    });
+    if (resp.type === 'error') throw new Error(resp.error);
+    return resp as PeekedResp;
+  }
+
   /** Subscribe to output from a session */
   onOutput(sessionId: string, cb: (data: string, seq: number) => void) {
     this.outputListeners.set(sessionId, cb);
@@ -357,10 +442,89 @@ export class DaemonClient {
     this.exitListeners.delete(sessionId);
   }
 
+  /** Register callback for when daemon connection is lost */
+  onConnectionLost(cb: () => void) {
+    this._onConnectionLost = cb;
+  }
+
+  /** Register callback for when daemon has restarted (different daemonId) */
+  onDaemonRestarted(cb: () => void) {
+    this._onDaemonRestarted = cb;
+  }
+
+  /** Register callback for when reconnected (sameDaemon: true if same instance, false if new) */
+  onReconnected(cb: (sameDaemon: boolean) => void) {
+    this._onReconnected = cb;
+  }
+
   private async ensureConnected(): Promise<void> {
     if (!this.connected) {
       throw new Error('Not connected to daemon');
     }
+  }
+
+  /**
+   * Run a one-shot command: spawn process, write prompt, capture all output,
+   * wait for exit or timeout. Unlike interactive sessions, this auto-terminates.
+   */
+  async runOnce(opts: {
+    sessionId: string;
+    cwd: string;
+    shell: string;
+    args: string[];
+    prompt: string;
+    timeoutMs: number;
+    maxOutputBytes?: number;
+    meta?: SessionMeta;
+    onOutput?: (data: string) => void;
+  }): Promise<{ output: string; exitCode: number; timedOut: boolean; wasTruncated: boolean }> {
+    await this.ensureConnected();
+    const reqId = this.nextReqId();
+    let output = '';
+
+    return new Promise((resolve, reject) => {
+      // Set up a long timeout on the client side too (timeoutMs + 30s buffer)
+      const clientTimeout = setTimeout(() => {
+        this.runOnceHandlers.delete(reqId);
+        reject(new Error('runOnce client timeout'));
+      }, opts.timeoutMs + 30_000);
+
+      this.runOnceHandlers.set(reqId, {
+        onOutput: (data) => {
+          output += data;
+          opts.onOutput?.(data);
+        },
+        onComplete: (resp) => {
+          clearTimeout(clientTimeout);
+          resolve({
+            output,
+            exitCode: resp.exitCode,
+            timedOut: resp.timedOut,
+            wasTruncated: resp.wasTruncated,
+          });
+        },
+      });
+
+      if (!this.socket || this.socket.destroyed) {
+        clearTimeout(clientTimeout);
+        this.runOnceHandlers.delete(reqId);
+        reject(new Error('Not connected to daemon'));
+        return;
+      }
+
+      this.socket.write(encodeLine({
+        cmd: 'runOnce',
+        reqId,
+        sessionId: opts.sessionId,
+        cwd: opts.cwd,
+        shell: opts.shell,
+        args: opts.args,
+        prompt: opts.prompt,
+        timeoutMs: opts.timeoutMs,
+        maxOutputBytes: opts.maxOutputBytes,
+        meta: opts.meta,
+      }));
+    });
   }
 
   /** Disconnect from daemon (doesn't kill the daemon). */
