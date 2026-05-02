@@ -1,8 +1,8 @@
-import { useEffect, useState, useCallback, useRef, lazy, Suspense } from 'react';
+import React, { useEffect, useState, useCallback, useRef, lazy, Suspense } from 'react';
 import { Outlet, Link, useNavigate, useLocation } from 'react-router';
 import { useAuth } from '../lib/auth-context';
 import { useTheme, THEMES, type ThemeId } from '../lib/theme-context';
-import { useSplit } from '../lib/split-context';
+import { useSplit, type SplitContent } from '../lib/split-context';
 import { Button } from '../components/ui/button';
 import { Plus, LogOut, FolderOpen, Pin, Palette, Settings, ChevronRight, ChevronDown, GitBranch, Trash2, Clock, Zap, Wrench, Columns2 } from 'lucide-react';
 import { SkillCatalog, InstalledSkillsPanel } from '../pages/ProjectSkillsPage';
@@ -370,16 +370,16 @@ export default function DashboardLayout() {
   const { theme, setTheme } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
-  const { splitMode, splitContent, activePane, toggleSplit, setSplitContent, setActivePane } = useSplit();
+  const { paneCount, panes, activePaneIndex, setPaneCount, setPaneContent, setActivePaneIndex } = useSplit();
   const [projects, setProjects] = useState<Project[]>([]);
   const [daemonConnected, setDaemonConnected] = useState<boolean | null>(null);
   const [showSkillsDialog, setShowSkillsDialog] = useState(false);
+  const [showLayoutMenu, setShowLayoutMenu] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'skills' | 'marketplace'>('skills');
   const { badgeCount } = useAutomation();
   const [schedules, setSchedules] = useState<{ id: string; name: string }[]>([]);
   const [splitRatio, setSplitRatio] = useState(0.5);
   const sidebarRef = useRef<HTMLElement>(null);
-  const [mainSplitRatio, setMainSplitRatio] = useState(0.5);
 
   const onSeparatorMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -406,41 +406,57 @@ export default function DashboardLayout() {
     document.addEventListener('mouseup', onMouseUp);
   }, [splitRatio]);
 
-  const onMainSplitMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startRatio = mainSplitRatio;
-    const container = (e.target as HTMLElement).parentElement;
-    if (!container) return;
-    const containerWidth = container.getBoundingClientRect().width;
-    const onMouseMove = (ev: MouseEvent) => {
-      const delta = ev.clientX - startX;
-      setMainSplitRatio(Math.min(0.8, Math.max(0.2, startRatio + delta / containerWidth)));
-    };
-    const onMouseUp = () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-  }, [mainSplitRatio]);
-
-  // Handle sidebar click for split mode
+  // Render standalone pane content
+  const renderPaneContent = useCallback((content: SplitContent) => {
+    if (!content) {
+      return (
+        <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
+          <div className="text-center">
+            <Columns2 className="h-8 w-8 mx-auto mb-2 opacity-50" />
+            <p>Click a project or page to open here</p>
+          </div>
+        </div>
+      );
+    }
+    if (content.type === 'project') {
+      return (
+        <Suspense fallback={<div className="p-6 text-muted-foreground">Loading…</div>}>
+          <ProjectLayout projectId={content.projectId} key={content.projectId}>
+            <ProjectChatPage projectId={content.projectId} key={`chat-${content.projectId}`} />
+          </ProjectLayout>
+        </Suspense>
+      );
+    }
+    return (
+      <Suspense fallback={<div className="p-6 text-muted-foreground">Loading…</div>}>
+        {content.path === '/automation/config' ? (
+          <SchedulesPage />
+        ) : (
+          <AutomationHistoryCore
+            key={content.path}
+            scheduleFilter={new URLSearchParams(content.path.split('?')[1] || '').get('schedule') || undefined}
+            onNavigate={(path) => {
+              const paneIdx = panes.indexOf(content);
+              if (paneIdx >= 0) setPaneContent(paneIdx + 1, { type: 'automation', path });
+            }}
+          />
+        )}
+      </Suspense>
+    );
+  }, [panes, setPaneContent]);
   const handleSidebarNav = useCallback((target: { type: 'project'; projectId: string } | { type: 'automation'; path: string }) => {
-    if (splitMode && activePane === 'right') {
-      setSplitContent(target);
+    if (activePaneIndex > 0) {
+      setPaneContent(activePaneIndex, target);
     } else if (target.type === 'project') {
       navigate(`/projects/${target.projectId}/chat`);
     } else {
       navigate(target.path);
     }
-  }, [splitMode, activePane, setSplitContent, setActivePane, navigate]);
+  }, [activePaneIndex, setPaneContent, navigate]);
 
   const handleSplitProjectClick = useCallback((projectId: string) => {
     handleSidebarNav({ type: 'project', projectId });
-  }, [handleSidebarNav]);
-
-  // Fetch schedules for the automation sidebar
+  }, [handleSidebarNav]);  // Fetch schedules for the automation sidebar
   useEffect(() => {
     fetch('/api/admin/schedules')
       .then(r => r.json())
@@ -486,13 +502,32 @@ export default function DashboardLayout() {
           <div className="flex items-center gap-2">
             <ClippyLogo className="h-10 w-10" />
             <h1 className="text-lg font-bold flex-1">Clippy</h1>
-            <button
-              onClick={toggleSplit}
-              className={`transition-colors shrink-0 ${splitMode ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}`}
-              title={splitMode ? 'Exit split view' : 'Split view'}
-            >
-              <Columns2 className="h-3.5 w-3.5" />
-            </button>
+            <div className="relative shrink-0">
+              <button
+                onClick={() => setShowLayoutMenu(v => !v)}
+                className={`transition-colors ${paneCount > 1 ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}`}
+                title="Layout columns"
+              >
+                <Columns2 className="h-3.5 w-3.5" />
+              </button>
+              {showLayoutMenu && (
+                <>
+                  <div className="fixed inset-0 z-[70]" onClick={() => setShowLayoutMenu(false)} />
+                  <div className="absolute right-0 top-full mt-1 z-[80] bg-popover border rounded-md shadow-md py-1 min-w-[100px]">
+                    {[1, 2, 3, 4].map(n => (
+                      <button
+                        key={n}
+                        onClick={() => { setPaneCount(n); setShowLayoutMenu(false); }}
+                        className={`w-full px-3 py-1.5 text-left text-xs flex items-center gap-2 hover:bg-accent ${paneCount === n ? 'text-primary font-medium' : 'text-foreground'}`}
+                      >
+                        <span className="flex gap-0.5">{Array.from({ length: n }, (_, i) => <span key={i} className="w-2 h-3 border rounded-[1px]" />)}</span>
+                        {n} {n === 1 ? 'column' : 'columns'}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
             <button
               onClick={() => setShowSkillsDialog(v => !v)}
               className={`relative z-[60] transition-colors shrink-0 ${showSkillsDialog ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
@@ -508,18 +543,16 @@ export default function DashboardLayout() {
         <div className="flex items-center justify-between px-3 mb-1">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Projects</span>
           <div className="flex items-center gap-1">
-            {splitMode && (
+            {paneCount > 1 && (
               <div className="flex items-center gap-0.5 text-[10px]">
-                <button
-                  onClick={() => setActivePane('left')}
-                  className={`px-1 py-0.5 rounded transition-colors ${activePane === 'left' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-                  title="Target left pane"
-                >L</button>
-                <button
-                  onClick={() => setActivePane('right')}
-                  className={`px-1 py-0.5 rounded transition-colors ${activePane === 'right' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-                  title="Target right pane"
-                >R</button>
+                {Array.from({ length: paneCount }, (_, i) => (
+                  <button
+                    key={i}
+                    onClick={() => setActivePaneIndex(i)}
+                    className={`px-1 py-0.5 rounded transition-colors ${activePaneIndex === i ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                    title={`Target pane ${i + 1}`}
+                  >{i + 1}</button>
+                ))}
               </div>
             )}
             <Link to="/projects/new" className="text-muted-foreground hover:text-foreground transition-colors">
@@ -528,7 +561,7 @@ export default function DashboardLayout() {
           </div>
         </div>
         <nav style={{ flex: `${splitRatio} 1 0`, minHeight: 0 }} className="flex flex-col gap-0.5 overflow-y-auto">
-          <ProjectNav projects={projects} onProjectClick={splitMode ? handleSplitProjectClick : undefined} />
+          <ProjectNav projects={projects} onProjectClick={paneCount > 1 ? handleSplitProjectClick : undefined} />
         </nav>
 
         {/* Resizable separator */}
@@ -630,60 +663,32 @@ export default function DashboardLayout() {
         </div>
       </aside>
 
-      {splitMode ? (
+      {paneCount > 1 ? (
         <div className="flex flex-1 overflow-hidden">
-          {/* Left pane */}
+          {/* Pane 0: router outlet */}
           <main
-            className={`flex flex-col overflow-hidden ${activePane === 'left' ? 'ring-2 ring-primary/50 ring-inset' : ''}`}
-            style={{ flex: `${mainSplitRatio} 1 0`, minWidth: 0 }}
-            onClick={() => setActivePane('left')}
+            className={`flex flex-col overflow-hidden ${activePaneIndex === 0 ? 'ring-2 ring-primary/50 ring-inset' : ''}`}
+            style={{ flex: '1 1 0', minWidth: 0 }}
+            onClick={() => setActivePaneIndex(0)}
           >
             <Outlet />
           </main>
-          {/* Resizable divider */}
-          <div
-            onMouseDown={onMainSplitMouseDown}
-            className="w-1 bg-border hover:bg-primary/50 cursor-col-resize shrink-0 transition-colors"
-            title="Drag to resize"
-          />
-          {/* Right pane */}
-          <div
-            className={`flex flex-col overflow-hidden ${activePane === 'right' ? 'ring-2 ring-primary/50 ring-inset' : ''}`}
-            style={{ flex: `${1 - mainSplitRatio} 1 0`, minWidth: 0 }}
-            onClick={() => setActivePane('right')}
-          >
-            {splitContent ? (
-              splitContent.type === 'project' ? (
-                <Suspense fallback={<div className="p-6 text-muted-foreground">Loading…</div>}>
-                  <ProjectLayout projectId={splitContent.projectId} key={splitContent.projectId}>
-                    <ProjectChatPage projectId={splitContent.projectId} key={`chat-${splitContent.projectId}`} />
-                  </ProjectLayout>
-                </Suspense>
-              ) : (
-                <Suspense fallback={<div className="p-6 text-muted-foreground">Loading…</div>}>
-                  {splitContent.path === '/automation/config' ? (
-                    <SchedulesPage />
-                  ) : (
-                    <AutomationHistoryCore
-                      key={splitContent.path}
-                      scheduleFilter={new URLSearchParams(splitContent.path.split('?')[1] || '').get('schedule') || undefined}
-                      onNavigate={(path) => {
-                        setSplitContent({ type: 'automation', path });
-                      }}
-                    />
-                  )}
-                </Suspense>
-              )
-            ) : (
-              <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-                <div className="text-center">
-                  <Columns2 className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                  <p>Click a project or page to open it here</p>
-                  <p className="text-xs mt-1 opacity-70">Active pane: <span className="font-medium">{activePane}</span></p>
-                </div>
+          {/* Extra panes 1..N-1 with dividers */}
+          {panes.slice(0, paneCount - 1).map((content, i) => (
+            <React.Fragment key={i}>
+              <div
+                className="w-1 bg-border hover:bg-primary/50 cursor-col-resize shrink-0 transition-colors"
+                title="Drag to resize"
+              />
+              <div
+                className={`flex flex-col overflow-hidden ${activePaneIndex === i + 1 ? 'ring-2 ring-primary/50 ring-inset' : ''}`}
+                style={{ flex: '1 1 0', minWidth: 0 }}
+                onClick={() => setActivePaneIndex(i + 1)}
+              >
+                {renderPaneContent(content)}
               </div>
-            )}
-          </div>
+            </React.Fragment>
+          ))}
         </div>
       ) : (
         <main className="flex flex-1 flex-col overflow-hidden">
