@@ -4,10 +4,10 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogClose } from '../components/ui/dialog';
 import {
   Settings, Zap, FileText, Eye, Trash2, RefreshCw,
-  CheckCircle, XCircle, Loader2, Clock, AlertTriangle,
+  CheckCircle, XCircle, X, Loader2, Clock, AlertTriangle,
   ChevronLeft, ChevronRight, Square, Play, Terminal,
   Minus, Plus, WrapText, Sun, Moon, Mail, MailOpen,
   ArrowUp, ArrowDown, ArrowUpDown, Maximize2, Minimize2,
@@ -111,21 +111,28 @@ function FileViewDialog({ runId, runName, rendererType, open, onClose, fileUrl }
 
   return (
     <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
-      <DialogContent className={maximized ? '!max-w-none !w-screen !h-screen !rounded-none flex flex-col' : '!max-w-[85vw] max-h-[90vh] flex flex-col'}>
+      <DialogContent showCloseButton={false} className={maximized ? '!max-w-none !w-screen !h-screen !rounded-none flex flex-col' : '!max-w-[85vw] max-h-[90vh] flex flex-col'}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <FileText className="h-5 w-5" />
             {runName}
             {rendererType && <Badge variant="outline">{rendererType}</Badge>}
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 w-6 p-0 ml-auto mr-6"
-              onClick={() => setMaximized(m => !m)}
-              title={maximized ? 'Restore' : 'Maximize'}
-            >
-              {maximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
-            </Button>
+            <div className="ml-auto flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 w-7 p-0"
+                onClick={() => setMaximized(m => !m)}
+                title={maximized ? 'Restore' : 'Maximize'}
+              >
+                {maximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+              </Button>
+              <DialogClose render={
+                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Close" />
+              }>
+                <X className="h-4 w-4" />
+              </DialogClose>
+            </div>
           </DialogTitle>
         </DialogHeader>
 
