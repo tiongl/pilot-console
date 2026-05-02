@@ -10,7 +10,7 @@ import {
   CheckCircle, XCircle, Loader2, Clock, AlertTriangle,
   ChevronLeft, ChevronRight, Square, Play, Terminal,
   Minus, Plus, WrapText, Sun, Moon, Mail, MailOpen,
-  ArrowUp, ArrowDown, ArrowUpDown,
+  ArrowUp, ArrowDown, ArrowUpDown, Maximize2, Minimize2,
 } from 'lucide-react';
 import { useAutomation } from '../lib/automation-context';
 
@@ -89,6 +89,7 @@ function FileViewDialog({ runId, runName, rendererType, open, onClose, fileUrl }
   const [fontSize, setFontSize] = useState(13);
   const [wordWrap, setWordWrap] = useState(true);
   const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
     if (!open || !runId) return;
@@ -110,12 +111,21 @@ function FileViewDialog({ runId, runName, rendererType, open, onClose, fileUrl }
 
   return (
     <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
-      <DialogContent className="!max-w-[85vw] max-h-[90vh] flex flex-col">
+      <DialogContent className={maximized ? '!max-w-none !w-screen !h-screen !rounded-none flex flex-col' : '!max-w-[85vw] max-h-[90vh] flex flex-col'}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <FileText className="h-5 w-5" />
             {runName}
             {rendererType && <Badge variant="outline">{rendererType}</Badge>}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 w-6 p-0 ml-auto"
+              onClick={() => setMaximized(m => !m)}
+              title={maximized ? 'Restore' : 'Maximize'}
+            >
+              {maximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+            </Button>
           </DialogTitle>
         </DialogHeader>
 
@@ -160,14 +170,15 @@ function FileViewDialog({ runId, runName, rendererType, open, onClose, fileUrl }
           isHtml ? (
             <iframe
               srcDoc={content}
-              className={`rounded-lg overflow-auto max-h-[70vh] w-full border ${theme === 'dark' ? 'bg-[#1e1e1e]' : 'bg-white'}`}
+              className={`rounded-lg overflow-auto w-full border ${maximized ? 'flex-1' : 'max-h-[70vh]'} ${theme === 'dark' ? 'bg-[#1e1e1e]' : 'bg-white'}`}
               style={{ minHeight: 300, fontSize }}
               sandbox="allow-same-origin"
               title="HTML output"
             />
           ) : isMarkdown ? (
             <div
-              className={`prose prose-sm max-w-none overflow-auto max-h-[70vh] rounded-lg p-4
+              className={`prose prose-sm max-w-none overflow-auto rounded-lg p-4
+                ${maximized ? 'flex-1' : 'max-h-[70vh]'}
                 [&_table]:border-collapse [&_th]:border [&_th]:px-3 [&_th]:py-1.5
                 [&_td]:border [&_td]:px-3 [&_td]:py-1.5
                 ${theme === 'dark'
@@ -180,7 +191,8 @@ function FileViewDialog({ runId, runName, rendererType, open, onClose, fileUrl }
             </div>
           ) : (
             <pre
-              className={`rounded-lg p-4 overflow-auto font-mono max-h-[70vh]
+              className={`rounded-lg p-4 overflow-auto font-mono
+                ${maximized ? 'flex-1' : 'max-h-[70vh]'}
                 ${theme === 'dark' ? 'bg-[#1e1e1e] text-[#d4d4d4]' : 'bg-white text-[#1e1e1e] border'}`}
               style={{ fontSize, whiteSpace: wordWrap ? 'pre-wrap' : 'pre', wordBreak: wordWrap ? 'break-word' : 'normal' }}
             >
