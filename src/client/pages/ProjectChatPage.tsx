@@ -139,8 +139,9 @@ function TerminalTab({
   );
 }
 
-export default function ProjectChatPage({ worktreeId }: { worktreeId?: string }) {
-  const { id: projectId } = useParams<{ id: string }>();
+export default function ProjectChatPage({ worktreeId, projectId: projectIdProp }: { worktreeId?: string; projectId?: string }) {
+  const { id: routeProjectId } = useParams<{ id: string }>();
+  const projectId = projectIdProp || routeProjectId;
 
   const defaultTheme = localStorage.getItem('clippy-theme') || 'Catppuccin';
   const defaultFont = localStorage.getItem('clippy-font') || TERMINAL_FONTS[0].family;

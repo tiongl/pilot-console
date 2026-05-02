@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate, useParams } from 'react-router';
 import { AuthProvider, useAuth } from './lib/auth-context';
 import { AutomationProvider } from './lib/automation-context';
+import { SplitProvider } from './lib/split-context';
 import LoginPage from './pages/LoginPage';
 import DashboardLayout from './pages/DashboardLayout';
 import HomePage from './pages/HomePage';
@@ -50,7 +51,7 @@ export function App() {
         <ReportNotificationListener />
         <Routes>
           <Route path="/login" element={<LoginPage />} />
-          <Route element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
+          <Route element={<ProtectedRoute><SplitProvider><DashboardLayout /></SplitProvider></ProtectedRoute>}>
             <Route index element={<HomePage />} />
             <Route path="chat" element={<ChatPage />} />
             <Route path="sessions" element={<SessionsPage />} />

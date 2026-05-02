@@ -9,8 +9,9 @@ interface Project {
   repoPath: string;
 }
 
-export default function ProjectLayout() {
-  const { id } = useParams<{ id: string }>();
+export default function ProjectLayout({ projectId: projectIdProp, children }: { projectId?: string; children?: React.ReactNode } = {}) {
+  const { id: routeId } = useParams<{ id: string }>();
+  const id = projectIdProp || routeId;
   const [project, setProject] = useState<Project | null>(null);
 
   useEffect(() => {
@@ -30,7 +31,7 @@ export default function ProjectLayout() {
       repoPath={project.repoPath}
       todoPanel={<ProjectTodoPanel projectId={project.id} projectName={project.name} />}
     >
-      <Outlet />
+      {children || <Outlet />}
     </ProjectHeader>
   );
 }

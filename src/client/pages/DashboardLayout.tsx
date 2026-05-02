@@ -1,15 +1,19 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, lazy, Suspense } from 'react';
 import { Outlet, Link, useNavigate, useLocation } from 'react-router';
 import { useAuth } from '../lib/auth-context';
 import { useTheme, THEMES, type ThemeId } from '../lib/theme-context';
+import { useSplit } from '../lib/split-context';
 import { Button } from '../components/ui/button';
-import { Plus, LogOut, FolderOpen, Pin, Palette, Settings, ChevronRight, ChevronDown, GitBranch, Trash2, Clock, Zap, Wrench } from 'lucide-react';
+import { Plus, LogOut, FolderOpen, Pin, Palette, Settings, ChevronRight, ChevronDown, GitBranch, Trash2, Clock, Zap, Wrench, Columns2 } from 'lucide-react';
 import { SkillCatalog, InstalledSkillsPanel } from '../pages/ProjectSkillsPage';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { ClippyLogo } from '../components/ClippyLogo';
 import { useAutomation } from '../lib/automation-context';
+
+const ProjectLayout = lazy(() => import('./ProjectLayout'));
+const ProjectChatPage = lazy(() => import('./ProjectChatPage'));
 
 interface Project {
   id: string;
@@ -76,7 +80,7 @@ function StatusDot({ info }: { info: ProjectSessionInfo | undefined }) {
   return null;
 }
 
-function ProjectNav({ projects }: { projects: Project[] }) {
+function ProjectNav({ projects, onProjectClick }: { projects: Project[]; onProjectClick?: (projectId: string) => void }) {
   const location = useLocation();
   const [projectStatuses, setProjectStatuses] = useState<Map<string, ProjectSessionInfo>>(new Map());
   const [pinnedIds, setPinnedIds] = useState<Set<string>>(
@@ -234,13 +238,23 @@ function ProjectNav({ projects }: { projects: Project[] }) {
               >
                 {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
               </button>
-              <Link
-                to={`/projects/${project.id}/chat`}
-                className="flex items-center gap-2 flex-1 min-w-0 py-0.5"
-              >
-                <FolderOpen className="h-4 w-4 shrink-0" />
-                <span className="truncate flex-1">{project.name}</span>
-              </Link>
+              {onProjectClick ? (
+                <button
+                  onClick={() => onProjectClick(project.id)}
+                  className="flex items-center gap-2 flex-1 min-w-0 py-0.5 text-left"
+                >
+                  <FolderOpen className="h-4 w-4 shrink-0" />
+                  <span className="truncate flex-1">{project.name}</span>
+                </button>
+              ) : (
+                <Link
+                  to={`/projects/${project.id}/chat`}
+                  className="flex items-center gap-2 flex-1 min-w-0 py-0.5"
+                >
+                  <FolderOpen className="h-4 w-4 shrink-0" />
+                  <span className="truncate flex-1">{project.name}</span>
+                </Link>
+              )}
               <button
                 onClick={(e) => openAddDialog(e, project.id)}
                 className="h-4 w-4 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-foreground transition-opacity"
@@ -354,6 +368,7 @@ export default function DashboardLayout() {
   const { theme, setTheme } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
+  const { splitMode, splitProjectId, activePane, toggleSplit, setSplitProjectId, setActivePane } = useSplit();
   const [projects, setProjects] = useState<Project[]>([]);
   const [daemonConnected, setDaemonConnected] = useState<boolean | null>(null);
   const [showSkillsDialog, setShowSkillsDialog] = useState(false);
@@ -362,6 +377,7 @@ export default function DashboardLayout() {
   const [schedules, setSchedules] = useState<{ id: string; name: string }[]>([]);
   const [splitRatio, setSplitRatio] = useState(0.5);
   const sidebarRef = useRef<HTMLElement>(null);
+  const [mainSplitRatio, setMainSplitRatio] = useState(0.5);
 
   const onSeparatorMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -387,6 +403,35 @@ export default function DashboardLayout() {
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
   }, [splitRatio]);
+
+  const onMainSplitMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startRatio = mainSplitRatio;
+    const container = (e.target as HTMLElement).parentElement;
+    if (!container) return;
+    const containerWidth = container.getBoundingClientRect().width;
+    const onMouseMove = (ev: MouseEvent) => {
+      const delta = ev.clientX - startX;
+      setMainSplitRatio(Math.min(0.8, Math.max(0.2, startRatio + delta / containerWidth)));
+    };
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, [mainSplitRatio]);
+
+  // Handle sidebar project click for split mode
+  const handleSplitProjectClick = useCallback((projectId: string) => {
+    if (activePane === 'right') {
+      setSplitProjectId(projectId);
+      setActivePane('left');
+    } else {
+      navigate(`/projects/${projectId}/chat`);
+    }
+  }, [activePane, setSplitProjectId, setActivePane, navigate]);
 
   // Fetch schedules for the automation sidebar
   useEffect(() => {
@@ -435,6 +480,13 @@ export default function DashboardLayout() {
             <ClippyLogo className="h-10 w-10" />
             <h1 className="text-lg font-bold flex-1">Clippy</h1>
             <button
+              onClick={toggleSplit}
+              className={`transition-colors shrink-0 ${splitMode ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}`}
+              title={splitMode ? 'Exit split view' : 'Split view'}
+            >
+              <Columns2 className="h-3.5 w-3.5" />
+            </button>
+            <button
               onClick={() => setShowSkillsDialog(v => !v)}
               className={`relative z-[60] transition-colors shrink-0 ${showSkillsDialog ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
               title="Settings"
@@ -448,12 +500,28 @@ export default function DashboardLayout() {
         {/* Projects section — top half */}
         <div className="flex items-center justify-between px-3 mb-1">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Projects</span>
-          <Link to="/projects/new" className="text-muted-foreground hover:text-foreground transition-colors">
-            <Plus className="h-3.5 w-3.5" />
-          </Link>
+          <div className="flex items-center gap-1">
+            {splitMode && (
+              <div className="flex items-center gap-0.5 text-[10px]">
+                <button
+                  onClick={() => setActivePane('left')}
+                  className={`px-1 py-0.5 rounded transition-colors ${activePane === 'left' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                  title="Target left pane"
+                >L</button>
+                <button
+                  onClick={() => setActivePane('right')}
+                  className={`px-1 py-0.5 rounded transition-colors ${activePane === 'right' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                  title="Target right pane"
+                >R</button>
+              </div>
+            )}
+            <Link to="/projects/new" className="text-muted-foreground hover:text-foreground transition-colors">
+              <Plus className="h-3.5 w-3.5" />
+            </Link>
+          </div>
         </div>
         <nav style={{ flex: `${splitRatio} 1 0`, minHeight: 0 }} className="flex flex-col gap-0.5 overflow-y-auto">
-          <ProjectNav projects={projects} />
+          <ProjectNav projects={projects} onProjectClick={splitMode ? handleSplitProjectClick : undefined} />
         </nav>
 
         {/* Resizable separator */}
@@ -555,9 +623,50 @@ export default function DashboardLayout() {
         </div>
       </aside>
 
-      <main className="flex flex-1 flex-col overflow-hidden">
-        <Outlet />
-      </main>
+      {splitMode ? (
+        <div className="flex flex-1 overflow-hidden">
+          {/* Left pane */}
+          <main
+            className={`flex flex-col overflow-hidden ${activePane === 'left' ? 'ring-2 ring-primary/50 ring-inset' : ''}`}
+            style={{ flex: `${mainSplitRatio} 1 0`, minWidth: 0 }}
+            onClick={() => setActivePane('left')}
+          >
+            <Outlet />
+          </main>
+          {/* Resizable divider */}
+          <div
+            onMouseDown={onMainSplitMouseDown}
+            className="w-1 bg-border hover:bg-primary/50 cursor-col-resize shrink-0 transition-colors"
+            title="Drag to resize"
+          />
+          {/* Right pane */}
+          <div
+            className={`flex flex-col overflow-hidden ${activePane === 'right' ? 'ring-2 ring-primary/50 ring-inset' : ''}`}
+            style={{ flex: `${1 - mainSplitRatio} 1 0`, minWidth: 0 }}
+            onClick={() => setActivePane('right')}
+          >
+            {splitProjectId ? (
+              <Suspense fallback={<div className="p-6 text-muted-foreground">Loading…</div>}>
+                <ProjectLayout projectId={splitProjectId} key={splitProjectId}>
+                  <ProjectChatPage projectId={splitProjectId} key={`chat-${splitProjectId}`} />
+                </ProjectLayout>
+              </Suspense>
+            ) : (
+              <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
+                <div className="text-center">
+                  <Columns2 className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                  <p>Click a project in the sidebar to open it here</p>
+                  <p className="text-xs mt-1 opacity-70">Active pane: <span className="font-medium">{activePane}</span></p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        <main className="flex flex-1 flex-col overflow-hidden">
+          <Outlet />
+        </main>
+      )}
 
       <Dialog open={showSkillsDialog} onOpenChange={setShowSkillsDialog}>
         <DialogContent className="sm:max-w-2xl max-h-[80vh] flex flex-col">
