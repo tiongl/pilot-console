@@ -99,7 +99,7 @@ export default function ScheduleInput({ value, onChange }: Props) {
   const [config, setConfig] = useState<ScheduleConfig>(() => {
     return parseCron(value) ?? defaultConfig;
   });
-  const [isCustom, setIsCustom] = useState(() => !parseCron(value) && value.trim() !== '');
+  const [isCustom, setIsCustom] = useState(false);
   const [customCron, setCustomCron] = useState(value);
 
   const updateConfig = useCallback((patch: Partial<ScheduleConfig>) => {

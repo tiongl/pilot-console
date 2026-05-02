@@ -6,13 +6,18 @@ import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogClose } from '../components/ui/dialog';
 import {
-  Settings, Zap, FileText, Eye, Trash2, RefreshCw,
+  Pencil, Zap, FileText, Eye, Trash2, RefreshCw,
   CheckCircle, XCircle, X, Loader2, Clock, AlertTriangle,
   ChevronLeft, ChevronRight, Square, Play, Terminal,
   Minus, Plus, WrapText, Sun, Moon, Mail, MailOpen,
   ArrowUp, ArrowDown, ArrowUpDown, Maximize2, Minimize2,
+  Settings,
 } from 'lucide-react';
 import { useAutomation } from '../lib/automation-context';
+import { Input } from '../components/ui/input';
+import { Label } from '../components/ui/label';
+import { Textarea } from '../components/ui/textarea';
+import ScheduleInput from '../components/schedule/ScheduleInput';
 
 const PAGE_SIZE = 50;
 
@@ -299,12 +304,26 @@ export default function AutomationHistoryPage() {
   const [logDialogOpen, setLogDialogOpen] = useState(false);
   const [termDialogOpen, setTermDialogOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editForm, setEditForm] = useState({ name: '', prompt: '', cronExpression: '0 9 * * *', rendererType: 'plaintext', cwd: '', maxRuntimeMs: 300000, maxRunsRetained: 50 });
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState('');
+  const [renderers, setRenderers] = useState<string[]>([]);
   const { markSeen } = useAutomation();
   const [searchParams, setSearchParams] = useSearchParams();
 
+  const scheduleFilter = searchParams.get('schedule') || undefined;
+
+  // Get the schedule name for display when filtered
+  const filteredScheduleName = scheduleFilter
+    ? runs.find(r => r.scheduleId === scheduleFilter)?.scheduleName
+    : undefined;
+
   const fetchRuns = useCallback(async (p = page) => {
     try {
-      const res = await fetch(`/api/admin/runs?limit=${PAGE_SIZE}&offset=${p * PAGE_SIZE}`);
+      let url = `/api/admin/runs?limit=${PAGE_SIZE}&offset=${p * PAGE_SIZE}`;
+      if (scheduleFilter) url += `&scheduleId=${encodeURIComponent(scheduleFilter)}`;
+      const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
         const runsList: RunSummary[] = data.runs || [];
@@ -324,11 +343,17 @@ export default function AutomationHistoryPage() {
       }
     } catch {}
     setLoading(false);
-  }, [markSeen, page]);
+  }, [markSeen, page, scheduleFilter]);
 
   useEffect(() => {
     fetchRuns();
   }, [fetchRuns]);
+
+  // Reset page when schedule filter changes
+  useEffect(() => {
+    setPage(0);
+    setSelectedIds(new Set());
+  }, [scheduleFilter]);
 
   // Listen for report-ready WebSocket events to auto-refresh
   useEffect(() => {
@@ -369,6 +394,57 @@ export default function AutomationHistoryPage() {
       }
     }
   }, [searchParams, runs]);
+
+  // --- Edit schedule inline ---
+  const openEditDialog = async () => {
+    if (!scheduleFilter) return;
+    setEditError('');
+    try {
+      const [schedRes, rendRes] = await Promise.all([
+        fetch(`/api/admin/schedules/${scheduleFilter}`),
+        fetch('/api/admin/renderers'),
+      ]);
+      if (schedRes.ok) {
+        const s = await schedRes.json();
+        setEditForm({
+          name: s.name,
+          prompt: s.prompt,
+          cronExpression: s.cronExpression,
+          rendererType: s.rendererType,
+          cwd: s.cwd || '',
+          maxRuntimeMs: s.maxRuntimeMs,
+          maxRunsRetained: s.maxRunsRetained,
+        });
+      }
+      if (rendRes.ok) {
+        const data = await rendRes.json();
+        setRenderers(data.renderers || []);
+      }
+      setEditDialogOpen(true);
+    } catch {}
+  };
+
+  const handleEditSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!scheduleFilter) return;
+    setEditSaving(true);
+    setEditError('');
+    try {
+      const res = await fetch(`/api/admin/schedules/${scheduleFilter}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...editForm, cwd: editForm.cwd || null }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setEditDialogOpen(false);
+      fetchRuns();
+    } catch (err) {
+      setEditError((err as Error).message);
+    } finally {
+      setEditSaving(false);
+    }
+  };
 
   // --- Selection ---
   const toggleSelect = (id: string) => {
@@ -551,11 +627,16 @@ export default function AutomationHistoryPage() {
   });
 
   return (
-    <div className="flex flex-col gap-6 p-8 overflow-y-auto">
+    <div className="flex flex-col gap-6 p-8">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Zap className="h-6 w-6" />
-          <h2 className="text-2xl font-bold">Automation</h2>
+          <h2 className="text-2xl font-bold">{filteredScheduleName || 'Automation'}</h2>
+          {scheduleFilter && (
+            <button onClick={openEditDialog} title="Edit this automation">
+              <Pencil className="h-4 w-4 text-muted-foreground hover:text-foreground transition-colors" />
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {selectedIds.size > 0 && (
@@ -605,10 +686,11 @@ export default function AutomationHistoryPage() {
         </div>
       ) : (
         <>
-          <div className="border rounded-lg overflow-hidden">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="bg-muted/50 border-b">
+          <div className="border rounded-lg">
+            <div style={{ maxHeight: '70vh', overflowY: 'auto' }}>
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 z-10 bg-background">
+                  <tr className="bg-muted/50 border-b">
                   <th className="px-3 py-2 w-10">
                     <input
                       type="checkbox"
@@ -710,7 +792,8 @@ export default function AutomationHistoryPage() {
                   </tr>
                 ))}
               </tbody>
-            </table>
+              </table>
+            </div>
           </div>
 
           {totalPages > 1 && (
@@ -776,6 +859,54 @@ export default function AutomationHistoryPage() {
           onKill={() => killRun(selectedRun.id)}
         />
       )}
+
+      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Edit Schedule</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleEditSave} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="edit-name">Name</Label>
+              <Input id="edit-name" value={editForm.name} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditForm(f => ({ ...f, name: e.target.value }))} required />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-prompt">Prompt</Label>
+              <Textarea id="edit-prompt" value={editForm.prompt} onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setEditForm(f => ({ ...f, prompt: e.target.value }))} rows={4} required />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="col-span-2">
+                <ScheduleInput value={editForm.cronExpression} onChange={(cron) => setEditForm(f => ({ ...f, cronExpression: cron }))} />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="edit-renderer">Renderer</Label>
+                <select id="edit-renderer" value={editForm.rendererType} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setEditForm(f => ({ ...f, rendererType: e.target.value }))} className="w-full h-9 rounded-md border bg-background px-3 py-1 text-sm">
+                  {renderers.map(r => <option key={r} value={r}>{r}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-cwd">Working Directory (optional)</Label>
+              <Input id="edit-cwd" value={editForm.cwd} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditForm(f => ({ ...f, cwd: e.target.value }))} placeholder="Leave empty for server default" />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="edit-timeout">Timeout (ms)</Label>
+                <Input id="edit-timeout" type="number" value={editForm.maxRuntimeMs} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditForm(f => ({ ...f, maxRuntimeMs: parseInt(e.target.value) || 300000 }))} />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="edit-retention">Max Runs Retained</Label>
+                <Input id="edit-retention" type="number" value={editForm.maxRunsRetained} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditForm(f => ({ ...f, maxRunsRetained: parseInt(e.target.value) || 50 }))} />
+              </div>
+            </div>
+            {editError && <p className="text-sm text-destructive">{editError}</p>}
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setEditDialogOpen(false)}>Cancel</Button>
+              <Button type="submit" disabled={editSaving}>{editSaving ? 'Saving…' : 'Save'}</Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

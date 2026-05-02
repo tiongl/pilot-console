@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Link } from 'react-router';
+import { Link, useSearchParams } from 'react-router';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -27,7 +27,7 @@ interface Schedule {
 const defaultForm = {
   name: '',
   prompt: '',
-  cronExpression: '0 * * * *',
+  cronExpression: '0 9 * * *',
   rendererType: 'plaintext',
   cwd: '',
   maxRuntimeMs: 300000,
@@ -43,6 +43,7 @@ export default function SchedulesPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [triggeringId, setTriggeringId] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const fetchSchedules = useCallback(async () => {
     try {
@@ -83,6 +84,29 @@ export default function SchedulesPage() {
     setError('');
     setShowDialog(true);
   };
+
+  // Auto-open edit dialog when ?edit=<id> is in the URL
+  const editIdFromUrl = searchParams.get('edit');
+  useEffect(() => {
+    if (editIdFromUrl && schedules.length > 0 && !editingId) {
+      const schedule = schedules.find(s => s.id === editIdFromUrl);
+      if (schedule) {
+        setEditingId(schedule.id);
+        setForm({
+          name: schedule.name,
+          prompt: schedule.prompt,
+          cronExpression: schedule.cronExpression,
+          rendererType: schedule.rendererType,
+          cwd: schedule.cwd || '',
+          maxRuntimeMs: schedule.maxRuntimeMs,
+          maxRunsRetained: schedule.maxRunsRetained,
+        });
+        setError('');
+        setShowDialog(true);
+        setSearchParams({}, { replace: true });
+      }
+    }
+  }, [editIdFromUrl, schedules, editingId, setSearchParams]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();

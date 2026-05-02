@@ -127,8 +127,9 @@ router.get('/runs', (req, res) => {
   const limit = parseInt(req.query.limit as string) || 20;
   const offset = parseInt(req.query.offset as string) || 0;
   const since = req.query.since as string | undefined;
-  const runs = listAllRuns(limit, since, offset);
-  const total = countAllRuns();
+  const scheduleId = req.query.scheduleId as string | undefined;
+  const runs = listAllRuns(limit, since, offset, scheduleId);
+  const total = countAllRuns(scheduleId);
   res.json({ runs, total });
 });
 

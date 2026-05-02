@@ -1,9 +1,9 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { Outlet, Link, useNavigate, useLocation } from 'react-router';
 import { useAuth } from '../lib/auth-context';
 import { useTheme, THEMES, type ThemeId } from '../lib/theme-context';
 import { Button } from '../components/ui/button';
-import { Plus, Shield, LogOut, FolderOpen, Pin, Palette, Settings, ChevronRight, ChevronDown, GitBranch, Trash2, Clock, Zap } from 'lucide-react';
+import { Plus, LogOut, FolderOpen, Pin, Palette, Settings, ChevronRight, ChevronDown, GitBranch, Trash2, Clock, Zap, Wrench } from 'lucide-react';
 import { SkillCatalog, InstalledSkillsPanel } from '../pages/ProjectSkillsPage';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Input } from '../components/ui/input';
@@ -359,6 +359,42 @@ export default function DashboardLayout() {
   const [showSkillsDialog, setShowSkillsDialog] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'skills' | 'marketplace'>('skills');
   const { badgeCount } = useAutomation();
+  const [schedules, setSchedules] = useState<{ id: string; name: string }[]>([]);
+  const [splitRatio, setSplitRatio] = useState(0.5);
+  const sidebarRef = useRef<HTMLElement>(null);
+
+  const onSeparatorMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const sidebar = sidebarRef.current;
+    if (!sidebar) return;
+    // Measure the draggable region (between header and footer)
+    const sidebarRect = sidebar.getBoundingClientRect();
+    // Approximate fixed regions: header ~60px, section headers ~50px, footer ~80px, separator ~10px
+    const fixedHeight = 200;
+    const availableHeight = sidebarRect.height - fixedHeight;
+    const startY = e.clientY;
+    const startRatio = splitRatio;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      const delta = ev.clientY - startY;
+      const newRatio = Math.min(0.85, Math.max(0.15, startRatio + delta / availableHeight));
+      setSplitRatio(newRatio);
+    };
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, [splitRatio]);
+
+  // Fetch schedules for the automation sidebar
+  useEffect(() => {
+    fetch('/api/admin/schedules')
+      .then(r => r.json())
+      .then(data => setSchedules((data.schedules || []).map((s: any) => ({ id: s.id, name: s.name }))))
+      .catch(() => {});
+  }, [location.pathname]);
 
   useEffect(() => {
     fetch('/api/projects')
@@ -393,7 +429,7 @@ export default function DashboardLayout() {
 
   return (
     <div className="flex h-screen bg-background">
-      <aside className="flex w-60 flex-col border-r bg-muted/40 px-3 py-4">
+      <aside ref={sidebarRef} className="flex w-60 flex-col border-r bg-muted/40 px-3 py-4">
         <div className="mb-2 px-3">
           <div className="flex items-center gap-2">
             <ClippyLogo className="h-10 w-10" />
@@ -409,15 +445,77 @@ export default function DashboardLayout() {
         </div>
         <div className="border-t mx-3 mb-2" />
 
-        <div className="flex items-center justify-between px-3 mb-2">
+        {/* Projects section — top half */}
+        <div className="flex items-center justify-between px-3 mb-1">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Projects</span>
           <Link to="/projects/new" className="text-muted-foreground hover:text-foreground transition-colors">
-            <Plus className="h-4 w-4" />
+            <Plus className="h-3.5 w-3.5" />
           </Link>
         </div>
-
-        <nav className="flex flex-col gap-0.5 flex-1 overflow-y-auto">
+        <nav style={{ flex: `${splitRatio} 1 0`, minHeight: 0 }} className="flex flex-col gap-0.5 overflow-y-auto">
           <ProjectNav projects={projects} />
+        </nav>
+
+        {/* Resizable separator */}
+        <div
+          onMouseDown={onSeparatorMouseDown}
+          className="mx-3 my-1 flex items-center cursor-row-resize select-none shrink-0 group"
+          style={{ padding: '4px 0' }}
+          title="Drag to resize"
+        >
+          <div className="flex-1 border-t border-border group-hover:border-primary transition-colors" />
+          <div className="mx-2 flex gap-0.5">
+            <span className="block h-0.5 w-0.5 rounded-full bg-muted-foreground/50 group-hover:bg-primary transition-colors" />
+            <span className="block h-0.5 w-0.5 rounded-full bg-muted-foreground/50 group-hover:bg-primary transition-colors" />
+            <span className="block h-0.5 w-0.5 rounded-full bg-muted-foreground/50 group-hover:bg-primary transition-colors" />
+          </div>
+          <div className="flex-1 border-t border-border group-hover:border-primary transition-colors" />
+        </div>
+
+        {/* Automation section — bottom half */}
+        <div className="flex items-center justify-between px-3 mb-1">
+          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
+            Automation
+            {badgeCount > 0 && (
+              <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary text-primary-foreground text-[10px] font-medium px-1">
+                {badgeCount > 99 ? '99+' : badgeCount}
+              </span>
+            )}
+          </span>
+          <Link to="/automation/config" className="text-muted-foreground hover:text-foreground transition-colors" title="Configure automations">
+            <Wrench className="h-3.5 w-3.5" />
+          </Link>
+        </div>
+        <nav style={{ flex: `${1 - splitRatio} 1 0`, minHeight: 0 }} className="flex flex-col gap-0.5 overflow-y-auto">
+          <Link
+            to="/automation"
+            className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm transition-colors ${
+              location.pathname === '/automation' && !location.search
+                ? 'bg-accent text-accent-foreground font-medium'
+                : 'hover:bg-accent hover:text-accent-foreground'
+            }`}
+          >
+            <Clock className="h-3.5 w-3.5" />
+            All
+          </Link>
+          {schedules.map(s => {
+            const isActive = location.pathname === '/automation' && location.search === `?schedule=${s.id}`;
+            return (
+              <Link
+                key={s.id}
+                to={`/automation?schedule=${s.id}`}
+                className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm transition-colors truncate ${
+                  isActive
+                    ? 'bg-accent text-accent-foreground font-medium'
+                    : 'hover:bg-accent hover:text-accent-foreground'
+                }`}
+                title={s.name}
+              >
+                <Zap className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">{s.name}</span>
+              </Link>
+            );
+          })}
         </nav>
 
         <div className="flex flex-col gap-1 border-t pt-3 mt-2">
@@ -435,25 +533,6 @@ export default function DashboardLayout() {
             </select>
           </div>
 
-          <Link
-            to="/admin"
-            className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors"
-          >
-            <Shield className="h-4 w-4" />
-            Admin
-          </Link>
-          <Link
-            to="/automation"
-            className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors"
-          >
-            <Zap className="h-4 w-4" />
-            Automation
-            {badgeCount > 0 && (
-              <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-medium px-1.5">
-                {badgeCount > 99 ? '99+' : badgeCount}
-              </span>
-            )}
-          </Link>
           <div className="flex items-center gap-1">
             <Button variant="ghost" onClick={handleLogout} className="flex-1 justify-start gap-3 px-3">
               <LogOut className="h-4 w-4" />

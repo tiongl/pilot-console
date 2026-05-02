@@ -366,7 +366,7 @@ export interface ReportRunWithSchedule extends ReportRunSummary {
   rendererType: string | null;
 }
 
-export function listAllRuns(limit = 50, since?: string, offset = 0): ReportRunWithSchedule[] {
+export function listAllRuns(limit = 50, since?: string, offset = 0, scheduleId?: string): ReportRunWithSchedule[] {
   const db = getDb();
   let query = `
     SELECT r.id, r.schedule_id, r.status, r.triggered_by, r.started_at, r.completed_at,
@@ -375,10 +375,18 @@ export function listAllRuns(limit = 50, since?: string, offset = 0): ReportRunWi
     FROM report_runs r
     JOIN report_schedules s ON r.schedule_id = s.id
   `;
+  const conditions: string[] = [];
   const params: any[] = [];
   if (since) {
-    query += ' WHERE r.completed_at > ?';
+    conditions.push('r.completed_at > ?');
     params.push(since);
+  }
+  if (scheduleId) {
+    conditions.push('r.schedule_id = ?');
+    params.push(scheduleId);
+  }
+  if (conditions.length) {
+    query += ' WHERE ' + conditions.join(' AND ');
   }
   query += ' ORDER BY r.started_at DESC LIMIT ? OFFSET ?';
   params.push(limit, offset);
@@ -391,8 +399,12 @@ export function listAllRuns(limit = 50, since?: string, offset = 0): ReportRunWi
   }));
 }
 
-export function countAllRuns(): number {
+export function countAllRuns(scheduleId?: string): number {
   const db = getDb();
+  if (scheduleId) {
+    const row = db.prepare('SELECT COUNT(*) as cnt FROM report_runs WHERE schedule_id = ?').get(scheduleId) as any;
+    return row?.cnt ?? 0;
+  }
   const row = db.prepare('SELECT COUNT(*) as cnt FROM report_runs').get() as any;
   return row?.cnt ?? 0;
 }
