@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -6,7 +6,7 @@ import { Label } from '../components/ui/label';
 import { Textarea } from '../components/ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Badge } from '../components/ui/badge';
-import { Plus, Play, Pencil, Trash2, Clock, Pause, History, ArrowLeft } from 'lucide-react';
+import { Plus, Play, Pencil, Trash2, Clock, Pause, History, ArrowLeft, Download, Upload } from 'lucide-react';
 import ScheduleInput from '../components/schedule/ScheduleInput';
 
 interface Schedule {
@@ -44,6 +44,9 @@ export default function SchedulesPage() {
   const [error, setError] = useState('');
   const [triggeringId, setTriggeringId] = useState<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
+  const [importResult, setImportResult] = useState<{ name: string; status: string; error?: string }[] | null>(null);
+  const [showImportResult, setShowImportResult] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fetchSchedules = useCallback(async () => {
     try {
@@ -162,6 +165,49 @@ export default function SchedulesPage() {
     setTriggeringId(null);
   };
 
+  const handleExport = async () => {
+    try {
+      const res = await fetch('/api/admin/schedules/export');
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'clippy-automations.json';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {}
+  };
+
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      const schedulesToImport = data.schedules || data;
+      if (!Array.isArray(schedulesToImport)) {
+        setImportResult([{ name: '(file)', status: 'error', error: 'Invalid format: expected { schedules: [...] }' }]);
+        setShowImportResult(true);
+        return;
+      }
+      const res = await fetch('/api/admin/schedules/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schedules: schedulesToImport, mode: 'skip' }),
+      });
+      const result = await res.json();
+      setImportResult(result.results || [{ name: '(unknown)', status: 'error', error: result.error }]);
+      setShowImportResult(true);
+      fetchSchedules();
+    } catch (err) {
+      setImportResult([{ name: '(file)', status: 'error', error: 'Failed to parse JSON file' }]);
+      setShowImportResult(true);
+    }
+    // Reset file input so the same file can be re-imported
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
   return (
     <div className="flex flex-col gap-6 p-8 max-w-4xl mx-auto w-full overflow-y-auto">
       <div className="flex items-center justify-between">
@@ -174,10 +220,27 @@ export default function SchedulesPage() {
             <p className="text-muted-foreground mt-1">Configure automations to run prompts on a schedule</p>
           </div>
         </div>
-        <Button onClick={openCreate}>
-          <Plus className="h-4 w-4 mr-2" />
-          New Schedule
-        </Button>
+        <div className="flex items-center gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json"
+            className="hidden"
+            onChange={handleImport}
+          />
+          <Button variant="outline" size="sm" onClick={handleExport} title="Export automations as JSON">
+            <Download className="h-4 w-4 mr-1" />
+            Export
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => fileInputRef.current?.click()} title="Import automations from JSON">
+            <Upload className="h-4 w-4 mr-1" />
+            Import
+          </Button>
+          <Button onClick={openCreate}>
+            <Plus className="h-4 w-4 mr-2" />
+            New Schedule
+          </Button>
+        </div>
       </div>
 
       {schedules.length === 0 ? (
@@ -331,6 +394,28 @@ export default function SchedulesPage() {
               <Button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button>
             </div>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showImportResult} onOpenChange={setShowImportResult}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Import Results</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2 max-h-64 overflow-y-auto">
+            {importResult?.map((r, i) => (
+              <div key={i} className="flex items-center gap-2 text-sm">
+                <Badge variant={r.status === 'created' ? 'default' : r.status === 'skipped' ? 'secondary' : 'destructive'}>
+                  {r.status}
+                </Badge>
+                <span className="truncate">{r.name}</span>
+                {r.error && <span className="text-xs text-muted-foreground">({r.error})</span>}
+              </div>
+            ))}
+          </div>
+          <div className="flex justify-end">
+            <Button variant="outline" onClick={() => setShowImportResult(false)}>Close</Button>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

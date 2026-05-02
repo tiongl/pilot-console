@@ -70,6 +70,82 @@ router.post('/schedules', (req, res) => {
   }
 });
 
+// --- Export/Import (must be before :id routes) ---
+router.get('/schedules/export', (_req, res) => {
+  const schedules = listSchedules();
+  const exportData = schedules.map(s => ({
+    name: s.name,
+    prompt: s.prompt,
+    cronExpression: s.cronExpression,
+    rendererType: s.rendererType,
+    enabled: s.enabled,
+    cwd: s.cwd,
+    maxRuntimeMs: s.maxRuntimeMs,
+    maxRunsRetained: s.maxRunsRetained,
+  }));
+  res.setHeader('Content-Disposition', 'attachment; filename="clippy-automations.json"');
+  res.json({ version: 1, schedules: exportData });
+});
+
+router.post('/schedules/import', (req, res) => {
+  try {
+    const { schedules: imported, mode } = req.body;
+    if (!Array.isArray(imported) || imported.length === 0) {
+      res.status(400).json({ error: 'No schedules to import' });
+      return;
+    }
+
+    const results: { name: string; status: 'created' | 'skipped' | 'error'; error?: string }[] = [];
+    const existing = listSchedules();
+    const existingNames = new Set(existing.map(s => s.name));
+
+    for (const s of imported) {
+      if (!s.name?.trim() || !s.prompt?.trim() || !s.cronExpression?.trim()) {
+        results.push({ name: s.name || '(unnamed)', status: 'error', error: 'Missing required fields' });
+        continue;
+      }
+
+      if (mode !== 'overwrite' && existingNames.has(s.name)) {
+        results.push({ name: s.name, status: 'skipped', error: 'Already exists' });
+        continue;
+      }
+
+      if (mode === 'overwrite' && existingNames.has(s.name)) {
+        const old = existing.find(e => e.name === s.name);
+        if (old) deleteSchedule(old.id);
+      }
+
+      const nextRun = getNextRunTime(s.cronExpression);
+      if (!nextRun) {
+        results.push({ name: s.name, status: 'error', error: 'Invalid cron expression' });
+        continue;
+      }
+
+      try {
+        createSchedule({
+          name: s.name.trim(),
+          prompt: s.prompt.trim(),
+          cronExpression: s.cronExpression.trim(),
+          rendererType: s.rendererType || 'plaintext',
+          cwd: s.cwd || null,
+          maxRuntimeMs: s.maxRuntimeMs || 300000,
+          maxRunsRetained: s.maxRunsRetained || 50,
+          createdBy: req.user?.id,
+          nextRunAt: nextRun,
+          enabled: s.enabled !== false,
+        });
+        results.push({ name: s.name, status: 'created' });
+      } catch (err: any) {
+        results.push({ name: s.name, status: 'error', error: err.message });
+      }
+    }
+
+    res.json({ results });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 router.get('/schedules/:id', (req, res) => {
   const schedule = getScheduleById(req.params.id);
   if (!schedule) { res.status(404).json({ error: 'Not found' }); return; }
