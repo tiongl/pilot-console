@@ -120,7 +120,7 @@ function FileViewDialog({ runId, runName, rendererType, open, onClose, fileUrl }
             <Button
               variant="ghost"
               size="sm"
-              className="h-6 w-6 p-0 ml-auto"
+              className="h-6 w-6 p-0 ml-auto mr-6"
               onClick={() => setMaximized(m => !m)}
               title={maximized ? 'Restore' : 'Maximize'}
             >
