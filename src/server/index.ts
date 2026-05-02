@@ -517,6 +517,58 @@ app.get('/api/projects/:id/file-raw', (req, res) => {
   }
 });
 
+// PUT endpoint - Edit existing file
+app.put('/api/projects/:id/file', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const { path: filePath, content } = req.body;
+  if (!filePath || typeof content !== 'string') {
+    res.status(400).json({ error: 'path and content are required' }); return;
+  }
+  const absPath = path.resolve(project.repoPath, filePath);
+  if (!absPath.startsWith(path.resolve(project.repoPath))) {
+    res.status(403).json({ error: 'Access denied' }); return;
+  }
+  try {
+    if (!fs.existsSync(absPath) || !fs.statSync(absPath).isFile()) {
+      res.status(404).json({ error: 'File not found' }); return;
+    }
+    const MAX_WRITE_SIZE = 1024 * 1024; // 1MB
+    if (Buffer.byteLength(content) > MAX_WRITE_SIZE) {
+      res.status(413).json({ error: 'Content too large (max 1MB)' }); return;
+    }
+    fs.writeFileSync(absPath, content, 'utf-8');
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to write file' });
+  }
+});
+
+// POST endpoint - Create new file
+app.post('/api/projects/:id/file', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const { path: filePath, content } = req.body;
+  if (!filePath || typeof content !== 'string') {
+    res.status(400).json({ error: 'path and content are required' }); return;
+  }
+  const absPath = path.resolve(project.repoPath, filePath);
+  if (!absPath.startsWith(path.resolve(project.repoPath))) {
+    res.status(403).json({ error: 'Access denied' }); return;
+  }
+  try {
+    if (fs.existsSync(absPath)) {
+      res.status(409).json({ error: 'File already exists' }); return;
+    }
+    const dir = path.dirname(absPath);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(absPath, content, 'utf-8');
+    res.json({ ok: true, path: filePath });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create file' });
+  }
+});
+
 // --- Browse ---
 app.get('/api/browse', (req, res) => {
   const dirParam = (req.query.dir as string) || os.homedir();

@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Folder, File, ChevronRight, ChevronDown, X, Copy, Check, Image as ImageIcon, Eye, Code, Minus, Plus, WrapText, Hash, Search } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
+import { Folder, File, ChevronRight, ChevronDown, X, Copy, Check, Image as ImageIcon, Eye, Code, Minus, Plus, WrapText, Hash, Search, Pencil, Save, Undo2, FilePlus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -61,6 +61,8 @@ SyntaxHighlighter.registerLanguage('csharp', csharp);
 SyntaxHighlighter.registerLanguage('cpp', cpp);
 SyntaxHighlighter.registerLanguage('dockerfile', dockerfile);
 SyntaxHighlighter.registerLanguage('ini', ini);
+
+const MonacoFileEditor = lazy(() => import('./MonacoFileEditor'));
 
 interface FileEntry {
   name: string;
@@ -180,6 +182,16 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
   const [showLines, setShowLines] = useState(() => localStorage.getItem('clippy-viewer-lines') !== 'false');
   const [wrapLines, setWrapLines] = useState(() => localStorage.getItem('clippy-viewer-wrap') !== 'false');
 
+  // Editing state
+  const [isEditing, setIsEditing] = useState(false);
+  const [editContent, setEditContent] = useState('');
+  const [originalContent, setOriginalContent] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [newFilePrompt, setNewFilePrompt] = useState(false);
+  const [newFilePath, setNewFilePath] = useState('');
+  const isDirty = isEditing && editContent !== originalContent;
+
   const updateFontSize = useCallback((delta: number) => {
     setViewerFontSize(s => { const n = Math.max(10, Math.min(24, s + delta)); localStorage.setItem('clippy-viewer-fontsize', String(n)); return n; });
   }, []);
@@ -253,7 +265,17 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
     setExpandedDirs(newExpanded);
   }, [expandedDirs, dirContents, fetchDir]);
 
+  const isDirtyRef = useRef(false);
+  isDirtyRef.current = isEditing && editContent !== originalContent;
+
   const openFile = useCallback(async (filePath: string) => {
+    // Unsaved guard
+    if (isDirtyRef.current) {
+      if (!confirm('You have unsaved changes. Discard and open another file?')) return;
+    }
+    setIsEditing(false);
+    setEditContent('');
+    setSaveError('');
     // For images, don't fetch content — show inline via raw endpoint
     if (isImageFile(filePath)) {
       setViewer({ path: filePath, content: null, binary: false, loading: false });
@@ -287,6 +309,82 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
       setTimeout(() => setCopied(false), 1500);
     }
   }, [viewer]);
+
+  const canEdit = viewer && viewer.content !== null && !viewer.binary && !viewer.truncated && !isImageFile(viewer.path);
+
+  const startEditing = useCallback(() => {
+    if (!viewer?.content) return;
+    setEditContent(viewer.content);
+    setOriginalContent(viewer.content);
+    setSaveError('');
+    setIsEditing(true);
+  }, [viewer]);
+
+  const cancelEditing = useCallback(() => {
+    if (isEditing && editContent !== originalContent) {
+      if (!confirm('Discard unsaved changes?')) return;
+    }
+    setIsEditing(false);
+    setEditContent('');
+    setSaveError('');
+  }, [isEditing, editContent, originalContent]);
+
+  const saveFile = useCallback(async () => {
+    if (!viewer) return;
+    setSaving(true);
+    setSaveError('');
+    try {
+      const res = await fetch(`/api/projects/${projectId}/file`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: viewer.path, content: editContent }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Save failed');
+      }
+      // Update viewer with new content
+      setViewer(prev => prev ? { ...prev, content: editContent, size: new Blob([editContent]).size } : prev);
+      setOriginalContent(editContent);
+      setIsEditing(false);
+    } catch (err) {
+      setSaveError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }, [viewer, editContent, projectId]);
+
+  const createNewFile = useCallback(async () => {
+    const filePath = newFilePath.trim();
+    if (!filePath) return;
+    setSaving(true);
+    setSaveError('');
+    try {
+      const res = await fetch(`/api/projects/${projectId}/file`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: filePath, content: '' }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Create failed');
+      }
+      setNewFilePrompt(false);
+      setNewFilePath('');
+      // Open the new file in editor mode
+      setViewer({ path: filePath, content: '', loading: false, size: 0 });
+      setEditContent('');
+      setOriginalContent('');
+      setIsEditing(true);
+      // Refresh the file tree
+      const items = await fetchDir('');
+      setEntries(items);
+    } catch (err) {
+      setSaveError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }, [newFilePath, projectId, fetchDir]);
 
   // Close on Escape (modal mode only)
   useEffect(() => {
@@ -342,14 +440,40 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
     <div className={embedded ? "flex h-full overflow-hidden" : "bg-background border rounded-lg shadow-xl flex w-[90vw] max-w-5xl h-[80vh] overflow-hidden"} onClick={e => e.stopPropagation()}>
       {/* File tree */}
       <div className="w-72 border-r flex flex-col shrink-0">
-        {!embedded && (
           <div className="flex items-center justify-between px-3 py-2 border-b">
             <span className="text-sm font-semibold">Files</span>
-            {onClose && (
-              <Button variant="ghost" size="icon" className="h-6 w-6" onClick={onClose}>
-                <X className="h-4 w-4" />
+            <div className="flex items-center gap-0.5">
+              <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => { setNewFilePrompt(true); setNewFilePath(''); setSaveError(''); }} title="New file">
+                <FilePlus className="h-3.5 w-3.5" />
               </Button>
-            )}
+              {!embedded && onClose && (
+                <Button variant="ghost" size="icon" className="h-6 w-6" onClick={onClose}>
+                  <X className="h-4 w-4" />
+                </Button>
+              )}
+            </div>
+          </div>
+        {newFilePrompt && (
+          <div className="px-2 py-1.5 border-b bg-accent/30">
+            <div className="text-xs text-muted-foreground mb-1">New file path:</div>
+            <div className="flex items-center gap-1">
+              <input
+                type="text"
+                value={newFilePath}
+                onChange={e => setNewFilePath(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') createNewFile(); if (e.key === 'Escape') setNewFilePrompt(false); }}
+                placeholder="e.g. src/utils/helper.ts"
+                className="flex-1 text-xs bg-transparent border rounded px-2 py-1 outline-none text-foreground placeholder:text-muted-foreground"
+                autoFocus
+              />
+              <Button variant="default" size="sm" className="h-6 text-xs" onClick={createNewFile} disabled={!newFilePath.trim() || saving}>
+                {saving ? '…' : 'Create'}
+              </Button>
+              <Button variant="ghost" size="sm" className="h-6 text-xs" onClick={() => setNewFilePrompt(false)}>
+                ✕
+              </Button>
+            </div>
+            {saveError && <div className="text-xs text-red-500 mt-1">{saveError}</div>}
           </div>
         )}
         <div className="px-2 py-1.5 border-b">
@@ -476,16 +600,59 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
                     </Button>
                   )}
                   {/* Copy */}
-                  {viewer.content && (
+                  {viewer.content && !isEditing && (
                     <Button variant="ghost" size="icon" className="h-7 w-7" onClick={copyContent} title="Copy file content">
                       {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
                     </Button>
                   )}
+                  {/* Edit toggle */}
+                  {canEdit && !isEditing && (
+                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={startEditing} title="Edit file">
+                      <Pencil className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
+                  {/* Save & Cancel (editing mode) */}
+                  {isEditing && (
+                    <>
+                      <Button
+                        variant="default"
+                        size="sm"
+                        className="h-7 text-xs gap-1"
+                        onClick={saveFile}
+                        disabled={saving || !isDirty}
+                        title="Save (Ctrl+S)"
+                      >
+                        <Save className="h-3.5 w-3.5" />
+                        {saving ? 'Saving…' : 'Save'}
+                      </Button>
+                      <Button variant="ghost" size="sm" className="h-7 text-xs gap-1" onClick={cancelEditing} title="Cancel editing">
+                        <Undo2 className="h-3.5 w-3.5" />
+                        Cancel
+                      </Button>
+                    </>
+                  )}
                 </div>
               </div>
-              <div className="flex-1 overflow-auto" style={{ backgroundColor: activeThemeBg }}>
+              {saveError && (
+                <div className="px-4 py-1 text-xs text-red-500 bg-red-500/10 border-b">{saveError}</div>
+              )}
+              {isDirty && (
+                <div className="px-4 py-0.5 text-xs text-yellow-600 bg-yellow-500/10 border-b">Unsaved changes</div>
+              )}
+              <div className="flex-1 overflow-auto" style={{ backgroundColor: isEditing ? undefined : activeThemeBg }}>
                 {viewer.loading ? (
                   <div className="text-sm text-muted-foreground p-4">Loading…</div>
+                ) : isEditing ? (
+                  <Suspense fallback={<div className="text-sm text-muted-foreground p-4">Loading editor…</div>}>
+                    <MonacoFileEditor
+                      content={editContent}
+                      language={viewerLanguage}
+                      onChange={setEditContent}
+                      onSave={saveFile}
+                      fontSize={viewerFontSize}
+                      darkMode={viewerTheme.toLowerCase().includes('dark') || viewerTheme === 'Monokai'}
+                    />
+                  </Suspense>
                 ) : viewerIsImage ? (
                   <ImageViewer projectId={projectId} filePath={viewer.path} />
                 ) : viewer.binary ? (
