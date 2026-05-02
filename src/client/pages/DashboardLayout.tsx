@@ -557,6 +557,7 @@ export default function DashboardLayout() {
         <nav style={{ flex: `${1 - splitRatio} 1 0`, minHeight: 0 }} className="flex flex-col gap-0.5 overflow-y-auto">
           <Link
             to="/automation"
+            onClick={() => splitMode && setActivePane('left')}
             className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm transition-colors ${
               location.pathname === '/automation' && !location.search
                 ? 'bg-accent text-accent-foreground font-medium'
@@ -572,6 +573,7 @@ export default function DashboardLayout() {
               <Link
                 key={s.id}
                 to={`/automation?schedule=${s.id}`}
+                onClick={() => splitMode && setActivePane('left')}
                 className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm transition-colors truncate ${
                   isActive
                     ? 'bg-accent text-accent-foreground font-medium'
