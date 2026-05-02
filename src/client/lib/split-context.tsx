@@ -1,63 +1,45 @@
 import React, { createContext, useContext, useState, ReactNode } from 'react';
 
+export type SplitContent =
+  | { type: 'project'; projectId: string }
+  | { type: 'automation'; path: string }
+  | null;
+
 interface SplitContextType {
   splitMode: boolean;
-  splitProjectId: string | null;
+  splitContent: SplitContent;
   activePane: 'left' | 'right';
   toggleSplit: () => void;
-  setSplitProjectId: (id: string | null) => void;
+  setSplitContent: (content: SplitContent) => void;
   setActivePane: (pane: 'left' | 'right') => void;
 }
 
 const SplitContext = createContext<SplitContextType | undefined>(undefined);
 
-interface SplitProviderProps {
-  children: ReactNode;
-}
-
-export function SplitProvider({ children }: SplitProviderProps) {
+export function SplitProvider({ children }: { children: ReactNode }) {
   const [splitMode, setSplitMode] = useState(false);
-  const [splitProjectId, setSplitProjectId] = useState<string | null>(null);
+  const [splitContent, setSplitContent] = useState<SplitContent>(null);
   const [activePane, setActivePane] = useState<'left' | 'right'>('left');
 
   const toggleSplit = () => {
     setSplitMode((prev) => {
-      const newSplitMode = !prev;
-      if (!newSplitMode) {
-        // When turning off split mode, reset related state
-        setSplitProjectId(null);
+      const next = !prev;
+      if (!next) {
+        setSplitContent(null);
         setActivePane('left');
       }
-      return newSplitMode;
+      return next;
     });
   };
 
-  const handleSetSplitProjectId = (id: string | null) => {
-    setSplitProjectId(id);
-  };
-
-  const handleSetActivePane = (pane: 'left' | 'right') => {
-    setActivePane(pane);
-  };
-
-  // When splitMode is turned on and splitProjectId is null, set activePane to 'right'
   React.useEffect(() => {
-    if (splitMode && splitProjectId === null) {
+    if (splitMode && splitContent === null) {
       setActivePane('right');
     }
-  }, [splitMode, splitProjectId]);
-
-  const value: SplitContextType = {
-    splitMode,
-    splitProjectId,
-    activePane,
-    toggleSplit,
-    setSplitProjectId: handleSetSplitProjectId,
-    setActivePane: handleSetActivePane,
-  };
+  }, [splitMode, splitContent]);
 
   return (
-    <SplitContext.Provider value={value}>
+    <SplitContext.Provider value={{ splitMode, splitContent, activePane, toggleSplit, setSplitContent, setActivePane }}>
       {children}
     </SplitContext.Provider>
   );
@@ -65,8 +47,6 @@ export function SplitProvider({ children }: SplitProviderProps) {
 
 export function useSplit(): SplitContextType {
   const context = useContext(SplitContext);
-  if (context === undefined) {
-    throw new Error('useSplit must be used within a SplitProvider');
-  }
+  if (!context) throw new Error('useSplit must be used within a SplitProvider');
   return context;
 }

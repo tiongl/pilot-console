@@ -14,6 +14,8 @@ import { useAutomation } from '../lib/automation-context';
 
 const ProjectLayout = lazy(() => import('./ProjectLayout'));
 const ProjectChatPage = lazy(() => import('./ProjectChatPage'));
+const AutomationHistoryCore = lazy(() => import('./AutomationHistoryPage').then(m => ({ default: m.AutomationHistoryCore })));
+const SchedulesPage = lazy(() => import('./SchedulesPage'));
 
 interface Project {
   id: string;
@@ -368,7 +370,7 @@ export default function DashboardLayout() {
   const { theme, setTheme } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
-  const { splitMode, splitProjectId, activePane, toggleSplit, setSplitProjectId, setActivePane } = useSplit();
+  const { splitMode, splitContent, activePane, toggleSplit, setSplitContent, setActivePane } = useSplit();
   const [projects, setProjects] = useState<Project[]>([]);
   const [daemonConnected, setDaemonConnected] = useState<boolean | null>(null);
   const [showSkillsDialog, setShowSkillsDialog] = useState(false);
@@ -423,15 +425,20 @@ export default function DashboardLayout() {
     document.addEventListener('mouseup', onMouseUp);
   }, [mainSplitRatio]);
 
-  // Handle sidebar project click for split mode
-  const handleSplitProjectClick = useCallback((projectId: string) => {
-    if (activePane === 'right') {
-      setSplitProjectId(projectId);
-      setActivePane('left');
+  // Handle sidebar click for split mode
+  const handleSidebarNav = useCallback((target: { type: 'project'; projectId: string } | { type: 'automation'; path: string }) => {
+    if (splitMode && activePane === 'right') {
+      setSplitContent(target);
+    } else if (target.type === 'project') {
+      navigate(`/projects/${target.projectId}/chat`);
     } else {
-      navigate(`/projects/${projectId}/chat`);
+      navigate(target.path);
     }
-  }, [activePane, setSplitProjectId, setActivePane, navigate]);
+  }, [splitMode, activePane, setSplitContent, setActivePane, navigate]);
+
+  const handleSplitProjectClick = useCallback((projectId: string) => {
+    handleSidebarNav({ type: 'project', projectId });
+  }, [handleSidebarNav]);
 
   // Fetch schedules for the automation sidebar
   useEffect(() => {
@@ -550,15 +557,14 @@ export default function DashboardLayout() {
               </span>
             )}
           </span>
-          <Link to="/automation/config" className="text-muted-foreground hover:text-foreground transition-colors" title="Configure automations">
+          <button onClick={() => handleSidebarNav({ type: 'automation', path: '/automation/config' })} className="text-muted-foreground hover:text-foreground transition-colors" title="Configure automations">
             <Wrench className="h-3.5 w-3.5" />
-          </Link>
+          </button>
         </div>
         <nav style={{ flex: `${1 - splitRatio} 1 0`, minHeight: 0 }} className="flex flex-col gap-0.5 overflow-y-auto">
-          <Link
-            to="/automation"
-            onClick={() => splitMode && setActivePane('left')}
-            className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm transition-colors ${
+          <button
+            onClick={() => handleSidebarNav({ type: 'automation', path: '/automation' })}
+            className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm transition-colors text-left ${
               location.pathname === '/automation' && !location.search
                 ? 'bg-accent text-accent-foreground font-medium'
                 : 'hover:bg-accent hover:text-accent-foreground'
@@ -566,15 +572,14 @@ export default function DashboardLayout() {
           >
             <Clock className="h-3.5 w-3.5" />
             All
-          </Link>
+          </button>
           {schedules.map(s => {
             const isActive = location.pathname === '/automation' && location.search === `?schedule=${s.id}`;
             return (
-              <Link
+              <button
                 key={s.id}
-                to={`/automation?schedule=${s.id}`}
-                onClick={() => splitMode && setActivePane('left')}
-                className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm transition-colors truncate ${
+                onClick={() => handleSidebarNav({ type: 'automation', path: `/automation?schedule=${s.id}` })}
+                className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm transition-colors truncate text-left ${
                   isActive
                     ? 'bg-accent text-accent-foreground font-medium'
                     : 'hover:bg-accent hover:text-accent-foreground'
@@ -583,7 +588,7 @@ export default function DashboardLayout() {
               >
                 <Zap className="h-3.5 w-3.5 shrink-0" />
                 <span className="truncate">{s.name}</span>
-              </Link>
+              </button>
             );
           })}
         </nav>
@@ -647,17 +652,33 @@ export default function DashboardLayout() {
             style={{ flex: `${1 - mainSplitRatio} 1 0`, minWidth: 0 }}
             onClick={() => setActivePane('right')}
           >
-            {splitProjectId ? (
-              <Suspense fallback={<div className="p-6 text-muted-foreground">Loading…</div>}>
-                <ProjectLayout projectId={splitProjectId} key={splitProjectId}>
-                  <ProjectChatPage projectId={splitProjectId} key={`chat-${splitProjectId}`} />
-                </ProjectLayout>
-              </Suspense>
+            {splitContent ? (
+              splitContent.type === 'project' ? (
+                <Suspense fallback={<div className="p-6 text-muted-foreground">Loading…</div>}>
+                  <ProjectLayout projectId={splitContent.projectId} key={splitContent.projectId}>
+                    <ProjectChatPage projectId={splitContent.projectId} key={`chat-${splitContent.projectId}`} />
+                  </ProjectLayout>
+                </Suspense>
+              ) : (
+                <Suspense fallback={<div className="p-6 text-muted-foreground">Loading…</div>}>
+                  {splitContent.path === '/automation/config' ? (
+                    <SchedulesPage />
+                  ) : (
+                    <AutomationHistoryCore
+                      key={splitContent.path}
+                      scheduleFilter={new URLSearchParams(splitContent.path.split('?')[1] || '').get('schedule') || undefined}
+                      onNavigate={(path) => {
+                        setSplitContent({ type: 'automation', path });
+                      }}
+                    />
+                  )}
+                </Suspense>
+              )
             ) : (
               <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
                 <div className="text-center">
                   <Columns2 className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                  <p>Click a project in the sidebar to open it here</p>
+                  <p>Click a project or page to open it here</p>
                   <p className="text-xs mt-1 opacity-70">Active pane: <span className="font-medium">{activePane}</span></p>
                 </div>
               </div>

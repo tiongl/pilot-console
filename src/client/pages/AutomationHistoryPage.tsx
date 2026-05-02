@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { Link, useSearchParams } from 'react-router';
+import { useSearchParams, useNavigate as useRouterNavigate } from 'react-router';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Badge } from '../components/ui/badge';
@@ -292,7 +292,9 @@ function TerminalDialog({ runId, runName, open, onClose, onKill }: {
 type SortKey = 'scheduleName' | 'status' | 'completedAt' | 'triggeredBy';
 type SortDir = 'asc' | 'desc';
 
-export default function AutomationHistoryPage() {
+// Core component — works with or without router context
+export function AutomationHistoryCore({ scheduleFilter, onNavigate }: { scheduleFilter?: string; onNavigate?: (path: string) => void }) {
+  const nav = onNavigate || (() => {});
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
@@ -310,9 +312,6 @@ export default function AutomationHistoryPage() {
   const [editError, setEditError] = useState('');
   const [renderers, setRenderers] = useState<string[]>([]);
   const { markSeen } = useAutomation();
-  const [searchParams, setSearchParams] = useSearchParams();
-
-  const scheduleFilter = searchParams.get('schedule') || undefined;
 
   // Get the schedule name for display when filtered
   const filteredScheduleName = scheduleFilter
@@ -382,18 +381,6 @@ export default function AutomationHistoryPage() {
       ws?.close();
     };
   }, [fetchRuns]);
-
-  // Deep-link: auto-open dialog for ?run=<id>
-  useEffect(() => {
-    const runId = searchParams.get('run');
-    if (runId && runs.length > 0 && !fileDialogOpen) {
-      const run = runs.find(r => r.id === runId);
-      if (run) {
-        setSelectedRun(run);
-        setFileDialogOpen(true);
-      }
-    }
-  }, [searchParams, runs]);
 
   // --- Edit schedule inline ---
   const openEditDialog = async () => {
@@ -495,9 +482,6 @@ export default function AutomationHistoryPage() {
     setLogDialogOpen(false);
     setTermDialogOpen(false);
     setSelectedRun(null);
-    if (searchParams.has('run')) {
-      setSearchParams({}, { replace: true });
-    }
     fetchRuns();
   };
 
@@ -665,12 +649,10 @@ export default function AutomationHistoryPage() {
             <RefreshCw className="h-4 w-4 mr-1" />
             Refresh
           </Button>
-          <Link to="/automation/config">
-            <Button variant="outline" size="sm">
+          <Button variant="outline" size="sm" onClick={() => nav('/automation/config')}>
               <Settings className="h-4 w-4 mr-1" />
               Configure
             </Button>
-          </Link>
         </div>
       </div>
 
@@ -681,7 +663,7 @@ export default function AutomationHistoryPage() {
           <Zap className="h-12 w-12 mx-auto mb-4 opacity-30" />
           <p className="text-lg">No automation runs yet</p>
           <p className="text-sm mt-1">
-            <Link to="/automation/config" className="text-primary hover:underline">Configure automations</Link> to get started.
+            <button onClick={() => nav('/automation/config')} className="text-primary hover:underline">Configure automations</button> to get started.
           </p>
         </div>
       ) : (
@@ -909,4 +891,12 @@ export default function AutomationHistoryPage() {
       </Dialog>
     </div>
   );
+}
+
+// Route wrapper — reads schedule filter from URL and provides navigation
+export default function AutomationHistoryPage() {
+  const [searchParams] = useSearchParams();
+  const navigate = useRouterNavigate();
+  const scheduleFilter = searchParams.get('schedule') || undefined;
+  return <AutomationHistoryCore scheduleFilter={scheduleFilter} onNavigate={navigate} />;
 }
