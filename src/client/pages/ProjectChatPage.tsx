@@ -197,24 +197,12 @@ export default function ProjectChatPage({ worktreeId }: { worktreeId?: string })
   }, [showNewMenu]);
 
   const addTab = useCallback((mode: 'cli' | 'shell' | 'powershell' | 'git' | 'git-status' | 'files' = 'cli') => {
-    if (mode === 'git') {
-      const existing = tabs.find(t => t.mode === 'git');
-      if (existing) { setActiveTabId(existing.id); return; }
-    }
-    if (mode === 'git-status') {
-      const existing = tabs.find(t => t.mode === 'git-status');
-      if (existing) { setActiveTabId(existing.id); return; }
-    }
-    if (mode === 'files') {
-      const existing = tabs.find(t => t.mode === 'files');
-      if (existing) { setActiveTabId(existing.id); return; }
-    }
     tabCounter++;
-    const label = mode === 'shell' ? `Shell ${tabCounter}` : mode === 'powershell' ? `PS ${tabCounter}` : mode === 'git' ? 'Git Log' : mode === 'git-status' ? 'Git Status' : mode === 'files' ? 'Files' : `Copilot ${tabCounter}`;
+    const label = mode === 'shell' ? `Shell ${tabCounter}` : mode === 'powershell' ? `PS ${tabCounter}` : mode === 'git' ? `Git Log ${tabCounter}` : mode === 'git-status' ? `Git Status ${tabCounter}` : mode === 'files' ? `Files ${tabCounter}` : `Copilot ${tabCounter}`;
     const newTab: TabMeta = { id: `tab-${tabCounter}`, label, mode, themeName: defaultTheme, fontFamily: defaultFont };
     setTabs(prev => [...prev, newTab]);
     setActiveTabId(newTab.id);
-  }, [defaultTheme, defaultFont, tabs]);
+  }, [defaultTheme, defaultFont]);
 
   const closeTab = useCallback((tabId: string) => {
     const killCb = killCallbacksRef.current[tabId];
@@ -293,9 +281,17 @@ export default function ProjectChatPage({ worktreeId }: { worktreeId?: string })
       {/* Tab bar + controls */}
       <div className="flex items-center border-b bg-muted/30">
         <div className="flex items-center flex-1 overflow-x-auto min-w-0">
-          {tabs.filter(tab => tab.mode !== 'git' && tab.mode !== 'git-status' && tab.mode !== 'files').map(tab => {
+          {tabs.map(tab => {
+            const isUtilTab = tab.mode === 'git' || tab.mode === 'git-status' || tab.mode === 'files';
             const st = tabStatuses[tab.id] || 'closed';
             const stColor = { open: 'bg-green-500', connecting: 'bg-yellow-500', closed: 'bg-gray-400', error: 'bg-red-500' }[st] ?? 'bg-gray-400';
+            const tabIcon = tab.mode === 'powershell'
+              ? <span className="h-3 w-3 text-[9px] font-bold leading-3 text-center shrink-0">PS</span>
+              : tab.mode === 'shell' ? <Terminal className="h-3 w-3 shrink-0" />
+              : tab.mode === 'git' ? <GitCommitHorizontal className="h-3 w-3 shrink-0" />
+              : tab.mode === 'git-status' ? <GitBranch className="h-3 w-3 shrink-0" />
+              : tab.mode === 'files' ? <FolderOpen className="h-3 w-3 shrink-0" />
+              : <Bot className="h-3 w-3 shrink-0" />;
             return (
               <div
                 key={tab.id}
@@ -306,8 +302,8 @@ export default function ProjectChatPage({ worktreeId }: { worktreeId?: string })
                 }`}
                 onClick={() => setActiveTabId(tab.id)}
               >
-                <div className={`h-1.5 w-1.5 rounded-full ${stColor}`} />
-                {tab.mode === 'powershell' ? <span className="h-3 w-3 text-[9px] font-bold leading-3 text-center shrink-0">PS</span> : tab.mode === 'shell' ? <Terminal className="h-3 w-3 shrink-0" /> : <Bot className="h-3 w-3 shrink-0" />}
+                {!isUtilTab && <div className={`h-1.5 w-1.5 rounded-full ${stColor}`} />}
+                {tabIcon}
                 <span className="truncate max-w-[100px]">{tab.label}</span>
                 <button
                   onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
@@ -365,37 +361,19 @@ export default function ProjectChatPage({ worktreeId }: { worktreeId?: string })
         {/* Permanent icon buttons for Git Log, Git Status, Files */}
         <div className="flex items-center shrink-0 border-l gap-0.5 px-1">
           {([
-            { mode: 'git' as const, icon: GitCommitHorizontal, title: 'Git Log' },
-            { mode: 'git-status' as const, icon: GitBranch, title: 'Git Status' },
-            { mode: 'files' as const, icon: FolderOpen, title: 'Files' },
-          ]).map(({ mode, icon: Icon, title }) => {
-            const existing = tabs.find(t => t.mode === mode);
-            const isActive = existing && existing.id === activeTabId;
-            return (
+            { mode: 'git' as const, icon: GitCommitHorizontal, title: 'New Git Log tab' },
+            { mode: 'git-status' as const, icon: GitBranch, title: 'New Git Status tab' },
+            { mode: 'files' as const, icon: FolderOpen, title: 'New Files tab' },
+          ]).map(({ mode, icon: Icon, title }) => (
               <button
                 key={mode}
-                onClick={() => {
-                  if (isActive) {
-                    closeTab(existing.id);
-                  } else if (existing) {
-                    setActiveTabId(existing.id);
-                  } else {
-                    addTab(mode);
-                  }
-                }}
-                className={`p-1.5 rounded transition-colors ${
-                  isActive
-                    ? 'bg-accent text-foreground'
-                    : existing
-                    ? 'text-foreground/70 hover:bg-accent/50'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
-                }`}
+                onClick={() => addTab(mode)}
+                className="p-1.5 rounded transition-colors text-muted-foreground hover:text-foreground hover:bg-background/50"
                 title={title}
               >
                 <Icon className="h-3.5 w-3.5" />
               </button>
-            );
-          })}
+          ))}
         </div>
         {showNewMenu && createPortal(
           <div
