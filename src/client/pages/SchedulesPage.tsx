@@ -6,7 +6,7 @@ import { Label } from '../components/ui/label';
 import { Textarea } from '../components/ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Badge } from '../components/ui/badge';
-import { Plus, Play, Pencil, Trash2, Clock, Pause, History, ArrowLeft, Download, Upload } from 'lucide-react';
+import { Plus, Play, Pencil, Trash2, Clock, Pause, History, ArrowLeft, Download, Upload, BookTemplate, Save, X } from 'lucide-react';
 import ScheduleInput from '../components/schedule/ScheduleInput';
 
 interface Schedule {
@@ -24,6 +24,17 @@ interface Schedule {
   createdAt: string;
 }
 
+interface Template {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  prompt: string;
+  cronExpression: string;
+  rendererType: string;
+  isBuiltIn: boolean;
+}
+
 const defaultForm = {
   name: '',
   prompt: '',
@@ -34,10 +45,22 @@ const defaultForm = {
   maxRunsRetained: 50,
 };
 
+const CATEGORY_COLORS: Record<string, string> = {
+  'Code Review': 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200',
+  'Security': 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+  'Reporting': 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
+  'Maintenance': 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
+};
+
 export default function SchedulesPage() {
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [renderers, setRenderers] = useState<string[]>([]);
+  const [templates, setTemplates] = useState<Template[]>([]);
   const [showDialog, setShowDialog] = useState(false);
+  const [showTemplates, setShowTemplates] = useState(false);
+  const [showSaveTemplate, setShowSaveTemplate] = useState(false);
+  const [saveTemplateSchedule, setSaveTemplateSchedule] = useState<Schedule | null>(null);
+  const [saveTemplateForm, setSaveTemplateForm] = useState({ description: '', category: 'General' });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState(defaultForm);
   const [saving, setSaving] = useState(false);
@@ -64,13 +87,74 @@ export default function SchedulesPage() {
       .then(r => r.json())
       .then(data => setRenderers(data.renderers || []))
       .catch(() => {});
+    fetch('/api/admin/templates')
+      .then(r => r.json())
+      .then(data => setTemplates(data.templates || []))
+      .catch(() => {});
   }, [fetchSchedules]);
 
   const openCreate = () => {
     setEditingId(null);
     setForm(defaultForm);
     setError('');
+    setShowTemplates(true);
+  };
+
+  const openBlankCreate = () => {
+    setShowTemplates(false);
     setShowDialog(true);
+  };
+
+  const openFromTemplate = (t: Template) => {
+    setEditingId(null);
+    setForm({
+      ...defaultForm,
+      name: t.name,
+      prompt: t.prompt,
+      cronExpression: t.cronExpression,
+      rendererType: t.rendererType,
+    });
+    setError('');
+    setShowTemplates(false);
+    setShowDialog(true);
+  };
+
+  const openSaveAsTemplate = (s: Schedule) => {
+    setSaveTemplateSchedule(s);
+    setSaveTemplateForm({ description: '', category: 'General' });
+    setShowSaveTemplate(true);
+  };
+
+  const handleSaveTemplate = async () => {
+    if (!saveTemplateSchedule) return;
+    try {
+      const res = await fetch('/api/admin/templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: saveTemplateSchedule.name,
+          description: saveTemplateForm.description,
+          category: saveTemplateForm.category,
+          prompt: saveTemplateSchedule.prompt,
+          cronExpression: saveTemplateSchedule.cronExpression,
+          rendererType: saveTemplateSchedule.rendererType,
+        }),
+      });
+      if (res.ok) {
+        const template = await res.json();
+        setTemplates(prev => [...prev, template]);
+        setShowSaveTemplate(false);
+      }
+    } catch {}
+  };
+
+  const handleDeleteTemplate = async (id: string) => {
+    try {
+      const res = await fetch(`/api/admin/templates/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        setTemplates(prev => prev.filter(t => t.id !== id));
+      }
+    } catch {}
   };
 
   const openEdit = (s: Schedule) => {
@@ -317,6 +401,9 @@ export default function SchedulesPage() {
                 <Button variant="ghost" size="sm" onClick={() => handleExportOne(s.id, s.name)} title="Export automation">
                   <Download className="h-4 w-4" />
                 </Button>
+                <Button variant="ghost" size="sm" onClick={() => openSaveAsTemplate(s)} title="Save as template">
+                  <Save className="h-4 w-4" />
+                </Button>
                 <Button variant="ghost" size="sm" onClick={() => openEdit(s)} title="Edit">
                   <Pencil className="h-4 w-4" />
                 </Button>
@@ -433,6 +520,113 @@ export default function SchedulesPage() {
           </div>
           <div className="flex justify-end">
             <Button variant="outline" onClick={() => setShowImportResult(false)}>Close</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Template Picker Dialog */}
+      <Dialog open={showTemplates} onOpenChange={setShowTemplates}>
+        <DialogContent className="sm:max-w-2xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>New Automation</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <Button variant="outline" className="w-full justify-start gap-2" onClick={openBlankCreate}>
+              <Plus className="h-4 w-4" />
+              Start from scratch
+            </Button>
+            {templates.length > 0 && (
+              <div className="space-y-3">
+                <p className="text-sm font-medium text-muted-foreground">Or start from a template:</p>
+                {Object.entries(
+                  templates.reduce<Record<string, Template[]>>((groups, t) => {
+                    (groups[t.category] = groups[t.category] || []).push(t);
+                    return groups;
+                  }, {})
+                ).map(([category, categoryTemplates]) => (
+                  <div key={category} className="space-y-2">
+                    <h4 className="text-sm font-medium">{category}</h4>
+                    <div className="grid gap-2">
+                      {categoryTemplates.map(t => (
+                        <div
+                          key={t.id}
+                          className="border rounded-lg p-3 hover:bg-accent cursor-pointer transition-colors flex items-start justify-between gap-2"
+                          onClick={() => openFromTemplate(t)}
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="font-medium text-sm">{t.name}</span>
+                              <span className={`text-xs px-1.5 py-0.5 rounded-full ${CATEGORY_COLORS[t.category] || 'bg-gray-100 text-gray-800'}`}>
+                                {t.category}
+                              </span>
+                              {t.isBuiltIn && <Badge variant="outline" className="text-xs">Built-in</Badge>}
+                            </div>
+                            <p className="text-xs text-muted-foreground line-clamp-2">{t.description}</p>
+                            <div className="flex gap-3 mt-1 text-xs text-muted-foreground">
+                              <span>Cron: <code className="bg-muted px-1 rounded">{t.cronExpression}</code></span>
+                              <span>Renderer: {t.rendererType}</span>
+                            </div>
+                          </div>
+                          {!t.isBuiltIn && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={(e) => { e.stopPropagation(); handleDeleteTemplate(t.id); }}
+                              title="Delete template"
+                            >
+                              <Trash2 className="h-3 w-3 text-destructive" />
+                            </Button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Save as Template Dialog */}
+      <Dialog open={showSaveTemplate} onOpenChange={setShowSaveTemplate}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Save as Template</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Save <span className="font-medium">{saveTemplateSchedule?.name}</span> as a reusable template.
+            </p>
+            <div className="space-y-2">
+              <Label htmlFor="tmpl-desc">Description</Label>
+              <Textarea
+                id="tmpl-desc"
+                value={saveTemplateForm.description}
+                onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setSaveTemplateForm(f => ({ ...f, description: e.target.value }))}
+                placeholder="What does this automation do?"
+                rows={2}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="tmpl-category">Category</Label>
+              <select
+                id="tmpl-category"
+                value={saveTemplateForm.category}
+                onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setSaveTemplateForm(f => ({ ...f, category: e.target.value }))}
+                className="w-full h-9 rounded-md border bg-background px-3 py-1 text-sm"
+              >
+                <option value="General">General</option>
+                <option value="Code Review">Code Review</option>
+                <option value="Security">Security</option>
+                <option value="Reporting">Reporting</option>
+                <option value="Maintenance">Maintenance</option>
+              </select>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setShowSaveTemplate(false)}>Cancel</Button>
+              <Button onClick={handleSaveTemplate}>Save Template</Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>

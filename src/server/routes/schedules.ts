@@ -18,6 +18,7 @@ import {
   markRunsRead,
   markRunsUnread,
 } from '../../shared/schedule-store';
+import { getAllTemplates, createTemplate, deleteTemplate } from '../../shared/automation-templates';
 import { getRendererTypes } from '../renderers';
 import { getNextRunTime } from '../scheduler';
 import { executeReport, getRunningReportOutput, killRunningReport, getRunningReportForSchedule, getReportFilePath } from '../report-runner';
@@ -30,6 +31,42 @@ router.use(requireAuth);
 // --- Renderer types ---
 router.get('/renderers', (_req, res) => {
   res.json({ renderers: getRendererTypes() });
+});
+
+// --- Templates ---
+router.get('/templates', (_req, res) => {
+  res.json({ templates: getAllTemplates() });
+});
+
+router.post('/templates', (req, res) => {
+  try {
+    const { name, description, category, prompt, cronExpression, rendererType } = req.body;
+    if (!name?.trim() || !prompt?.trim() || !cronExpression?.trim()) {
+      res.status(400).json({ error: 'name, prompt, and cronExpression are required' });
+      return;
+    }
+    const template = createTemplate({
+      name: name.trim(),
+      description: (description || '').trim(),
+      category: (category || 'General').trim(),
+      prompt: prompt.trim(),
+      cronExpression: cronExpression.trim(),
+      rendererType: rendererType || 'plaintext',
+      createdBy: req.user?.id,
+    });
+    res.status(201).json(template);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.delete('/templates/:id', (req, res) => {
+  const deleted = deleteTemplate(req.params.id);
+  if (!deleted) {
+    res.status(404).json({ error: 'Template not found or is built-in' });
+    return;
+  }
+  res.json({ ok: true });
 });
 
 // --- Schedules CRUD ---

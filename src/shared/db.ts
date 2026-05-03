@@ -170,4 +170,20 @@ function initSchema(db: Database.Database) {
   if (!runColNames.has('read')) {
     db.exec('ALTER TABLE report_runs ADD COLUMN read INTEGER NOT NULL DEFAULT 0');
   }
+
+  // Migration: automation_templates table for user-saved templates
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS automation_templates (
+      id              TEXT PRIMARY KEY,
+      name            TEXT NOT NULL,
+      description     TEXT NOT NULL DEFAULT '',
+      category        TEXT NOT NULL DEFAULT 'General',
+      prompt          TEXT NOT NULL,
+      cron_expression TEXT NOT NULL,
+      renderer_type   TEXT NOT NULL DEFAULT 'plaintext',
+      is_built_in     INTEGER NOT NULL DEFAULT 0,
+      created_by      TEXT REFERENCES users(id) ON DELETE SET NULL,
+      created_at      TEXT DEFAULT (datetime('now'))
+    );
+  `);
 }
