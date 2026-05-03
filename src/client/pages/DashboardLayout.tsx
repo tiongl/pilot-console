@@ -85,6 +85,7 @@ function StatusDot({ info }: { info: ProjectSessionInfo | undefined }) {
 function ProjectNav({ projects, onProjectClick }: { projects: Project[]; onProjectClick?: (projectId: string) => void }) {
   const location = useLocation();
   const [projectStatuses, setProjectStatuses] = useState<Map<string, ProjectSessionInfo>>(new Map());
+  const [worktreeStatuses, setWorktreeStatuses] = useState<Map<string, ProjectSessionInfo>>(new Map());
   const [pinnedIds, setPinnedIds] = useState<Set<string>>(
     new Set(projects.filter(p => p.pinned).map(p => p.id))
   );
@@ -106,13 +107,21 @@ function ProjectNav({ projects, onProjectClick }: { projects: Project[]; onProje
           const data = await res.json();
           if (!cancelled) {
             const statuses = new Map<string, ProjectSessionInfo>();
+            const wtStatuses = new Map<string, ProjectSessionInfo>();
             for (const s of data.sessions || []) {
+              if (s.worktreeId) {
+                const existing = wtStatuses.get(s.worktreeId);
+                if (!existing || statusPriority(s.status) > statusPriority(existing.status)) {
+                  wtStatuses.set(s.worktreeId, { status: s.status, exitCode: s.exitCode });
+                }
+              }
               const existing = statuses.get(s.projectId);
               if (!existing || statusPriority(s.status) > statusPriority(existing.status)) {
                 statuses.set(s.projectId, { status: s.status, exitCode: s.exitCode });
               }
             }
             setProjectStatuses(statuses);
+            setWorktreeStatuses(wtStatuses);
           }
         }
       } catch {}
@@ -292,6 +301,7 @@ function ProjectNav({ projects, onProjectClick }: { projects: Project[]; onProje
                     <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                     <span className="truncate flex-1">{wt.name}</span>
                     <span className="text-[10px] text-muted-foreground truncate max-w-[60px]">{wt.branch}</span>
+                    <StatusDot info={worktreeStatuses.get(wt.id)} />
                     <button
                       onClick={(e) => handleDeleteWorktree(e, project.id, wt.id)}
                       className="h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 group-hover/wt:opacity-100 hover:text-destructive transition-opacity"

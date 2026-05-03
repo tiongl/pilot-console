@@ -153,6 +153,7 @@ app.get('/api/sessions/active', (req, res) => {
     .filter((s) => s.projectId)
     .map((s) => ({
       projectId: s.projectId!,
+      worktreeId: s.worktreeId ?? null,
       sessionId: s.sessionId,
       status: getSessionStatus(s),
       exitCode: s.lastExitCode,
