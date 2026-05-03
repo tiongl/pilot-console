@@ -89,30 +89,18 @@ router.get('/schedules/export', (_req, res) => {
 
 router.post('/schedules/import', (req, res) => {
   try {
-    const { schedules: imported, mode } = req.body;
+    const { schedules: imported } = req.body;
     if (!Array.isArray(imported) || imported.length === 0) {
       res.status(400).json({ error: 'No schedules to import' });
       return;
     }
 
     const results: { name: string; status: 'created' | 'skipped' | 'error'; error?: string }[] = [];
-    const existing = listSchedules();
-    const existingNames = new Set(existing.map(s => s.name));
 
     for (const s of imported) {
       if (!s.name?.trim() || !s.prompt?.trim() || !s.cronExpression?.trim()) {
         results.push({ name: s.name || '(unnamed)', status: 'error', error: 'Missing required fields' });
         continue;
-      }
-
-      if (mode !== 'overwrite' && existingNames.has(s.name)) {
-        results.push({ name: s.name, status: 'skipped', error: 'Already exists' });
-        continue;
-      }
-
-      if (mode === 'overwrite' && existingNames.has(s.name)) {
-        const old = existing.find(e => e.name === s.name);
-        if (old) deleteSchedule(old.id);
       }
 
       const nextRun = getNextRunTime(s.cronExpression);
@@ -144,6 +132,25 @@ router.post('/schedules/import', (req, res) => {
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
+});
+
+// --- Individual export (must be before generic :id) ---
+router.get('/schedules/:id/export', (req, res) => {
+  const schedule = getScheduleById(req.params.id);
+  if (!schedule) { res.status(404).json({ error: 'Not found' }); return; }
+  const exportData = {
+    name: schedule.name,
+    prompt: schedule.prompt,
+    cronExpression: schedule.cronExpression,
+    rendererType: schedule.rendererType,
+    enabled: schedule.enabled,
+    cwd: schedule.cwd,
+    maxRuntimeMs: schedule.maxRuntimeMs,
+    maxRunsRetained: schedule.maxRunsRetained,
+  };
+  const safeName = schedule.name.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+  res.setHeader('Content-Disposition', `attachment; filename="clippy-automation-${safeName}.json"`);
+  res.json({ version: 1, schedules: [exportData] });
 });
 
 router.get('/schedules/:id', (req, res) => {

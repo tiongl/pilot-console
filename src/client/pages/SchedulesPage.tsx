@@ -179,6 +179,21 @@ export default function SchedulesPage() {
     } catch {}
   };
 
+  const handleExportOne = async (id: string, name: string) => {
+    try {
+      const res = await fetch(`/api/admin/schedules/${id}/export`);
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const safeName = name.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+      a.download = `clippy-automation-${safeName}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {}
+  };
+
   const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -194,7 +209,7 @@ export default function SchedulesPage() {
       const res = await fetch('/api/admin/schedules/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ schedules: schedulesToImport, mode: 'skip' }),
+        body: JSON.stringify({ schedules: schedulesToImport }),
       });
       const result = await res.json();
       setImportResult(result.results || [{ name: '(unknown)', status: 'error', error: result.error }]);
@@ -298,6 +313,9 @@ export default function SchedulesPage() {
                   title={s.enabled ? 'Pause' : 'Enable'}
                 >
                   <Pause className="h-4 w-4" />
+                </Button>
+                <Button variant="ghost" size="sm" onClick={() => handleExportOne(s.id, s.name)} title="Export automation">
+                  <Download className="h-4 w-4" />
                 </Button>
                 <Button variant="ghost" size="sm" onClick={() => openEdit(s)} title="Edit">
                   <Pencil className="h-4 w-4" />
