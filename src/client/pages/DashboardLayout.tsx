@@ -86,10 +86,14 @@ function ProjectNav({ projects, onProjectClick }: { projects: Project[]; onProje
   const location = useLocation();
   const [projectStatuses, setProjectStatuses] = useState<Map<string, ProjectSessionInfo>>(new Map());
   const [worktreeStatuses, setWorktreeStatuses] = useState<Map<string, ProjectSessionInfo>>(new Map());
+  const [projectBranches, setProjectBranches] = useState<Map<string, string>>(new Map());
   const [pinnedIds, setPinnedIds] = useState<Set<string>>(
     new Set(projects.filter(p => p.pinned).map(p => p.id))
   );
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => {
+    const active = projects.find(p => location.pathname.startsWith(`/projects/${p.id}`));
+    return active ? new Set([active.id]) : new Set();
+  });
   const [worktreeMap, setWorktreeMap] = useState<Record<string, Worktree[]>>({});
   const [showAddDialog, setShowAddDialog] = useState<string | null>(null);
   const [wtName, setWtName] = useState('');
@@ -114,10 +118,12 @@ function ProjectNav({ projects, onProjectClick }: { projects: Project[]; onProje
                 if (!existing || statusPriority(s.status) > statusPriority(existing.status)) {
                   wtStatuses.set(s.worktreeId, { status: s.status, exitCode: s.exitCode });
                 }
-              }
-              const existing = statuses.get(s.projectId);
-              if (!existing || statusPriority(s.status) > statusPriority(existing.status)) {
-                statuses.set(s.projectId, { status: s.status, exitCode: s.exitCode });
+              } else {
+                // Only track non-worktree sessions for the main branch status
+                const existing = statuses.get(s.projectId);
+                if (!existing || statusPriority(s.status) > statusPriority(existing.status)) {
+                  statuses.set(s.projectId, { status: s.status, exitCode: s.exitCode });
+                }
               }
             }
             setProjectStatuses(statuses);
@@ -131,6 +137,26 @@ function ProjectNav({ projects, onProjectClick }: { projects: Project[]; onProje
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchBranches() {
+      const branches = new Map<string, string>();
+      await Promise.all(projects.map(async (p) => {
+        try {
+          const res = await fetch(`/api/projects/${p.id}/git-status`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.branch) branches.set(p.id, data.branch);
+          }
+        } catch {}
+      }));
+      if (!cancelled) setProjectBranches(branches);
+    }
+    fetchBranches();
+    const interval = setInterval(fetchBranches, 10000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [projects]);
+
   const fetchWorktrees = useCallback(async (projectId: string) => {
     try {
       const res = await fetch(`/api/projects/${projectId}/worktrees`);
@@ -140,6 +166,11 @@ function ProjectNav({ projects, onProjectClick }: { projects: Project[]; onProje
       }
     } catch {}
   }, []);
+
+  // Fetch worktrees for all projects on mount
+  useEffect(() => {
+    projects.forEach(p => fetchWorktrees(p.id));
+  }, [projects, fetchWorktrees]);
 
   const toggleExpanded = useCallback((projectId: string) => {
     setExpandedIds(prev => {
@@ -240,32 +271,15 @@ function ProjectNav({ projects, onProjectClick }: { projects: Project[]; onProje
 
         return (
           <div key={project.id}>
-            <div className={`group flex items-center gap-1 rounded-lg px-1 py-1 text-sm transition-colors ${
-              isActive ? 'bg-accent text-accent-foreground font-medium' : 'hover:bg-accent hover:text-accent-foreground'
-            }`}>
+            <div className={`group flex items-center gap-1 rounded-lg px-1 py-1 text-sm transition-colors hover:bg-accent hover:text-accent-foreground`}>
               <button
                 onClick={() => toggleExpanded(project.id)}
-                className="h-5 w-5 flex items-center justify-center shrink-0 text-muted-foreground hover:text-foreground"
+                className="flex items-center gap-2 flex-1 min-w-0 py-0.5 text-left"
               >
-                {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                {isExpanded ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+                <FolderOpen className="h-4 w-4 shrink-0" />
+                <span className="truncate flex-1">{project.name}</span>
               </button>
-              {onProjectClick ? (
-                <button
-                  onClick={() => onProjectClick(project.id)}
-                  className="flex items-center gap-2 flex-1 min-w-0 py-0.5 text-left"
-                >
-                  <FolderOpen className="h-4 w-4 shrink-0" />
-                  <span className="truncate flex-1">{project.name}</span>
-                </button>
-              ) : (
-                <Link
-                  to={`/projects/${project.id}/chat`}
-                  className="flex items-center gap-2 flex-1 min-w-0 py-0.5"
-                >
-                  <FolderOpen className="h-4 w-4 shrink-0" />
-                  <span className="truncate flex-1">{project.name}</span>
-                </Link>
-              )}
               <button
                 onClick={(e) => openAddDialog(e, project.id)}
                 className="h-4 w-4 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-foreground transition-opacity"
@@ -284,38 +298,64 @@ function ProjectNav({ projects, onProjectClick }: { projects: Project[]; onProje
               >
                 <Pin className="h-3.5 w-3.5" />
               </button>
-              <StatusDot info={projectStatuses.get(project.id)} />
             </div>
-            {isExpanded && worktrees.length > 0 && (
-              <div className="ml-4 border-l pl-2 mb-1">
-                {worktrees.map(wt => (
-                  <Link
-                    key={wt.id}
-                    to={`/projects/${project.id}/worktrees/${wt.id}/chat`}
-                    className={`group/wt flex items-center gap-2 rounded-md px-2 py-1 text-xs transition-colors ${
-                      location.pathname.includes(`/worktrees/${wt.id}`)
-                        ? 'bg-accent text-accent-foreground font-medium'
-                        : 'hover:bg-accent hover:text-accent-foreground'
-                    }`}
-                  >
-                    <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                    <span className="truncate flex-1">{wt.name}</span>
-                    <span className="text-[10px] text-muted-foreground truncate max-w-[60px]">{wt.branch}</span>
-                    <StatusDot info={worktreeStatuses.get(wt.id)} />
-                    <button
-                      onClick={(e) => handleDeleteWorktree(e, project.id, wt.id)}
-                      className="h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 group-hover/wt:opacity-100 hover:text-destructive transition-opacity"
-                      title="Remove worktree"
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </button>
-                  </Link>
-                ))}
-              </div>
+            {/* Branch subpanel */}
+            {isExpanded && projectBranches.get(project.id) && (
+              onProjectClick ? (
+                <button
+                  onClick={() => onProjectClick(project.id)}
+                  className={`ml-7 pr-2 flex items-center gap-2 px-1 py-1 text-sm transition-colors cursor-pointer rounded-md ${
+                    isActive && !location.pathname.includes('/worktrees/')
+                      ? 'bg-accent text-accent-foreground font-medium'
+                      : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
+                  }`}
+                >
+                  <GitBranch className="h-4 w-4 shrink-0" />
+                  <span className="truncate flex-1">{projectBranches.get(project.id)}</span>
+                  <span className="w-3 flex items-center justify-center shrink-0"><StatusDot info={projectStatuses.get(project.id)} /></span>
+                </button>
+              ) : (
+                <Link
+                  to={`/projects/${project.id}/chat`}
+                  className={`ml-7 pr-2 flex items-center gap-2 px-1 py-1 text-sm transition-colors rounded-md ${
+                    isActive && !location.pathname.includes('/worktrees/')
+                      ? 'bg-accent text-accent-foreground font-medium'
+                      : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
+                  }`}
+                >
+                  <GitBranch className="h-4 w-4 shrink-0" />
+                  <span className="truncate flex-1">{projectBranches.get(project.id)}</span>
+                  <span className="w-3 flex items-center justify-center shrink-0"><StatusDot info={projectStatuses.get(project.id)} /></span>
+                </Link>
+              )
             )}
-            {isExpanded && worktrees.length === 0 && (
-              <div className="ml-4 border-l pl-2 mb-1">
-                <p className="px-2 py-1 text-[10px] text-muted-foreground">No worktrees</p>
+            {isExpanded && worktrees.length > 0 && (
+              <div className="mb-1">
+                {worktrees.map(wt => {
+                  const wtActive = location.pathname.includes(`/worktrees/${wt.id}`);
+                  return (
+                    <Link
+                      key={wt.id}
+                      to={`/projects/${project.id}/worktrees/${wt.id}/chat`}
+                      className={`group/wt ml-7 pr-2 flex items-center gap-2 px-1 py-1 text-sm transition-colors rounded-md ${
+                        wtActive
+                          ? 'bg-accent text-accent-foreground font-medium'
+                          : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
+                      }`}
+                    >
+                      <GitBranch className="h-4 w-4 shrink-0" />
+                      <span className="truncate flex-1">{wt.name}</span>
+                      <button
+                        onClick={(e) => handleDeleteWorktree(e, project.id, wt.id)}
+                        className="h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 group-hover/wt:opacity-100 hover:text-destructive transition-opacity"
+                        title="Remove worktree"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                      <span className="w-3 flex items-center justify-center shrink-0"><StatusDot info={worktreeStatuses.get(wt.id)} /></span>
+                    </Link>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -390,6 +430,7 @@ export default function DashboardLayout() {
   const [schedules, setSchedules] = useState<{ id: string; name: string }[]>([]);
   const [splitRatio, setSplitRatio] = useState(0.5);
   const sidebarRef = useRef<HTMLElement>(null);
+  const [sidebarWidth, setSidebarWidth] = useState(240);
 
   const onSeparatorMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -415,6 +456,22 @@ export default function DashboardLayout() {
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
   }, [splitRatio]);
+
+  const onSidebarResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebarWidth;
+    const onMouseMove = (ev: MouseEvent) => {
+      const newWidth = Math.min(400, Math.max(180, startWidth + ev.clientX - startX));
+      setSidebarWidth(newWidth);
+    };
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, [sidebarWidth]);
 
   // Render standalone pane content
   const renderPaneContent = useCallback((content: SplitContent) => {
@@ -507,7 +564,7 @@ export default function DashboardLayout() {
 
   return (
     <div className="flex h-screen bg-background">
-      <aside ref={sidebarRef} className="flex w-60 flex-col border-r bg-muted/40 px-3 py-4">
+      <aside ref={sidebarRef} className="flex flex-col border-r bg-muted/40 px-3 py-4 shrink-0" style={{ width: sidebarWidth }}>
         <div className="mb-2 px-3">
           <div className="flex items-center gap-2">
             <ClippyLogo className="h-10 w-10" />
@@ -672,6 +729,10 @@ export default function DashboardLayout() {
           </div>
         </div>
       </aside>
+      <div
+        onMouseDown={onSidebarResizeMouseDown}
+        className="w-1 hover:w-1.5 bg-transparent hover:bg-primary/30 cursor-col-resize shrink-0 transition-all"
+      />
 
       {paneCount > 1 ? (
         <div className="flex flex-1 overflow-hidden">
