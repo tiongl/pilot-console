@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/
 import { Badge } from '../components/ui/badge';
 import { Plus, Play, Pencil, Trash2, Clock, Pause, History, ArrowLeft, Download, Upload, BookTemplate, Save, X } from 'lucide-react';
 import ScheduleInput from '../components/schedule/ScheduleInput';
+import { useAutomation } from '../lib/automation-context';
 
 interface Schedule {
   id: string;
@@ -70,6 +71,7 @@ export default function SchedulesPage() {
   const [importResult, setImportResult] = useState<{ name: string; status: string; error?: string }[] | null>(null);
   const [showImportResult, setShowImportResult] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const { refreshSchedules: refreshNavSchedules } = useAutomation();
 
   const fetchSchedules = useCallback(async () => {
     try {
@@ -213,7 +215,7 @@ export default function SchedulesPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
       setShowDialog(false);
-      fetchSchedules();
+      await Promise.all([fetchSchedules(), refreshNavSchedules()]);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -224,8 +226,9 @@ export default function SchedulesPage() {
   const handleDelete = async (id: string) => {
     if (!confirm('Delete this schedule and all its runs?')) return;
     try {
-      await fetch(`/api/admin/schedules/${id}`, { method: 'DELETE' });
-      fetchSchedules();
+      const res = await fetch(`/api/admin/schedules/${id}`, { method: 'DELETE' });
+      if (!res.ok) return;
+      await Promise.all([fetchSchedules(), refreshNavSchedules()]);
     } catch {}
   };
 
@@ -236,7 +239,7 @@ export default function SchedulesPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: !s.enabled }),
       });
-      fetchSchedules();
+      await Promise.all([fetchSchedules(), refreshNavSchedules()]);
     } catch {}
   };
 
@@ -244,7 +247,7 @@ export default function SchedulesPage() {
     setTriggeringId(id);
     try {
       await fetch(`/api/admin/schedules/${id}/run`, { method: 'POST' });
-      fetchSchedules();
+      await fetchSchedules();
     } catch {}
     setTriggeringId(null);
   };
@@ -298,7 +301,7 @@ export default function SchedulesPage() {
       const result = await res.json();
       setImportResult(result.results || [{ name: '(unknown)', status: 'error', error: result.error }]);
       setShowImportResult(true);
-      fetchSchedules();
+      await Promise.all([fetchSchedules(), refreshNavSchedules()]);
     } catch (err) {
       setImportResult([{ name: '(file)', status: 'error', error: 'Failed to parse JSON file' }]);
       setShowImportResult(true);

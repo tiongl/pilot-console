@@ -18,6 +18,7 @@ import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Textarea } from '../components/ui/textarea';
 import ScheduleInput from '../components/schedule/ScheduleInput';
+import type { ScheduleChangedDetail } from '../hooks/useReportNotifications';
 
 const PAGE_SIZE = 50;
 
@@ -347,6 +348,20 @@ export function AutomationHistoryCore({ scheduleFilter, onNavigate }: { schedule
   useEffect(() => {
     fetchRuns();
   }, [fetchRuns]);
+
+  useEffect(() => {
+    if (!scheduleFilter) return;
+
+    const handleScheduleChanged = (event: Event) => {
+      const { action, scheduleId } = (event as CustomEvent<ScheduleChangedDetail>).detail;
+      if (action === 'deleted' && scheduleId === scheduleFilter) {
+        onNavigate?.('/automation');
+      }
+    };
+
+    window.addEventListener('schedule-changed', handleScheduleChanged);
+    return () => window.removeEventListener('schedule-changed', handleScheduleChanged);
+  }, [onNavigate, scheduleFilter]);
 
   // Reset page when schedule filter changes
   useEffect(() => {

@@ -3,13 +3,17 @@ import { useAuth } from '../lib/auth-context';
 import { useAutomation } from '../lib/automation-context';
 import { toast } from 'sonner';
 
+export interface ScheduleChangedDetail {
+  action: 'created' | 'updated' | 'deleted' | 'imported';
+  scheduleId?: string;
+}
+
 /**
- * Hook that listens for report-ready WebSocket notifications
- * and displays a toast. Also increments the automation badge count.
+ * Hook that listens for automation WebSocket notifications.
  */
 export function useReportNotifications() {
   const { user } = useAuth();
-  const { incrementBadge } = useAutomation();
+  const { incrementBadge, refreshSchedules } = useAutomation();
 
   useEffect(() => {
     if (!user) return;
@@ -38,6 +42,11 @@ export function useReportNotifications() {
               } : undefined,
               duration: 10000,
             });
+          } else if (msg.type === 'schedule-changed') {
+            refreshSchedules();
+            window.dispatchEvent(new CustomEvent<ScheduleChangedDetail>('schedule-changed', {
+              detail: { action: msg.action, scheduleId: msg.scheduleId },
+            }));
           }
         } catch {}
       };
@@ -57,5 +66,5 @@ export function useReportNotifications() {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       ws?.close();
     };
-  }, [user, incrementBadge]);
+  }, [user, incrementBadge, refreshSchedules]);
 }

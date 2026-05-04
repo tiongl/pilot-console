@@ -33,6 +33,21 @@ export function broadcastReportReady(payload: {
   });
 }
 
+/** Broadcast schedule list changes so clients can refresh automation navigation */
+export function broadcastScheduleChanged(payload: {
+  action: 'created' | 'updated' | 'deleted' | 'imported';
+  scheduleId?: string;
+}): void {
+  if (!_wss) return;
+  const msg = JSON.stringify({ type: 'schedule-changed', ...payload });
+  _wss.clients.forEach((ws) => {
+    const socket = ws as AuthedSocket;
+    if (socket.readyState === WebSocket.OPEN && socket.userId) {
+      socket.send(msg);
+    }
+  });
+}
+
 export function setupWebSocketServer(): WebSocketServer {
   const wss = new WebSocketServer({ noServer: true });
   _wss = wss;

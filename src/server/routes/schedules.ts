@@ -22,6 +22,7 @@ import { getAllTemplates, createTemplate, deleteTemplate } from '../../shared/au
 import { getRendererTypes } from '../renderers';
 import { getNextRunTime } from '../scheduler';
 import { executeReport, getRunningReportOutput, killRunningReport, getRunningReportForSchedule, getReportFilePath } from '../report-runner';
+import { broadcastScheduleChanged } from '../websocket';
 
 const router = Router();
 const REPORTS_DIR = path.join(require('os').homedir(), '.pilot-console', 'reports');
@@ -101,6 +102,7 @@ router.post('/schedules', (req, res) => {
       nextRunAt: nextRun,
     });
 
+    broadcastScheduleChanged({ action: 'created', scheduleId: schedule.id });
     res.status(201).json(schedule);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -133,6 +135,7 @@ router.post('/schedules/import', (req, res) => {
     }
 
     const results: { name: string; status: 'created' | 'skipped' | 'error'; error?: string }[] = [];
+    let createdCount = 0;
 
     for (const s of imported) {
       if (!s.name?.trim() || !s.prompt?.trim() || !s.cronExpression?.trim()) {
@@ -159,12 +162,16 @@ router.post('/schedules/import', (req, res) => {
           nextRunAt: nextRun,
           enabled: s.enabled !== false,
         });
+        createdCount++;
         results.push({ name: s.name, status: 'created' });
       } catch (err: any) {
         results.push({ name: s.name, status: 'error', error: err.message });
       }
     }
 
+    if (createdCount > 0) {
+      broadcastScheduleChanged({ action: 'imported' });
+    }
     res.json({ results });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -211,6 +218,7 @@ router.put('/schedules/:id', (req, res) => {
     }
 
     const schedule = updateSchedule(req.params.id, data);
+    broadcastScheduleChanged({ action: 'updated', scheduleId: schedule.id });
     res.json(schedule);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -219,6 +227,7 @@ router.put('/schedules/:id', (req, res) => {
 
 router.delete('/schedules/:id', (req, res) => {
   deleteSchedule(req.params.id);
+  broadcastScheduleChanged({ action: 'deleted', scheduleId: req.params.id });
   res.json({ ok: true });
 });
 

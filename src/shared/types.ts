@@ -60,7 +60,8 @@ export type WsServerMessage =
   | { type: 'exit'; code: number }
   | { type: 'ready'; sessionId: string }
   | { type: 'pong' }
-  | { type: 'report-ready'; runId: string; scheduleId: string; scheduleName: string; status: string };
+  | { type: 'report-ready'; runId: string; scheduleId: string; scheduleName: string; status: string }
+  | { type: 'schedule-changed'; action: 'created' | 'updated' | 'deleted' | 'imported'; scheduleId?: string };
 
 export interface Worktree {
   id: string;
