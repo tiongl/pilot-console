@@ -10,7 +10,7 @@ import { parse } from 'url';
 import { requireAuth, SESSION_COOKIE, createSession, destroySession, getUserFromToken } from './middleware/auth';
 import { getGitHubCliProfile } from '../shared/gh-cli-auth';
 import { upsertUser, listUsers, updateUserRole, deleteUser } from '../shared/user-store';
-import { createProject, listProjects, getProjectById, updateProject, deleteProject, addSkill, listSkills, updateSkill, deleteSkill, listWorktrees, createWorktree, getWorktreeById, deleteWorktree } from '../shared/project-store';
+import { createProject, listProjects, getProjectById, updateProject, deleteProject, addSkill, listSkills, updateSkill, deleteSkill, listWorktrees, createWorktree, attachExistingWorktree, getWorktreeById, deleteWorktree } from '../shared/project-store';
 import { listSessionsForUser, listAllSessions, getCopilotSessionDetail, listCopilotSessionsForProject } from '../shared/session-store';
 import { setupWebSocketServer } from './websocket';
 import { getAllSessions, getAllSessionsWithExited, getSessionStatus, endCliSession, endSessionByProject, initDaemonBridge } from '../shared/cli-bridge';
@@ -116,7 +116,16 @@ app.get('/api/projects/:id/worktrees', (req, res) => {
 });
 
 app.post('/api/projects/:id/worktrees', (req, res) => {
-  const { name, branch, createNewBranch } = req.body as { name?: string; branch?: string; createNewBranch?: boolean };
+  const { name, branch, createNewBranch, worktreePath } = req.body as { name?: string; branch?: string; createNewBranch?: boolean; worktreePath?: string };
+  if (worktreePath?.trim()) {
+    try {
+      const wt = attachExistingWorktree(req.params.id, name, worktreePath, branch);
+      res.status(201).json(wt);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+    return;
+  }
   if (!name?.trim() || !branch?.trim()) {
     res.status(400).json({ error: 'name and branch are required' });
     return;

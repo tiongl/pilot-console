@@ -69,6 +69,7 @@ export interface Worktree {
   name: string;
   branch: string;
   worktreePath: string;
+  isManaged: boolean;
   createdAt: string;
 }
 

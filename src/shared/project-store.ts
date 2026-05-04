@@ -176,6 +176,7 @@ function rowToWorktree(row: Record<string, unknown>): Worktree {
     name: row.name as string,
     branch: row.branch as string,
     worktreePath: row.worktree_path as string,
+    isManaged: (row.is_managed as number | undefined) !== 0,
     createdAt: row.created_at as string,
   };
 }
@@ -188,6 +189,34 @@ function sanitizeWorktreeName(name: string): string {
     .replace(/[^a-z0-9_-]/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
+}
+
+function normalizePathForComparison(value: string): string {
+  const resolved = path.resolve(value);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function gitOutput(cwd: string, args: string[]): string {
+  return execFileSync('git', args, {
+    cwd,
+    timeout: 30_000,
+    stdio: 'pipe',
+    encoding: 'utf8',
+  }).trim();
+}
+
+function resolveGitPath(cwd: string, value: string): string {
+  return path.isAbsolute(value) ? path.resolve(value) : path.resolve(cwd, value);
+}
+
+function getGitCommonDir(repoPath: string): string {
+  return normalizePathForComparison(resolveGitPath(repoPath, gitOutput(repoPath, ['rev-parse', '--git-common-dir'])));
+}
+
+function getWorktreeBranch(worktreePath: string): string {
+  const branch = gitOutput(worktreePath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (branch !== 'HEAD') return branch;
+  return gitOutput(worktreePath, ['rev-parse', '--short', 'HEAD']);
 }
 
 export function createWorktree(
@@ -234,8 +263,52 @@ export function createWorktree(
 
   const id = crypto.randomUUID();
   getDb()
-    .prepare('INSERT INTO worktrees (id, project_id, name, branch, worktree_path) VALUES (?, ?, ?, ?, ?)')
-    .run(id, projectId, slug, branch.trim(), wtPath);
+    .prepare('INSERT INTO worktrees (id, project_id, name, branch, worktree_path, is_managed) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(id, projectId, slug, branch.trim(), wtPath, 1);
+
+  return getWorktreeById(id)!;
+}
+
+export function attachExistingWorktree(
+  projectId: string,
+  name: string | undefined,
+  worktreePath: string,
+  branch?: string,
+): Worktree {
+  const project = getProjectById(projectId);
+  if (!project) throw new Error('Project not found');
+
+  const resolvedPath = path.resolve(worktreePath.trim());
+  if (!fs.existsSync(resolvedPath)) throw new Error('Worktree path does not exist');
+  if (!fs.statSync(resolvedPath).isDirectory()) throw new Error('Worktree path is not a directory');
+  if (normalizePathForComparison(resolvedPath) === normalizePathForComparison(project.repoPath)) {
+    throw new Error('Project root is already registered');
+  }
+
+  let topLevel: string;
+  let detectedBranch: string;
+  try {
+    topLevel = gitOutput(resolvedPath, ['rev-parse', '--show-toplevel']);
+    detectedBranch = branch?.trim() || getWorktreeBranch(resolvedPath);
+  } catch (err) {
+    const msg = (err as { stderr?: Buffer | string }).stderr?.toString() || (err as Error).message;
+    throw new Error(`Invalid git worktree: ${msg}`);
+  }
+
+  if (normalizePathForComparison(topLevel) !== normalizePathForComparison(resolvedPath)) {
+    throw new Error('Worktree path must point to the worktree root');
+  }
+  if (getGitCommonDir(project.repoPath) !== getGitCommonDir(resolvedPath)) {
+    throw new Error('Worktree does not belong to this project repository');
+  }
+
+  const displayName = name?.trim() || path.basename(resolvedPath);
+  if (!displayName) throw new Error('Worktree name is required');
+
+  const id = crypto.randomUUID();
+  getDb()
+    .prepare('INSERT INTO worktrees (id, project_id, name, branch, worktree_path, is_managed) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(id, projectId, displayName, detectedBranch, resolvedPath, 0);
 
   return getWorktreeById(id)!;
 }
@@ -259,9 +332,9 @@ export function deleteWorktree(id: string, projectId: string): void {
   if (!wt) throw new Error('Worktree not found');
   if (wt.projectId !== projectId) throw new Error('Worktree does not belong to this project');
 
-  // Run git worktree remove
+  // Only app-created worktrees are removed from disk. Attached existing worktrees are only unregistered.
   const project = getProjectById(wt.projectId);
-  if (project) {
+  if (project && wt.isManaged) {
     try {
       execFileSync('git', ['worktree', 'remove', wt.worktreePath, '--force'], {
         cwd: project.repoPath,

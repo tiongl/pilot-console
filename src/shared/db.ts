@@ -91,6 +91,7 @@ function initSchema(db: Database.Database) {
       name          TEXT NOT NULL,
       branch        TEXT NOT NULL,
       worktree_path TEXT NOT NULL UNIQUE,
+      is_managed    INTEGER NOT NULL DEFAULT 1,
       created_at    TEXT DEFAULT (datetime('now')),
       UNIQUE(project_id, name)
     );
@@ -157,6 +158,13 @@ function initSchema(db: Database.Database) {
   }
   if (!projectColNames.has('sort_order')) {
     db.exec('ALTER TABLE projects ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
+  }
+
+  // Migration: distinguish app-created worktrees from existing worktrees attached by the user.
+  const worktreeCols = db.pragma('table_info(worktrees)') as Array<{ name: string }>;
+  const worktreeColNames = new Set(worktreeCols.map((c) => c.name));
+  if (!worktreeColNames.has('is_managed')) {
+    db.exec('ALTER TABLE worktrees ADD COLUMN is_managed INTEGER NOT NULL DEFAULT 1');
   }
 
   // Migration: add daemon_session_id to report_runs
