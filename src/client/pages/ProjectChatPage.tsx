@@ -162,6 +162,8 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp }
     return saved?.fontSize ?? 14;
   });
   const [tabStatuses, setTabStatuses] = useState<Record<string, string>>({});
+  const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
+  const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
 
   const firstTabId = useRef(tabs[0].id);
   const killCallbacksRef = useRef<Record<string, (sessionId: string | null) => void>>({});
@@ -204,6 +206,19 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp }
     setTabs(prev => [...prev, newTab]);
     setActiveTabId(newTab.id);
   }, [defaultTheme, defaultFont]);
+
+  const moveTab = useCallback((sourceId: string, targetId: string) => {
+    if (sourceId === targetId) return;
+    setTabs(prev => {
+      const sourceIndex = prev.findIndex(t => t.id === sourceId);
+      const targetIndex = prev.findIndex(t => t.id === targetId);
+      if (sourceIndex < 0 || targetIndex < 0) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, moved);
+      return next;
+    });
+  }, []);
 
   const closeTab = useCallback((tabId: string) => {
     const killCb = killCallbacksRef.current[tabId];
@@ -296,12 +311,36 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp }
             return (
               <div
                 key={tab.id}
-                className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs cursor-pointer border-r shrink-0 ${
+                draggable
+                className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs cursor-pointer border-r shrink-0 transition-opacity ${
                   tab.id === activeTabId
                     ? 'bg-accent text-foreground font-semibold border-b-2 border-b-primary'
                     : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
-                }`}
+                } ${draggingTabId === tab.id ? 'opacity-50' : ''} ${dragOverTabId === tab.id && draggingTabId !== tab.id ? 'ring-1 ring-primary ring-inset' : ''}`}
                 onClick={() => setActiveTabId(tab.id)}
+                onDragStart={(e) => {
+                  setDraggingTabId(tab.id);
+                  e.dataTransfer.effectAllowed = 'move';
+                  e.dataTransfer.setData('text/plain', tab.id);
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'move';
+                  setDragOverTabId(tab.id);
+                }}
+                onDragLeave={() => setDragOverTabId(prev => prev === tab.id ? null : prev)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const sourceId = e.dataTransfer.getData('text/plain') || draggingTabId;
+                  if (sourceId) moveTab(sourceId, tab.id);
+                  setDraggingTabId(null);
+                  setDragOverTabId(null);
+                }}
+                onDragEnd={() => {
+                  setDraggingTabId(null);
+                  setDragOverTabId(null);
+                }}
+                title="Drag to rearrange tab"
               >
                 {!isUtilTab && <div className={`h-1.5 w-1.5 rounded-full ${stColor}`} />}
                 {tabIcon}
@@ -444,7 +483,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp }
                 zIndex: tab.id === activeTabId ? 2 : 0,
                 display: tab.id === activeTabId ? 'block' : 'none',
               }}>
-                <FileExplorer projectId={projectId} embedded />
+                <FileExplorer projectId={projectId} worktreeId={worktreeId} embedded />
               </div>
             );
           }

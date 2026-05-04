@@ -396,13 +396,32 @@ app.get('/api/projects/:id/git-commit/:hash/diff', (req, res) => {
 });
 
 // --- Project File Explorer ---
+function isPathInside(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function getFileExplorerRoot(projectId: string, worktreeId: unknown): { root: string } | { status: number; error: string } {
+  const project = getProjectById(projectId);
+  if (!project) return { status: 404, error: 'Project not found' };
+
+  if (typeof worktreeId === 'string' && worktreeId.trim()) {
+    const wt = getWorktreeById(worktreeId);
+    if (!wt || wt.projectId !== projectId) return { status: 404, error: 'Worktree not found' };
+    return { root: path.resolve(wt.worktreePath) };
+  }
+
+  return { root: path.resolve(project.repoPath) };
+}
+
 app.get('/api/projects/:id/files', (req, res) => {
-  const project = getProjectById(req.params.id);
-  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const rootResult = getFileExplorerRoot(req.params.id, req.query.worktreeId);
+  if ('error' in rootResult) { res.status(rootResult.status).json({ error: rootResult.error }); return; }
+  const root = rootResult.root;
   const relDir = (req.query.path as string) || '';
-  const absDir = path.resolve(project.repoPath, relDir);
+  const absDir = path.resolve(root, relDir);
   // Security: ensure resolved path is within the project
-  if (!absDir.startsWith(path.resolve(project.repoPath))) {
+  if (!isPathInside(root, absDir)) {
     res.status(403).json({ error: 'Access denied' }); return;
   }
   try {
@@ -425,8 +444,9 @@ app.get('/api/projects/:id/files', (req, res) => {
 });
 
 app.get('/api/projects/:id/files-search', (req, res) => {
-  const project = getProjectById(req.params.id);
-  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const rootResult = getFileExplorerRoot(req.params.id, req.query.worktreeId);
+  if ('error' in rootResult) { res.status(rootResult.status).json({ error: rootResult.error }); return; }
+  const root = rootResult.root;
   const query = (req.query.q as string || '').trim();
   if (!query) { res.json({ results: [] }); return; }
   // Convert glob pattern to regex: ** -> .*, * -> [^/]*, ? -> .
@@ -467,17 +487,18 @@ app.get('/api/projects/:id/files-search', (req, res) => {
       }
     }
   }
-  walk(path.resolve(project.repoPath), '');
+  walk(root, '');
   res.json({ results, truncated: results.length >= MAX_RESULTS });
 });
 
 app.get('/api/projects/:id/file', (req, res) => {
-  const project = getProjectById(req.params.id);
-  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const rootResult = getFileExplorerRoot(req.params.id, req.query.worktreeId);
+  if ('error' in rootResult) { res.status(rootResult.status).json({ error: rootResult.error }); return; }
+  const root = rootResult.root;
   const filePath = req.query.path as string;
   if (!filePath) { res.status(400).json({ error: 'path required' }); return; }
-  const absPath = path.resolve(project.repoPath, filePath);
-  if (!absPath.startsWith(path.resolve(project.repoPath))) {
+  const absPath = path.resolve(root, filePath);
+  if (!isPathInside(root, absPath)) {
     res.status(403).json({ error: 'Access denied' }); return;
   }
   try {
@@ -502,12 +523,13 @@ app.get('/api/projects/:id/file', (req, res) => {
 });
 
 app.get('/api/projects/:id/file-raw', (req, res) => {
-  const project = getProjectById(req.params.id);
-  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const rootResult = getFileExplorerRoot(req.params.id, req.query.worktreeId);
+  if ('error' in rootResult) { res.status(rootResult.status).json({ error: rootResult.error }); return; }
+  const root = rootResult.root;
   const filePath = req.query.path as string;
   if (!filePath) { res.status(400).json({ error: 'path required' }); return; }
-  const absPath = path.resolve(project.repoPath, filePath);
-  if (!absPath.startsWith(path.resolve(project.repoPath))) {
+  const absPath = path.resolve(root, filePath);
+  if (!isPathInside(root, absPath)) {
     res.status(403).json({ error: 'Access denied' }); return;
   }
   try {
@@ -529,14 +551,15 @@ app.get('/api/projects/:id/file-raw', (req, res) => {
 
 // PUT endpoint - Edit existing file
 app.put('/api/projects/:id/file', (req, res) => {
-  const project = getProjectById(req.params.id);
-  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const rootResult = getFileExplorerRoot(req.params.id, req.query.worktreeId);
+  if ('error' in rootResult) { res.status(rootResult.status).json({ error: rootResult.error }); return; }
+  const root = rootResult.root;
   const { path: filePath, content } = req.body;
   if (!filePath || typeof content !== 'string') {
     res.status(400).json({ error: 'path and content are required' }); return;
   }
-  const absPath = path.resolve(project.repoPath, filePath);
-  if (!absPath.startsWith(path.resolve(project.repoPath))) {
+  const absPath = path.resolve(root, filePath);
+  if (!isPathInside(root, absPath)) {
     res.status(403).json({ error: 'Access denied' }); return;
   }
   try {
@@ -556,14 +579,15 @@ app.put('/api/projects/:id/file', (req, res) => {
 
 // POST endpoint - Create new file
 app.post('/api/projects/:id/file', (req, res) => {
-  const project = getProjectById(req.params.id);
-  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const rootResult = getFileExplorerRoot(req.params.id, req.query.worktreeId);
+  if ('error' in rootResult) { res.status(rootResult.status).json({ error: rootResult.error }); return; }
+  const root = rootResult.root;
   const { path: filePath, content } = req.body;
   if (!filePath || typeof content !== 'string') {
     res.status(400).json({ error: 'path and content are required' }); return;
   }
-  const absPath = path.resolve(project.repoPath, filePath);
-  if (!absPath.startsWith(path.resolve(project.repoPath))) {
+  const absPath = path.resolve(root, filePath);
+  if (!isPathInside(root, absPath)) {
     res.status(403).json({ error: 'Access denied' }); return;
   }
   try {

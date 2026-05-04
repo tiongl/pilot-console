@@ -64,6 +64,7 @@
     "diff2html": "^3.4.56",
     "express": "^5.2.1",
     "lucide-react": "^1.7.0",
+    "mermaid": "^11.14.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "react-markdown": "^10.1.0",

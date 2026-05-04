@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
-import { Folder, File, ChevronRight, ChevronDown, X, Copy, Check, Image as ImageIcon, Eye, Code, Minus, Plus, WrapText, Hash, Search, Pencil, Save, Undo2, FilePlus } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo, useRef, useId, lazy, Suspense } from 'react';
+import { Folder, File, ChevronRight, ChevronDown, ChevronLeft, X, Copy, Check, Image as ImageIcon, Eye, Code, Minus, Plus, WrapText, Hash, Search, Pencil, Save, Undo2, FilePlus, Maximize2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -79,6 +79,16 @@ interface FileViewerState {
   loading: boolean;
 }
 
+interface FileViewerHistoryEntry {
+  path: string;
+  markdownScrollTop?: number;
+}
+
+interface FileViewerHistory {
+  entries: FileViewerHistoryEntry[];
+  index: number;
+}
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -113,6 +123,49 @@ function getLanguage(filename: string): string {
 
 function isImageFile(filename: string): boolean {
   return IMAGE_EXTS.has(getExt(filename));
+}
+
+function isExternalMarkdownHref(href: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//');
+}
+
+function resolveMarkdownFileHref(currentPath: string, href: string): string | null {
+  const trimmed = href.trim();
+  if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('/') || isExternalMarkdownHref(trimmed)) {
+    return null;
+  }
+
+  const pathOnly = trimmed.split('#')[0].split('?')[0].replace(/\\/g, '/');
+  if (!pathOnly) return null;
+
+  const parts = currentPath.split('/').slice(0, -1);
+  for (const part of pathOnly.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (parts.length === 0) return null;
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+
+  return parts.join('/');
+}
+
+function buildFileApiUrl(projectId: string, endpoint: 'files' | 'files-search' | 'file' | 'file-raw', params: Record<string, string | undefined>, worktreeId?: string): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) search.set(key, value);
+  }
+  if (worktreeId) search.set('worktreeId', worktreeId);
+  return `/api/projects/${projectId}/${endpoint}?${search.toString()}`;
+}
+
+function resolveMarkdownImageSrc(projectId: string, currentPath: string, src: string | undefined, worktreeId?: string): string | undefined {
+  if (!src || isExternalMarkdownHref(src) || src.startsWith('/')) return src;
+
+  const filePath = resolveMarkdownFileHref(currentPath, src);
+  return filePath ? buildFileApiUrl(projectId, 'file-raw', { path: filePath }, worktreeId) : src;
 }
 
 function FileIcon({ name }: { name: string }) {
@@ -160,8 +213,8 @@ function CodeViewer({ content, language, truncated, size, fontSize, showLineNumb
   );
 }
 
-function ImageViewer({ projectId, filePath }: { projectId: string; filePath: string }) {
-  const url = `/api/projects/${projectId}/file-raw?path=${encodeURIComponent(filePath)}`;
+function ImageViewer({ projectId, worktreeId, filePath }: { projectId: string; worktreeId?: string; filePath: string }) {
+  const url = buildFileApiUrl(projectId, 'file-raw', { path: filePath }, worktreeId);
   return (
     <div className="flex-1 flex items-center justify-center p-4 bg-[#1e1e1e]">
       <img src={url} alt={filePath} className="max-w-full max-h-full object-contain" />
@@ -169,7 +222,56 @@ function ImageViewer({ projectId, filePath }: { projectId: string; filePath: str
   );
 }
 
-export default function FileExplorer({ projectId, onClose, embedded }: { projectId: string; onClose?: () => void; embedded?: boolean }) {
+function MermaidDiagram({ chart, darkMode }: { chart: string; darkMode: boolean }) {
+  const id = useId().replace(/:/g, '');
+  const [svg, setSvg] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function renderDiagram() {
+      setSvg(null);
+      setError(null);
+      try {
+        const { default: mermaid } = await import('mermaid');
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: 'strict',
+          theme: darkMode ? 'dark' : 'default',
+        });
+        const result = await mermaid.render(`mermaid-${id}`, chart);
+        if (!cancelled) setSvg(result.svg);
+      } catch (err) {
+        if (!cancelled) setError((err as Error).message);
+      }
+    }
+
+    renderDiagram();
+    return () => { cancelled = true; };
+  }, [chart, darkMode, id]);
+
+  if (error) {
+    return (
+      <pre className="mb-3 overflow-x-auto rounded bg-[#2d2d2d] p-3 text-xs text-red-300">
+        Mermaid render error: {error}
+      </pre>
+    );
+  }
+
+  if (!svg) {
+    return <div className="mb-3 rounded border border-border p-4 text-sm text-muted-foreground">Rendering Mermaid diagram...</div>;
+  }
+
+  return (
+    <div
+      className="mb-3 overflow-auto rounded border border-border bg-background p-4 [&_svg]:mx-auto [&_svg]:max-w-full"
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  );
+}
+
+export default function FileExplorer({ projectId, worktreeId, onClose, embedded }: { projectId: string; worktreeId?: string; onClose?: () => void; embedded?: boolean }) {
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
@@ -190,6 +292,11 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
   const [saveError, setSaveError] = useState('');
   const [newFilePrompt, setNewFilePrompt] = useState(false);
   const [newFilePath, setNewFilePath] = useState('');
+  const [viewerHistory, setViewerHistory] = useState<FileViewerHistory>({ entries: [], index: -1 });
+  const [isMarkdownFullscreen, setIsMarkdownFullscreen] = useState(false);
+  const viewerScrollRef = useRef<HTMLDivElement>(null);
+  const markdownViewerRef = useRef<HTMLDivElement>(null);
+  const pendingMarkdownScrollTopRef = useRef<number | null>(null);
   const isDirty = isEditing && editContent !== originalContent;
 
   const updateFontSize = useCallback((delta: number) => {
@@ -201,6 +308,9 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
 
   const activeThemeBg = VIEWER_THEMES[viewerTheme].bg;
   const activeThemeText = VIEWER_THEMES[viewerTheme].text;
+  const viewerLanguage = useMemo(() => viewer ? getLanguage(viewer.path) : '', [viewer?.path]);
+  const viewerIsImage = useMemo(() => viewer ? isImageFile(viewer.path) : false, [viewer?.path]);
+  const viewerIsMarkdown = useMemo(() => viewerLanguage === 'markdown', [viewerLanguage]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<{ path: string; type: 'file' | 'dir'; size?: number }[] | null>(null);
@@ -212,7 +322,7 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
     if (!q.trim()) { setSearchResults(null); setSearchTruncated(false); return; }
     setSearchLoading(true);
     try {
-      const res = await fetch(`/api/projects/${projectId}/files-search?q=${encodeURIComponent(q)}`);
+      const res = await fetch(buildFileApiUrl(projectId, 'files-search', { q }, worktreeId));
       if (res.ok) {
         const data = await res.json();
         setSearchResults(data.results);
@@ -220,7 +330,7 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
       }
     } catch { /* ignore */ }
     setSearchLoading(false);
-  }, [projectId]);
+  }, [projectId, worktreeId]);
 
   const onSearchChange = useCallback((val: string) => {
     setSearchQuery(val);
@@ -235,13 +345,13 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
   }, []);
 
   const fetchDir = useCallback(async (dirPath: string) => {
-    const res = await fetch(`/api/projects/${projectId}/files?path=${encodeURIComponent(dirPath)}`);
+    const res = await fetch(buildFileApiUrl(projectId, 'files', { path: dirPath }, worktreeId));
     if (res.ok) {
       const data = await res.json();
       return data.items as FileEntry[];
     }
     return [];
-  }, [projectId]);
+  }, [projectId, worktreeId]);
 
   useEffect(() => {
     setLoading(true);
@@ -268,22 +378,55 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
   const isDirtyRef = useRef(false);
   isDirtyRef.current = isEditing && editContent !== originalContent;
 
-  const openFile = useCallback(async (filePath: string) => {
+  const getMarkdownScrollTop = useCallback(() => {
+    const markdownEl = markdownViewerRef.current;
+    if (document.fullscreenElement === markdownEl) {
+      return markdownEl?.scrollTop ?? 0;
+    }
+    return viewerScrollRef.current?.scrollTop ?? markdownEl?.scrollTop ?? 0;
+  }, []);
+
+  const rememberCurrentMarkdownScroll = useCallback(() => {
+    if (!viewerIsMarkdown || !viewer) return;
+    const scrollTop = getMarkdownScrollTop();
+    setViewerHistory(prev => {
+      const current = prev.entries[prev.index];
+      if (!current || current.path !== viewer.path) return prev;
+      const entries = [...prev.entries];
+      entries[prev.index] = { ...current, markdownScrollTop: scrollTop };
+      return { ...prev, entries };
+    });
+  }, [getMarkdownScrollTop, viewer, viewerIsMarkdown]);
+
+  const restoreMarkdownScrollAfterRender = useCallback((scrollTop?: number) => {
+    pendingMarkdownScrollTopRef.current = scrollTop ?? 0;
+  }, []);
+
+  const openFile = useCallback(async (filePath: string, options: { recordHistory?: boolean; markdownScrollTop?: number } = {}) => {
     // Unsaved guard
     if (isDirtyRef.current) {
-      if (!confirm('You have unsaved changes. Discard and open another file?')) return;
+      if (!confirm('You have unsaved changes. Discard and open another file?')) return false;
     }
+    if (options.recordHistory !== false) {
+      setViewerHistory(prev => {
+        if (prev.entries[prev.index]?.path === filePath) return prev;
+        const entries = prev.entries.slice(0, prev.index + 1);
+        entries.push({ path: filePath, markdownScrollTop: options.markdownScrollTop ?? 0 });
+        return { entries, index: entries.length - 1 };
+      });
+    }
+    restoreMarkdownScrollAfterRender(options.markdownScrollTop);
     setIsEditing(false);
     setEditContent('');
     setSaveError('');
     // For images, don't fetch content — show inline via raw endpoint
     if (isImageFile(filePath)) {
       setViewer({ path: filePath, content: null, binary: false, loading: false });
-      return;
+      return true;
     }
     setViewer({ path: filePath, content: null, loading: true });
     try {
-      const res = await fetch(`/api/projects/${projectId}/file?path=${encodeURIComponent(filePath)}`);
+      const res = await fetch(buildFileApiUrl(projectId, 'file', { path: filePath }, worktreeId));
       if (res.ok) {
         const data = await res.json();
         setViewer({
@@ -300,7 +443,25 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
     } catch {
       setViewer({ path: filePath, content: 'Error loading file', loading: false });
     }
-  }, [projectId]);
+    return true;
+  }, [projectId, restoreMarkdownScrollAfterRender, worktreeId]);
+
+  const canGoBack = viewerHistory.index > 0;
+  const canGoForward = viewerHistory.index >= 0 && viewerHistory.index < viewerHistory.entries.length - 1;
+
+  const navigateViewerHistory = useCallback(async (delta: -1 | 1) => {
+    rememberCurrentMarkdownScroll();
+    const targetIndex = viewerHistory.index + delta;
+    const targetEntry = viewerHistory.entries[targetIndex];
+    if (!targetEntry) return;
+
+    const opened = await openFile(targetEntry.path, { recordHistory: false, markdownScrollTop: targetEntry.markdownScrollTop });
+    if (opened) {
+      setViewerHistory(prev => (
+        prev.entries[targetIndex]?.path === targetEntry.path ? { ...prev, index: targetIndex } : prev
+      ));
+    }
+  }, [openFile, rememberCurrentMarkdownScroll, viewerHistory.entries, viewerHistory.index]);
 
   const copyContent = useCallback(() => {
     if (viewer?.content) {
@@ -334,7 +495,7 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
     setSaving(true);
     setSaveError('');
     try {
-      const res = await fetch(`/api/projects/${projectId}/file`, {
+      const res = await fetch(buildFileApiUrl(projectId, 'file', {}, worktreeId), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: viewer.path, content: editContent }),
@@ -352,7 +513,7 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
     } finally {
       setSaving(false);
     }
-  }, [viewer, editContent, projectId]);
+  }, [viewer, editContent, projectId, worktreeId]);
 
   const createNewFile = useCallback(async () => {
     const filePath = newFilePath.trim();
@@ -360,7 +521,7 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
     setSaving(true);
     setSaveError('');
     try {
-      const res = await fetch(`/api/projects/${projectId}/file`, {
+      const res = await fetch(buildFileApiUrl(projectId, 'file', {}, worktreeId), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: filePath, content: '' }),
@@ -384,7 +545,49 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
     } finally {
       setSaving(false);
     }
-  }, [newFilePath, projectId, fetchDir]);
+  }, [newFilePath, projectId, worktreeId, fetchDir]);
+
+  const openMarkdownFullscreen = useCallback(() => {
+    markdownViewerRef.current?.requestFullscreen();
+  }, []);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setIsMarkdownFullscreen(document.fullscreenElement === markdownViewerRef.current);
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
+
+  useEffect(() => {
+    if (!viewer || viewer.loading || !viewerIsMarkdown || !renderMarkdown) return;
+    const scrollTop = pendingMarkdownScrollTopRef.current;
+    if (scrollTop === null) return;
+    pendingMarkdownScrollTopRef.current = null;
+
+    const frame = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        viewerScrollRef.current?.scrollTo({ top: scrollTop });
+        markdownViewerRef.current?.scrollTo({ top: scrollTop });
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [renderMarkdown, viewer, viewerIsMarkdown]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!e.altKey) return;
+      if (e.key === 'ArrowLeft' && canGoBack) {
+        e.preventDefault();
+        navigateViewerHistory(-1);
+      } else if (e.key === 'ArrowRight' && canGoForward) {
+        e.preventDefault();
+        navigateViewerHistory(1);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [canGoBack, canGoForward, navigateViewerHistory]);
 
   // Close on Escape (modal mode only)
   useEffect(() => {
@@ -393,10 +596,6 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [onClose, embedded]);
-
-  const viewerLanguage = useMemo(() => viewer ? getLanguage(viewer.path) : '', [viewer?.path]);
-  const viewerIsImage = useMemo(() => viewer ? isImageFile(viewer.path) : false, [viewer?.path]);
-  const viewerIsMarkdown = useMemo(() => viewerLanguage === 'markdown', [viewerLanguage]);
 
   const renderTree = (items: FileEntry[], parentPath: string, depth: number) => {
     return items.map(item => {
@@ -552,6 +751,26 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
                   )}
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
+                    onClick={() => navigateViewerHistory(-1)}
+                    disabled={!canGoBack}
+                    title="Back (Alt+Left)"
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
+                    onClick={() => navigateViewerHistory(1)}
+                    disabled={!canGoForward}
+                    title="Forward (Alt+Right)"
+                  >
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </Button>
                   {/* Theme selector */}
                   {viewer.content && !viewerIsImage && (
                     <select
@@ -599,6 +818,17 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
                       {renderMarkdown ? <Code className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                     </Button>
                   )}
+                  {viewerIsMarkdown && viewer.content && renderMarkdown && !isEditing && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={openMarkdownFullscreen}
+                      title="Fullscreen markdown preview"
+                    >
+                      <Maximize2 className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
                   {/* Copy */}
                   {viewer.content && !isEditing && (
                     <Button variant="ghost" size="icon" className="h-7 w-7" onClick={copyContent} title="Copy file content">
@@ -639,7 +869,7 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
               {isDirty && (
                 <div className="px-4 py-0.5 text-xs text-yellow-600 bg-yellow-500/10 border-b">Unsaved changes</div>
               )}
-              <div className="flex-1 overflow-auto" style={{ backgroundColor: isEditing ? undefined : activeThemeBg }}>
+              <div ref={viewerScrollRef} className="flex-1 overflow-auto" style={{ backgroundColor: isEditing ? undefined : activeThemeBg }}>
                 {viewer.loading ? (
                   <div className="text-sm text-muted-foreground p-4">Loading…</div>
                 ) : isEditing ? (
@@ -654,11 +884,41 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
                     />
                   </Suspense>
                 ) : viewerIsImage ? (
-                  <ImageViewer projectId={projectId} filePath={viewer.path} />
+                  <ImageViewer projectId={projectId} worktreeId={worktreeId} filePath={viewer.path} />
                 ) : viewer.binary ? (
                   <div className="text-sm text-muted-foreground p-4">Binary file ({formatSize(viewer.size ?? 0)})</div>
                 ) : viewer.content !== null && viewerIsMarkdown && renderMarkdown ? (
-                  <div className={`p-6 overflow-auto leading-relaxed ${activeThemeText}`} style={{ fontSize: `${viewerFontSize}px` }}>
+                  <div
+                    ref={markdownViewerRef}
+                    className={`p-6 overflow-auto leading-relaxed ${activeThemeText}`}
+                    style={{ fontSize: `${viewerFontSize}px`, backgroundColor: activeThemeBg }}
+                  >
+                    {isMarkdownFullscreen && (
+                      <div className="sticky top-0 z-10 mb-4 flex items-center gap-2 rounded-md border border-border bg-background/95 px-3 py-2 text-xs text-muted-foreground shadow">
+                        <span className="font-medium text-foreground">Markdown navigation</span>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-6 gap-1 px-2 text-xs"
+                          onClick={() => navigateViewerHistory(-1)}
+                          disabled={!canGoBack}
+                        >
+                          <ChevronLeft className="h-3 w-3" />
+                          Back
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-6 gap-1 px-2 text-xs"
+                          onClick={() => navigateViewerHistory(1)}
+                          disabled={!canGoForward}
+                        >
+                          Forward
+                          <ChevronRight className="h-3 w-3" />
+                        </Button>
+                        <span className="ml-auto">Alt+Left / Alt+Right • Esc exits fullscreen</span>
+                      </div>
+                    )}
                     <ReactMarkdown
                       remarkPlugins={[remarkGfm]}
                       components={{
@@ -672,13 +932,41 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
                         li: ({ children }) => <li className="leading-relaxed">{children}</li>,
                         code: ({ className, children }) => {
                           const isBlock = className?.includes('language-');
+                          const language = className?.match(/language-(\S+)/)?.[1]?.toLowerCase();
+                          if (isBlock && (language === 'mermaid' || language === 'mmd')) {
+                            return (
+                              <MermaidDiagram
+                                chart={String(children).replace(/\n$/, '')}
+                                darkMode={viewerTheme.toLowerCase().includes('dark') || viewerTheme === 'Monokai'}
+                              />
+                            );
+                          }
                           return isBlock
                             ? <code className="block bg-[#2d2d2d] rounded p-3 text-xs font-mono overflow-x-auto mb-3">{children}</code>
                             : <code className="bg-[#2d2d2d] rounded px-1.5 py-0.5 text-xs font-mono">{children}</code>;
                         },
                         pre: ({ children }) => <pre className="mb-3">{children}</pre>,
                         blockquote: ({ children }) => <blockquote className="border-l-4 border-blue-500/50 pl-4 italic text-muted-foreground mb-3">{children}</blockquote>,
-                        a: ({ href, children }) => <a href={href} className="text-blue-400 underline hover:text-blue-300" target="_blank" rel="noopener noreferrer">{children}</a>,
+                        a: ({ href, children }) => {
+                          const linkedFilePath = href ? resolveMarkdownFileHref(viewer.path, href) : null;
+                          return (
+                            <a
+                              href={href}
+                              className="text-blue-400 underline hover:text-blue-300"
+                              target={linkedFilePath ? undefined : '_blank'}
+                              rel={linkedFilePath ? undefined : 'noopener noreferrer'}
+                              onClick={(e) => {
+                                 e.stopPropagation();
+                                 if (!linkedFilePath) return;
+                                 e.preventDefault();
+                                 rememberCurrentMarkdownScroll();
+                                 openFile(linkedFilePath);
+                               }}
+                            >
+                              {children}
+                            </a>
+                          );
+                        },
                         hr: () => <hr className="border-border my-4" />,
                         table: ({ children }) => <div className="overflow-x-auto mb-3"><table className="border-collapse border border-border w-full text-sm">{children}</table></div>,
                         thead: ({ children }) => <thead className="bg-accent/50">{children}</thead>,
@@ -686,7 +974,13 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
                         td: ({ children }) => <td className="border border-border px-3 py-1.5">{children}</td>,
                         del: ({ children }) => <del className="text-muted-foreground">{children}</del>,
                         input: ({ checked }) => <input type="checkbox" checked={checked} readOnly className="mr-1.5 align-middle" />,
-                        img: ({ src, alt }) => <img src={src} alt={alt ?? ''} className="max-w-full rounded my-2" />,
+                        img: ({ src, alt }) => (
+                          <img
+                            src={resolveMarkdownImageSrc(projectId, viewer.path, src, worktreeId)}
+                            alt={alt ?? ''}
+                            className="max-w-full rounded my-2"
+                          />
+                        ),
                       }}
                     >{viewer.content}</ReactMarkdown>
                   </div>
