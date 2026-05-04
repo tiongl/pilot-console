@@ -13,6 +13,7 @@ import { PilotConsoleLogo } from '../components/PilotConsoleLogo';
 import { useAutomation } from '../lib/automation-context';
 
 const ProjectLayout = lazy(() => import('./ProjectLayout'));
+const WorktreeLayout = lazy(() => import('./WorktreeLayout'));
 const ProjectChatPage = lazy(() => import('./ProjectChatPage'));
 const AutomationHistoryCore = lazy(() => import('./AutomationHistoryPage').then(m => ({ default: m.AutomationHistoryCore })));
 const SchedulesPage = lazy(() => import('./SchedulesPage'));
@@ -82,7 +83,15 @@ function StatusDot({ info }: { info: ProjectSessionInfo | undefined }) {
   return null;
 }
 
-function ProjectNav({ projects, onProjectClick }: { projects: Project[]; onProjectClick?: (projectId: string) => void }) {
+function ProjectNav({
+  projects,
+  onProjectClick,
+  onWorktreeClick,
+}: {
+  projects: Project[];
+  onProjectClick?: (projectId: string) => void;
+  onWorktreeClick?: (projectId: string, worktreeId: string) => void;
+}) {
   const location = useLocation();
   const [projectStatuses, setProjectStatuses] = useState<Map<string, ProjectSessionInfo>>(new Map());
   const [worktreeStatuses, setWorktreeStatuses] = useState<Map<string, ProjectSessionInfo>>(new Map());
@@ -304,28 +313,28 @@ function ProjectNav({ projects, onProjectClick }: { projects: Project[]; onProje
               onProjectClick ? (
                 <button
                   onClick={() => onProjectClick(project.id)}
-                  className={`ml-7 pr-2 flex items-center gap-2 px-1 py-1 text-sm transition-colors cursor-pointer rounded-md ${
+                  className={`ml-7 w-[calc(100%-1.75rem)] pr-2 flex items-center gap-2 px-1 py-1 text-left text-sm transition-colors cursor-pointer rounded-md ${
                     isActive && !location.pathname.includes('/worktrees/')
                       ? 'bg-accent text-accent-foreground font-medium'
                       : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
                   }`}
                 >
                   <GitBranch className="h-4 w-4 shrink-0" />
-                  <span className="truncate flex-1">{projectBranches.get(project.id)}</span>
-                  <span className="w-3 flex items-center justify-center shrink-0"><StatusDot info={projectStatuses.get(project.id)} /></span>
+                  <span className="truncate flex-1 text-left">{projectBranches.get(project.id)}</span>
+                  <span className="ml-auto w-3 flex items-center justify-center shrink-0"><StatusDot info={projectStatuses.get(project.id)} /></span>
                 </button>
               ) : (
                 <Link
                   to={`/projects/${project.id}/chat`}
-                  className={`ml-7 pr-2 flex items-center gap-2 px-1 py-1 text-sm transition-colors rounded-md ${
+                  className={`ml-7 w-[calc(100%-1.75rem)] pr-2 flex items-center gap-2 px-1 py-1 text-left text-sm transition-colors rounded-md ${
                     isActive && !location.pathname.includes('/worktrees/')
                       ? 'bg-accent text-accent-foreground font-medium'
                       : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
                   }`}
                 >
                   <GitBranch className="h-4 w-4 shrink-0" />
-                  <span className="truncate flex-1">{projectBranches.get(project.id)}</span>
-                  <span className="w-3 flex items-center justify-center shrink-0"><StatusDot info={projectStatuses.get(project.id)} /></span>
+                  <span className="truncate flex-1 text-left">{projectBranches.get(project.id)}</span>
+                  <span className="ml-auto w-3 flex items-center justify-center shrink-0"><StatusDot info={projectStatuses.get(project.id)} /></span>
                 </Link>
               )
             )}
@@ -333,26 +342,40 @@ function ProjectNav({ projects, onProjectClick }: { projects: Project[]; onProje
               <div className="mb-1">
                 {worktrees.map(wt => {
                   const wtActive = location.pathname.includes(`/worktrees/${wt.id}`);
-                  return (
-                    <Link
-                      key={wt.id}
-                      to={`/projects/${project.id}/worktrees/${wt.id}/chat`}
-                      className={`group/wt ml-7 pr-2 flex items-center gap-2 px-1 py-1 text-sm transition-colors rounded-md ${
-                        wtActive
-                          ? 'bg-accent text-accent-foreground font-medium'
-                          : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-                      }`}
-                    >
+                  const className = `group/wt ml-7 w-[calc(100%-1.75rem)] pr-2 flex items-center gap-2 px-1 py-1 text-left text-sm transition-colors rounded-md ${
+                    wtActive
+                      ? 'bg-accent text-accent-foreground font-medium'
+                      : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
+                  }`;
+                  const content = (
+                    <>
                       <GitBranch className="h-4 w-4 shrink-0" />
-                      <span className="truncate flex-1">{wt.name}</span>
+                      <span className="truncate flex-1 text-left">{wt.name}</span>
                       <button
                         onClick={(e) => handleDeleteWorktree(e, project.id, wt.id)}
-                        className="h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 group-hover/wt:opacity-100 hover:text-destructive transition-opacity"
+                        className="ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 group-hover/wt:opacity-100 hover:text-destructive transition-opacity"
                         title="Remove worktree"
                       >
                         <Trash2 className="h-3 w-3" />
                       </button>
                       <span className="w-3 flex items-center justify-center shrink-0"><StatusDot info={worktreeStatuses.get(wt.id)} /></span>
+                    </>
+                  );
+                  return onWorktreeClick ? (
+                    <button
+                      key={wt.id}
+                      onClick={() => onWorktreeClick(project.id, wt.id)}
+                      className={className}
+                    >
+                      {content}
+                    </button>
+                  ) : (
+                    <Link
+                      key={wt.id}
+                      to={`/projects/${project.id}/worktrees/${wt.id}/chat`}
+                      className={className}
+                    >
+                      {content}
                     </Link>
                   );
                 })}
@@ -426,8 +449,7 @@ export default function DashboardLayout() {
   const [showSkillsDialog, setShowSkillsDialog] = useState(false);
   const [showLayoutMenu, setShowLayoutMenu] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'skills' | 'marketplace'>('skills');
-  const { badgeCount } = useAutomation();
-  const [schedules, setSchedules] = useState<{ id: string; name: string }[]>([]);
+  const { badgeCount, schedules } = useAutomation();
   const [splitRatio, setSplitRatio] = useState(0.5);
   const sidebarRef = useRef<HTMLElement>(null);
   const [sidebarWidth, setSidebarWidth] = useState(240);
@@ -494,6 +516,15 @@ export default function DashboardLayout() {
         </Suspense>
       );
     }
+    if (content.type === 'worktree') {
+      return (
+        <Suspense fallback={<div className="p-6 text-muted-foreground">Loading…</div>}>
+          <WorktreeLayout projectId={content.projectId} worktreeId={content.worktreeId} key={`${content.projectId}-${content.worktreeId}`}>
+            <ProjectChatPage projectId={content.projectId} worktreeId={content.worktreeId} key={`chat-${content.projectId}-${content.worktreeId}`} />
+          </WorktreeLayout>
+        </Suspense>
+      );
+    }
     return (
       <Suspense fallback={<div className="p-6 text-muted-foreground">Loading…</div>}>
         {content.path === '/automation/config' ? (
@@ -511,11 +542,13 @@ export default function DashboardLayout() {
       </Suspense>
     );
   }, [panes, setPaneContent]);
-  const handleSidebarNav = useCallback((target: { type: 'project'; projectId: string } | { type: 'automation'; path: string }) => {
+  const handleSidebarNav = useCallback((target: NonNullable<SplitContent>) => {
     if (activePaneIndex > 0) {
       setPaneContent(activePaneIndex, target);
     } else if (target.type === 'project') {
       navigate(`/projects/${target.projectId}/chat`);
+    } else if (target.type === 'worktree') {
+      navigate(`/projects/${target.projectId}/worktrees/${target.worktreeId}/chat`);
     } else {
       navigate(target.path);
     }
@@ -523,13 +556,11 @@ export default function DashboardLayout() {
 
   const handleSplitProjectClick = useCallback((projectId: string) => {
     handleSidebarNav({ type: 'project', projectId });
-  }, [handleSidebarNav]);  // Fetch schedules for the automation sidebar
-  useEffect(() => {
-    fetch('/api/admin/schedules')
-      .then(r => r.json())
-      .then(data => setSchedules((data.schedules || []).map((s: any) => ({ id: s.id, name: s.name }))))
-      .catch(() => {});
-  }, [location.pathname]);
+  }, [handleSidebarNav]);
+
+  const handleSplitWorktreeClick = useCallback((projectId: string, worktreeId: string) => {
+    handleSidebarNav({ type: 'worktree', projectId, worktreeId });
+  }, [handleSidebarNav]);
 
   useEffect(() => {
     fetch('/api/projects')
@@ -573,6 +604,7 @@ export default function DashboardLayout() {
               <button
                 onClick={() => setShowLayoutMenu(v => !v)}
                 className={`transition-colors ${paneCount > 1 ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}`}
+                aria-label="Layout columns"
                 title="Layout columns"
               >
                 <Columns2 className="h-3.5 w-3.5" />
@@ -580,15 +612,16 @@ export default function DashboardLayout() {
               {showLayoutMenu && (
                 <>
                   <div className="fixed inset-0 z-[70]" onClick={() => setShowLayoutMenu(false)} />
-                  <div className="absolute right-0 top-full mt-1 z-[80] bg-popover border rounded-md shadow-md py-1 min-w-[100px]">
+                  <div className="absolute right-0 top-full mt-1 z-[80] bg-popover border rounded-md shadow-md p-1 flex gap-0.5">
                     {[1, 2, 3, 4].map(n => (
                       <button
                         key={n}
                         onClick={() => { setPaneCount(n); setShowLayoutMenu(false); }}
-                        className={`w-full px-3 py-1.5 text-left text-xs flex items-center gap-2 hover:bg-accent ${paneCount === n ? 'text-primary font-medium' : 'text-foreground'}`}
+                        className={`p-1.5 rounded flex items-center hover:bg-accent ${paneCount === n ? 'text-primary bg-accent' : 'text-foreground'}`}
+                        aria-label={`${n} ${n === 1 ? 'column' : 'columns'}`}
+                        title={`${n} ${n === 1 ? 'column' : 'columns'}`}
                       >
                         <span className="flex gap-0.5">{Array.from({ length: n }, (_, i) => <span key={i} className="w-2 h-3 border rounded-[1px]" />)}</span>
-                        {n} {n === 1 ? 'column' : 'columns'}
                       </button>
                     ))}
                   </div>
@@ -610,25 +643,17 @@ export default function DashboardLayout() {
         <div className="flex items-center justify-between px-3 mb-1">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Projects</span>
           <div className="flex items-center gap-1">
-            {paneCount > 1 && (
-              <div className="flex items-center gap-0.5 text-[10px]">
-                {Array.from({ length: paneCount }, (_, i) => (
-                  <button
-                    key={i}
-                    onClick={() => setActivePaneIndex(i)}
-                    className={`px-1 py-0.5 rounded transition-colors ${activePaneIndex === i ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-                    title={`Target pane ${i + 1}`}
-                  >{i + 1}</button>
-                ))}
-              </div>
-            )}
             <Link to="/projects/new" className="text-muted-foreground hover:text-foreground transition-colors">
               <Plus className="h-3.5 w-3.5" />
             </Link>
           </div>
         </div>
         <nav style={{ flex: `${splitRatio} 1 0`, minHeight: 0 }} className="flex flex-col gap-0.5 overflow-y-auto">
-          <ProjectNav projects={projects} onProjectClick={paneCount > 1 ? handleSplitProjectClick : undefined} />
+          <ProjectNav
+            projects={projects}
+            onProjectClick={paneCount > 1 ? handleSplitProjectClick : undefined}
+            onWorktreeClick={paneCount > 1 ? handleSplitWorktreeClick : undefined}
+          />
         </nav>
 
         {/* Resizable separator */}

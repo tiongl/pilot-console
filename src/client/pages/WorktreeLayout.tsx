@@ -17,8 +17,14 @@ interface Project {
   repoPath: string;
 }
 
-export default function WorktreeLayout() {
-  const { id, worktreeId } = useParams<{ id: string; worktreeId: string }>();
+export default function WorktreeLayout({
+  projectId: projectIdProp,
+  worktreeId: worktreeIdProp,
+  children,
+}: { projectId?: string; worktreeId?: string; children?: React.ReactNode } = {}) {
+  const { id: routeId, worktreeId: routeWorktreeId } = useParams<{ id: string; worktreeId: string }>();
+  const id = projectIdProp || routeId;
+  const worktreeId = worktreeIdProp || routeWorktreeId;
   const [project, setProject] = useState<Project | null>(null);
   const [worktree, setWorktree] = useState<Worktree | null>(null);
 
@@ -42,7 +48,7 @@ export default function WorktreeLayout() {
       repoPath={worktree.worktreePath}
       todoPanel={<ProjectTodoPanel projectId={project.id} projectName={project.name} />}
     >
-      <Outlet />
+      {children || <Outlet />}
     </ProjectHeader>
   );
 }

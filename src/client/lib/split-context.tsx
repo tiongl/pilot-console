@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useCallback, ReactNode } fr
 
 export type SplitContent =
   | { type: 'project'; projectId: string }
+  | { type: 'worktree'; projectId: string; worktreeId: string }
   | { type: 'automation'; path: string }
   | null;
 
