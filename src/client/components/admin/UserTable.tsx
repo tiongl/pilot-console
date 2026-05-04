@@ -1,7 +1,6 @@
 'use client';
 
 import { useState } from 'react';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -18,10 +17,10 @@ export default function UserTable({ users }: Props) {
 
   async function changeRole(id: string, role: 'admin' | 'user') {
     setLoading(id);
-    const res = await fetch('/api/admin/users', {
+    const res = await fetch(`/api/admin/users/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, role }),
+      body: JSON.stringify({ role }),
     });
     setLoading(null);
     if (res.ok) {
@@ -35,10 +34,9 @@ export default function UserTable({ users }: Props) {
   async function deleteUser(id: string) {
     if (!confirm('Delete this user?')) return;
     setLoading(id);
-    const res = await fetch('/api/admin/users', {
+    const res = await fetch(`/api/admin/users/${id}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id }),
     });
     setLoading(null);
     if (res.ok) {

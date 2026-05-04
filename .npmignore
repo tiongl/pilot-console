@@ -1,0 +1,12 @@
+.env*
+.github/
+coverage/
+docs/todo/
+src/test/
+*.tsbuildinfo
+vite.config.ts
+eslint.config.mjs
+tsconfig.json
+components.json
+screenshot.png
+ghclippy.db

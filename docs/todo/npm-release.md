@@ -1,22 +1,22 @@
 # npm Release Setup
 
-**Status**: Not Started
+**Status**: In Progress
 
 ## Summary
 
-Publish `@tionglee/clippy` to public npmjs.com with GitHub Actions CI/CD for automated releases on version tags.
+Publish `pilot-console` to public npmjs.com with GitHub Actions CI/CD for automated releases on version tags.
 
 ## Tasks
 
 ### 1. Update package.json
-- Rename to `@tionglee/clippy`
-- Add `publishConfig: { access: "public" }`
-- Add `files` field: `bin/`, `src/`, `dist/`, `public/`
-- Add `prepublishOnly` script: `npm run build`
-- Add `engines`, `description`, `repository`, `license`, `keywords`
+- Done: verified name is `pilot-console`
+- Done: added `publishConfig: { access: "public" }`
+- Done: added `files` field for `bin/`, `src/`, `dist/`, and `public/pilot-console-logo.svg`
+- Done: added `prepublishOnly` script: `npm run build`
+- Done: added `engines`, `description`, `repository`, `license`, `keywords`
 
 ### 2. Create .npmignore
-- Exclude: tests, dev configs, docs/todo, `.env*`, coverage, `.github/`
+- Done: excludes tests, dev configs, docs/todo, `.env*`, coverage, `.github/`
 
 ### 3. Create GitHub Actions release workflow
 - File: `.github/workflows/release.yml`
@@ -35,20 +35,19 @@ npm run release              # bump patch, tag, push → CI publishes
 npm version minor && git push --follow-tags  # bump minor manually
 
 # Users install with:
-npm install -g @tionglee/clippy
-clippy
+npm install -g pilot-console
+pilot-console
 ```
 
 ## File Changes
 
 | File | Change |
 |------|--------|
-| `package.json` | Add npm publishing fields |
+| `package.json` | Added npm publishing fields |
 | `.npmignore` | New — exclude dev/test files |
 | `.github/workflows/release.yml` | New — CI/CD publish workflow |
 
 ## Notes
 
-- `clippy` name is taken on npmjs — using scoped `@tionglee/clippy`
 - Package includes pre-built client assets in `dist/`
 - Native deps (better-sqlite3, node-pty) are installed at user's `npm install` time

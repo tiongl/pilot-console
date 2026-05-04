@@ -31,7 +31,7 @@ const CLI_COMMAND = process.env.COPILOT_CLI_COMMAND ?? 'gh';
 const CLI_ARGS = (process.env.COPILOT_CLI_ARGS ?? 'copilot').split(' ').filter(Boolean);
 
 /** Directory where report files are saved */
-const REPORTS_DIR = path.join(os.homedir(), '.clippy', 'reports');
+const REPORTS_DIR = path.join(os.homedir(), '.pilot-console', 'reports');
 
 /** Pre-accept WorkIQ EULA so non-interactive CLI runs don't get blocked */
 function ensureWorkIqEula(): void {
@@ -179,7 +179,7 @@ export async function executeReport(
   runningReports.set(run.id, { daemonSessionId: sessionId, output: '', scheduleId: schedule.id });
 
   console.log(`[report-runner] Starting run ${run.id} for schedule "${schedule.name}" (${schedule.id})`);
-  console.log(`[report-runner] CWD: ${schedule.worktreeId ?? process.cwd()}`);
+  console.log(`[report-runner] CWD: ${cwd}`);
   console.log(`[report-runner] CLI command: ${shell} ${shellArgs.join(' ')}`);
   console.log(`[report-runner] Prompt:\n---\n${reportPrompt}\n---`);
 

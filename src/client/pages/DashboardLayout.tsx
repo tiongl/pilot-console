@@ -9,7 +9,7 @@ import { SkillCatalog, InstalledSkillsPanel } from '../pages/ProjectSkillsPage';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
-import { ClippyLogo } from '../components/ClippyLogo';
+import { PilotConsoleLogo } from '../components/PilotConsoleLogo';
 import { useAutomation } from '../lib/automation-context';
 
 const ProjectLayout = lazy(() => import('./ProjectLayout'));
@@ -567,8 +567,8 @@ export default function DashboardLayout() {
       <aside ref={sidebarRef} className="flex flex-col border-r bg-muted/40 px-3 py-4 shrink-0" style={{ width: sidebarWidth }}>
         <div className="mb-2 px-3">
           <div className="flex items-center gap-2">
-            <ClippyLogo className="h-10 w-10" />
-            <h1 className="text-lg font-bold flex-1">Clippy</h1>
+            <PilotConsoleLogo className="h-10 w-10" />
+            <h1 className="text-lg font-bold flex-1 tracking-tight leading-tight">Pilot Console</h1>
             <div className="relative shrink-0">
               <button
                 onClick={() => setShowLayoutMenu(v => !v)}

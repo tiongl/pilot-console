@@ -1,13 +1,13 @@
-# Clippy
+# Pilot Console
 
 A GitHub Copilot CLI session manager with a web dashboard.
 
 ## Features
-![Clippy features](screenshot.png "Features")
+![pilot-console features](screenshot.png "Features")
 
 ## Prerequisites
 
-- **Node.js** ≥ 18
+- **Node.js** ≥ 20
 - **npm** ≥ 9
 - **Git**
 - **GitHub CLI** (`gh`) — required for Copilot CLI sessions ([install](https://cli.github.com/))
@@ -22,7 +22,7 @@ A GitHub Copilot CLI session manager with a web dashboard.
 **One-liner** (install or update):
 
 ```bash
-cd ~/.clippy/app 2>/dev/null && git pull --ff-only || gh repo clone tionglee_microsoft/clippy ~/.clippy/app && cd ~/.clippy/app && npm install && npm link
+cd ~/.pilot-console/app 2>/dev/null && git pull --ff-only || gh repo clone tiongl/clippy ~/.pilot-console/app && cd ~/.pilot-console/app && npm install && npm link
 ```
 
 ### Windows
@@ -30,7 +30,7 @@ cd ~/.clippy/app 2>/dev/null && git pull --ff-only || gh repo clone tionglee_mic
 **One-liner** (PowerShell, install or update):
 
 ```powershell
-if (Test-Path $HOME\.clippy\app) { cd $HOME\.clippy\app; git pull --ff-only } else { gh repo clone tionglee_microsoft/clippy $HOME\.clippy\app; cd $HOME\.clippy\app }; npm install; npm link
+if (Test-Path $HOME\.pilot-console\app) { cd $HOME\.pilot-console\app; git pull --ff-only } else { gh repo clone tiongl/clippy $HOME\.pilot-console\app; cd $HOME\.pilot-console\app }; npm install; npm link
 ```
 
 **Installer script** (from a local clone, handles re-installs):
@@ -46,16 +46,16 @@ if (Test-Path $HOME\.clippy\app) { cd $HOME\.clippy\app; git pull --ff-only } el
 ## Usage
 
 ```bash
-clippy
+pilot-console
 ```
 
 This starts the web dashboard at [http://localhost:3001](http://localhost:3001).
 
 On first launch a default admin account is created — check the terminal output for credentials.
 
-> **Important:** Clippy runs a **background daemon** process that manages terminal sessions.
+> **Important:** Pilot Console runs a **background daemon** process that manages terminal sessions.
 > The daemon keeps running even if you navigate away from the browser.
-> To fully shut down Clippy, **close the terminal window** where you ran the `clippy` command (or press `Ctrl+C` in that terminal).
+> To fully shut down Pilot Console, **close the terminal window** where you ran the `pilot-console` command (or press `Ctrl+C` in that terminal).
 
 ## Development
 

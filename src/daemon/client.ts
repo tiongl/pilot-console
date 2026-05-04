@@ -1,5 +1,5 @@
 /**
- * Client for the Clippy session daemon.
+ * Client for the pilot-console session daemon.
  *
  * Provides an async API for creating/managing PTY sessions that are owned
  * by the daemon process. The client auto-starts the daemon if it isn't

@@ -1,6 +1,39 @@
 {
-  "name": "clippy",
+  "name": "pilot-console",
   "version": "0.2.0",
+  "description": "A GitHub Copilot CLI session manager with a web dashboard.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tiongl/clippy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tiongl/clippy/issues"
+  },
+  "homepage": "https://github.com/tiongl/clippy#readme",
+  "keywords": [
+    "github-copilot",
+    "copilot-cli",
+    "dashboard",
+    "terminal",
+    "automation"
+  ],
+  "engines": {
+    "node": ">=20",
+    "npm": ">=9"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "public/pilot-console-logo.svg",
+    "src/",
+    "!src/test/",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "dev": "concurrently -n server,client \"npx tsx --watch src/server/index.ts\" \"npx vite\"",
     "dev:server": "npx tsx --watch src/server/index.ts",
@@ -9,11 +42,13 @@
     "build": "npx vite build",
     "start": "cross-env NODE_ENV=production npx tsx src/server/index.ts",
     "lint": "eslint",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
   },
   "bin": {
-    "clippy": "./bin/clippy.js"
+    "pilot-console": "./bin/pilot-console.js"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",
@@ -49,6 +84,7 @@
     "node-pty": "^1.1.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.4",
     "@tailwindcss/postcss": "^4",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
@@ -65,9 +101,12 @@
     "concurrently": "^9.2.1",
     "cross-env": "^10.1.0",
     "eslint": "^9",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.6.0",
     "happy-dom": "^20.9.0",
     "jsdom": "^27.0.1",
     "tailwindcss": "^4",
+    "typescript-eslint": "^8.49.0",
     "vite": "^6.4.2",
     "vitest": "^4.1.5"
   }

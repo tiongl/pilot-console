@@ -24,7 +24,7 @@ import { getNextRunTime } from '../scheduler';
 import { executeReport, getRunningReportOutput, killRunningReport, getRunningReportForSchedule, getReportFilePath } from '../report-runner';
 
 const router = Router();
-const REPORTS_DIR = path.join(require('os').homedir(), '.clippy', 'reports');
+const REPORTS_DIR = path.join(require('os').homedir(), '.pilot-console', 'reports');
 
 router.use(requireAuth);
 
@@ -120,7 +120,7 @@ router.get('/schedules/export', (_req, res) => {
     maxRuntimeMs: s.maxRuntimeMs,
     maxRunsRetained: s.maxRunsRetained,
   }));
-  res.setHeader('Content-Disposition', 'attachment; filename="clippy-automations.json"');
+  res.setHeader('Content-Disposition', 'attachment; filename="pilot-console-automations.json"');
   res.json({ version: 1, schedules: exportData });
 });
 
@@ -186,7 +186,7 @@ router.get('/schedules/:id/export', (req, res) => {
     maxRunsRetained: schedule.maxRunsRetained,
   };
   const safeName = schedule.name.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
-  res.setHeader('Content-Disposition', `attachment; filename="clippy-automation-${safeName}.json"`);
+  res.setHeader('Content-Disposition', `attachment; filename="pilot-console-automation-${safeName}.json"`);
   res.json({ version: 1, schedules: [exportData] });
 });
 

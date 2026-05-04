@@ -7,7 +7,7 @@ const os = require('os');
 const pkgDir = path.resolve(__dirname, '..');
 
 // Ensure the config directory exists
-const configDir = path.join(os.homedir(), '.clippy');
+const configDir = path.join(os.homedir(), '.pilot-console');
 fs.mkdirSync(configDir, { recursive: true });
 
 // Check if we have a production client build

@@ -74,7 +74,7 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
   };
 
   const handleDelete = async () => {
-    if (!confirm('Delete this project from Clippy? Your git repository will not be affected.')) return;
+    if (!confirm('Delete this project from Pilot Console? Your git repository will not be affected.')) return;
     await fetch(`/api/projects/${projectId}`, { method: 'DELETE' });
     navigate('/');
   };

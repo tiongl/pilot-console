@@ -2,14 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import UserTable from '../components/admin/UserTable';
 import { Clock, Users } from 'lucide-react';
-
-interface User {
-  id: string;
-  githubLogin: string;
-  displayName: string | null;
-  role: string;
-  createdAt: string;
-}
+import type { User } from '../types';
 
 export default function AdminPage() {
   const [users, setUsers] = useState<User[]>([]);

@@ -146,7 +146,9 @@ describe('Schedule store', () => {
         exit_code INTEGER,
         was_truncated INTEGER NOT NULL DEFAULT 0,
         error TEXT,
-        prompt_snapshot TEXT
+        prompt_snapshot TEXT,
+        daemon_session_id TEXT,
+        read INTEGER NOT NULL DEFAULT 0
       );
     `);
 

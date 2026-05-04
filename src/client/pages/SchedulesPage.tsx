@@ -257,7 +257,7 @@ export default function SchedulesPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'clippy-automations.json';
+      a.download = 'pilot-console-automations.json';
       a.click();
       URL.revokeObjectURL(url);
     } catch {}
@@ -272,7 +272,7 @@ export default function SchedulesPage() {
       const a = document.createElement('a');
       a.href = url;
       const safeName = name.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
-      a.download = `clippy-automation-${safeName}.json`;
+      a.download = `pilot-console-automation-${safeName}.json`;
       a.click();
       URL.revokeObjectURL(url);
     } catch {}

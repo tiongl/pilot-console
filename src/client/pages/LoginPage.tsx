@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router';
 import { useAuth } from '../lib/auth-context';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
-import { ClippyLogo } from '../components/ClippyLogo';
+import { PilotConsoleLogo } from '../components/PilotConsoleLogo';
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -33,8 +33,8 @@ export default function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-background">
       <Card className="w-[380px]">
         <CardHeader className="space-y-1 text-center">
-          <ClippyLogo className="h-16 w-16 mx-auto mb-2" />
-          <CardTitle className="text-2xl font-bold">Clippy</CardTitle>
+          <PilotConsoleLogo className="h-16 w-16 mx-auto mb-2" />
+          <CardTitle className="text-2xl font-bold tracking-tight">Pilot Console</CardTitle>
           <CardDescription>
             Sign in using your local GitHub CLI session
           </CardDescription>

@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { html } from 'diff2html';
+import { ColorSchemeType } from 'diff2html/lib-esm/types';
 import 'diff2html/bundles/css/diff2html.min.css';
 import { Columns2, AlignJustify } from 'lucide-react';
 
@@ -22,7 +23,7 @@ export default function DiffViewer({ diff, defaultMode = 'line-by-line', showTog
       outputFormat: mode,
       drawFileList: false,
       matching: 'lines',
-      colorScheme: 'auto',
+      colorScheme: ColorSchemeType.AUTO,
     });
   }, [diff, mode]);
 

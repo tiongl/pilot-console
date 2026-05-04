@@ -1,12 +1,8 @@
 import { useEffect, useState } from 'react';
 import ActiveSessionsTable from '../components/admin/ActiveSessionsTable';
+import type { SessionWithUser } from '../types';
 
-interface SessionInfo {
-  id: string;
-  userId: string;
-  projectId: string | null;
-  startedAt: string;
-  endedAt: string | null;
+interface SessionInfo extends SessionWithUser {
   isActive: boolean;
 }
 
