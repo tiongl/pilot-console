@@ -21,10 +21,8 @@ export default function ActiveSessionsTable({ sessions }: Props) {
 
   async function terminateSession(sessionId: string) {
     setTerminating(sessionId);
-    const res = await fetch('/api/admin/sessions', {
+    const res = await fetch(`/api/admin/sessions/${sessionId}`, {
       method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId }),
     });
     setTerminating(null);
     if (res.ok) {

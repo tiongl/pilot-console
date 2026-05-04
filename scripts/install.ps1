@@ -1,14 +1,14 @@
 #!/usr/bin/env pwsh
-# Clippy installer for Windows
+# Pilot Console installer for Windows
 # Usage: .\scripts\install.ps1  (from a local clone)
 #   or:  pwsh -File path\to\install.ps1
 
 $ErrorActionPreference = "Stop"
 
-$installDir = Join-Path $env:USERPROFILE ".clippy" "app"
-$repoUrl = "https://github.com/tionglee_microsoft/clippy.git"
+$installDir = Join-Path $env:USERPROFILE ".pilot-console" "app"
+$repoUrl = "https://github.com/tiongl/clippy.git"
 
-Write-Host "`n=== Clippy Installer ===" -ForegroundColor Cyan
+Write-Host "`n=== Pilot Console Installer ===" -ForegroundColor Cyan
 
 # Check prerequisites
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
@@ -28,11 +28,11 @@ if (Test-Path $installDir) {
     Write-Host "Updating existing installation..." -ForegroundColor Yellow
     Push-Location $installDir
     # Remove stale global link before updating
-    npm unlink -g clippy 2>$null
+    npm unlink -g pilot-console 2>$null
     git pull --ff-only
     Pop-Location
 } else {
-    Write-Host "Cloning clippy..." -ForegroundColor Yellow
+    Write-Host "Cloning pilot-console..." -ForegroundColor Yellow
     New-Item -ItemType Directory -Force -Path (Split-Path $installDir) | Out-Null
     git clone $repoUrl $installDir
 }
@@ -48,7 +48,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Create global bin link
-Write-Host "Linking 'clippy' command globally..." -ForegroundColor Yellow
+Write-Host "Linking 'pilot-console' command globally..." -ForegroundColor Yellow
 npm link --no-audit --no-fund
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Error: npm link failed" -ForegroundColor Red
@@ -58,13 +58,13 @@ if ($LASTEXITCODE -ne 0) {
 Pop-Location
 
 # Verify
-$clippyPath = (Get-Command clippy -ErrorAction SilentlyContinue).Source
-if ($clippyPath) {
+$pilot-consolePath = (Get-Command pilot-console -ErrorAction SilentlyContinue).Source
+if ($pilot-consolePath) {
     Write-Host "`nInstalled successfully!" -ForegroundColor Green
-    Write-Host "  Command: clippy" -ForegroundColor Gray
+    Write-Host "  Command: pilot-console" -ForegroundColor Gray
     Write-Host "  Location: $installDir" -ForegroundColor Gray
-    Write-Host "`nRun 'clippy' to start." -ForegroundColor Cyan
+    Write-Host "`nRun 'pilot-console' to start." -ForegroundColor Cyan
 } else {
-    Write-Host "`nWarning: 'clippy' command not found in PATH." -ForegroundColor Yellow
+    Write-Host "`nWarning: 'pilot-console' command not found in PATH." -ForegroundColor Yellow
     Write-Host "You may need to restart your terminal." -ForegroundColor Yellow
 }

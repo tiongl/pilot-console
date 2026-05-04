@@ -3,7 +3,7 @@ import path from 'path';
 import os from 'os';
 import fs from 'fs';
 
-const DB_DIR = path.join(os.homedir(), '.clippy');
+const DB_DIR = path.join(os.homedir(), '.pilot-console');
 const DB_PATH = path.join(DB_DIR, 'app.db');
 
 let _db: Database.Database | null = null;

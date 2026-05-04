@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="bg2" x1="4" y1="4" x2="124" y2="124" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0a0a0a"/>
+      <stop offset="100%" stop-color="#0f1117"/>
+    </linearGradient>
+    <filter id="glow2" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feColorMatrix in="b" type="matrix" values="0 0 0 0 0.133 0 0 0 0 0.827 0 0 0 0 0.933 0 0 0 0.8 0" result="g"/>
+      <feMerge><feMergeNode in="g"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <style>
+      @keyframes cursor-blink {
+        0%, 48% { opacity: 1; }
+        56%, 90% { opacity: 0; }
+        100% { opacity: 1; }
+      }
+      .pc-cursor { animation: cursor-blink 1s ease-in-out infinite; }
+    </style>
+  </defs>
+
+  <!-- Background -->
+  <rect x="4" y="4" width="120" height="120" rx="20" fill="url(#bg2)"/>
+
+  <!-- Subtle grid lines -->
+  <line x1="4" y1="32" x2="124" y2="32" stroke="#22d3ee" stroke-width="1" opacity="0.6"/>
+  <line x1="4" y1="64" x2="124" y2="64" stroke="#22d3ee" stroke-width="1" opacity="0.6"/>
+  <line x1="4" y1="96" x2="124" y2="96" stroke="#22d3ee" stroke-width="1" opacity="0.6"/>
+  <line x1="32" y1="4" x2="32" y2="124" stroke="#22d3ee" stroke-width="1" opacity="0.6"/>
+  <line x1="64" y1="4" x2="64" y2="124" stroke="#22d3ee" stroke-width="1" opacity="0.6"/>
+  <line x1="96" y1="4" x2="96" y2="124" stroke="#22d3ee" stroke-width="1" opacity="0.6"/>
+
+  <!-- Outer ring -->
+  <rect x="2" y="2" width="124" height="124" rx="20" stroke="#22d3ee" stroke-width="1.5" opacity="0.3"/>
+
+  <!-- Large prompt symbol: > -->
+  <path d="M22 44 L58 64 L22 84" stroke="#22d3ee" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow2)"/>
+
+  <!-- Underscore -->
+  <rect class="pc-cursor" x="68" y="76" width="38" height="9" rx="4.5" fill="#22d3ee" filter="url(#glow2)"/>
+
+  <!-- Corner accent marks -->
+  <path d="M18 24 L18 12 L30 12" stroke="#22d3ee" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
+  <path d="M110 24 L110 12 L98 12" stroke="#22d3ee" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
+  <path d="M18 104 L18 116 L30 116" stroke="#22d3ee" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
+  <path d="M110 104 L110 116 L98 116" stroke="#22d3ee" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
+</svg>

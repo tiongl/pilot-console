@@ -68,20 +68,22 @@ export function createSchedule(data: {
   maxRunsRetained?: number;
   createdBy?: string;
   nextRunAt?: string;
+  enabled?: boolean;
 }): ReportSchedule {
   const db = getDb();
   const id = uuidv4();
   const now = new Date().toISOString();
 
   db.prepare(`
-    INSERT INTO report_schedules (id, name, prompt, cron_expression, renderer_type, cwd, max_runtime_ms, max_runs_retained, created_by, next_run_at, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO report_schedules (id, name, prompt, cron_expression, renderer_type, enabled, cwd, max_runtime_ms, max_runs_retained, created_by, next_run_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     data.name,
     data.prompt,
     data.cronExpression,
     data.rendererType ?? 'plaintext',
+    data.enabled === false ? 0 : 1,
     data.cwd ?? null,
     data.maxRuntimeMs ?? 300000,
     data.maxRunsRetained ?? 50,

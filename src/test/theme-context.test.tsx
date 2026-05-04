@@ -44,7 +44,7 @@ describe('ThemeProvider', () => {
     );
 
     await user.click(screen.getByTestId('set-dark'));
-    expect(localStorage.getItem('clippy-ui-theme')).toBe('dark');
+    expect(localStorage.getItem('pilot-console-ui-theme')).toBe('dark');
     expect(screen.getByTestId('theme').textContent).toBe('dark');
   });
 
@@ -103,7 +103,7 @@ describe('ThemeProvider', () => {
   });
 
   it('reads initial theme from localStorage', () => {
-    localStorage.setItem('clippy-ui-theme', 'catppuccin');
+    localStorage.setItem('pilot-console-ui-theme', 'catppuccin');
     render(
       <ThemeProvider>
         <ThemeDisplay />

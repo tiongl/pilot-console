@@ -177,10 +177,10 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
   const [viewer, setViewer] = useState<FileViewerState | null>(null);
   const [copied, setCopied] = useState(false);
   const [renderMarkdown, setRenderMarkdown] = useState(true);
-  const [viewerFontSize, setViewerFontSize] = useState(() => parseInt(localStorage.getItem('clippy-viewer-fontsize') || '12'));
-  const [viewerTheme, setViewerTheme] = useState<ViewerThemeName>(() => (localStorage.getItem('clippy-viewer-theme') as ViewerThemeName) || 'VS Dark');
-  const [showLines, setShowLines] = useState(() => localStorage.getItem('clippy-viewer-lines') !== 'false');
-  const [wrapLines, setWrapLines] = useState(() => localStorage.getItem('clippy-viewer-wrap') !== 'false');
+  const [viewerFontSize, setViewerFontSize] = useState(() => parseInt(localStorage.getItem('pilot-console-viewer-fontsize') || '12'));
+  const [viewerTheme, setViewerTheme] = useState<ViewerThemeName>(() => (localStorage.getItem('pilot-console-viewer-theme') as ViewerThemeName) || 'VS Dark');
+  const [showLines, setShowLines] = useState(() => localStorage.getItem('pilot-console-viewer-lines') !== 'false');
+  const [wrapLines, setWrapLines] = useState(() => localStorage.getItem('pilot-console-viewer-wrap') !== 'false');
 
   // Editing state
   const [isEditing, setIsEditing] = useState(false);
@@ -193,11 +193,11 @@ export default function FileExplorer({ projectId, onClose, embedded }: { project
   const isDirty = isEditing && editContent !== originalContent;
 
   const updateFontSize = useCallback((delta: number) => {
-    setViewerFontSize(s => { const n = Math.max(10, Math.min(24, s + delta)); localStorage.setItem('clippy-viewer-fontsize', String(n)); return n; });
+    setViewerFontSize(s => { const n = Math.max(10, Math.min(24, s + delta)); localStorage.setItem('pilot-console-viewer-fontsize', String(n)); return n; });
   }, []);
-  const updateTheme = useCallback((t: ViewerThemeName) => { setViewerTheme(t); localStorage.setItem('clippy-viewer-theme', t); }, []);
-  const toggleLines = useCallback(() => { setShowLines(v => { localStorage.setItem('clippy-viewer-lines', String(!v)); return !v; }); }, []);
-  const toggleWrap = useCallback(() => { setWrapLines(v => { localStorage.setItem('clippy-viewer-wrap', String(!v)); return !v; }); }, []);
+  const updateTheme = useCallback((t: ViewerThemeName) => { setViewerTheme(t); localStorage.setItem('pilot-console-viewer-theme', t); }, []);
+  const toggleLines = useCallback(() => { setShowLines(v => { localStorage.setItem('pilot-console-viewer-lines', String(!v)); return !v; }); }, []);
+  const toggleWrap = useCallback(() => { setWrapLines(v => { localStorage.setItem('pilot-console-viewer-wrap', String(!v)); return !v; }); }, []);
 
   const activeThemeBg = VIEWER_THEMES[viewerTheme].bg;
   const activeThemeText = VIEWER_THEMES[viewerTheme].text;

@@ -1,8 +1,9 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
+import type { ViteUserConfigExport as VitestUserConfig } from 'vitest/config';
 
-export default defineConfig({
+const config: VitestUserConfig = {
   plugins: [react()],
   root: 'src/client',
   publicDir: '../../public',
@@ -31,4 +32,6 @@ export default defineConfig({
     root: '.',
     include: ['src/**/*.test.{ts,tsx}', 'hooks/**/*.test.{ts,tsx}', 'lib/**/*.test.{ts,tsx}'],
   },
-});
+};
+
+export default defineConfig(config);

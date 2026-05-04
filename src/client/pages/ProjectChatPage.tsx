@@ -143,8 +143,8 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp }
   const { id: routeProjectId } = useParams<{ id: string }>();
   const projectId = projectIdProp || routeProjectId;
 
-  const defaultTheme = localStorage.getItem('clippy-theme') || 'Catppuccin';
-  const defaultFont = localStorage.getItem('clippy-font') || TERMINAL_FONTS[0].family;
+  const defaultTheme = localStorage.getItem('pilot-console-theme') || 'Catppuccin';
+  const defaultFont = localStorage.getItem('pilot-console-font') || TERMINAL_FONTS[0].family;
 
   // Restore persisted tab state for this project, or create fresh
   const [tabs, setTabs] = useState<TabMeta[]>(() => {
@@ -267,12 +267,12 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp }
 
   const setActiveTheme = useCallback((name: string) => {
     setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, themeName: name } : t));
-    localStorage.setItem('clippy-theme', name);
+    localStorage.setItem('pilot-console-theme', name);
   }, [activeTabId]);
 
   const setActiveFont = useCallback((family: string) => {
     setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, fontFamily: family } : t));
-    localStorage.setItem('clippy-font', family);
+    localStorage.setItem('pilot-console-font', family);
   }, [activeTabId]);
 
   if (!projectId) return <div className="p-6 text-muted-foreground">Project not found</div>;

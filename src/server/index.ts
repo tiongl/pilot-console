@@ -860,7 +860,7 @@ app.post('/api/daemon/restart', requireAuth, async (req, res) => {
   const os = await import('os');
 
   // Kill existing daemon by PID
-  const pidPath = path.join(os.homedir(), '.clippy', 'daemon.pid');
+  const pidPath = path.join(os.homedir(), '.pilot-console', 'daemon.pid');
   try {
     if (fs.existsSync(pidPath)) {
       const daemonPid = parseInt(fs.readFileSync(pidPath, 'utf-8').trim(), 10);
@@ -872,8 +872,8 @@ app.post('/api/daemon/restart', requireAuth, async (req, res) => {
   } catch { /* ok */ }
 
   // Clean up secret and lock so the new daemon generates fresh ones
-  const secretPath = path.join(os.homedir(), '.clippy', 'daemon.secret');
-  const lockPath = path.join(os.homedir(), '.clippy', 'daemon.lock');
+  const secretPath = path.join(os.homedir(), '.pilot-console', 'daemon.secret');
+  const lockPath = path.join(os.homedir(), '.pilot-console', 'daemon.lock');
   try { fs.unlinkSync(secretPath); } catch { /* ok */ }
   try { fs.unlinkSync(lockPath); } catch { /* ok */ }
 

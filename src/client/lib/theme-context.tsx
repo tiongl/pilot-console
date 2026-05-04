@@ -22,7 +22,7 @@ interface ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
-const STORAGE_KEY = 'clippy-ui-theme';
+const STORAGE_KEY = 'pilot-console-ui-theme';
 
 function getSystemDark(): boolean {
   return window.matchMedia('(prefers-color-scheme: dark)').matches;
