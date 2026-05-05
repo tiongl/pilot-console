@@ -122,9 +122,11 @@ export function listCopilotSessionsForProject(repoPath: string, limit = 50, sear
     const results: CopilotSessionSummary[] = [];
     for (const row of rows) {
       const cwd = ((row.cwd as string) ?? '').replace(/\\/g, '/');
-      const match = isWindows
-        ? cwd.toLowerCase().startsWith(normalized.toLowerCase())
-        : cwd.startsWith(normalized);
+      // Require exact match or a path-separator boundary to avoid prefix
+      // collisions (e.g. "pilot-console" matching "pilot-console-wt-worktree1")
+      const cwdCmp = isWindows ? cwd.toLowerCase() : cwd;
+      const normCmp = isWindows ? normalized.toLowerCase() : normalized;
+      const match = cwdCmp === normCmp || cwdCmp.startsWith(normCmp + '/');
       if (match) {
         const firstAt = row.first_turn_at as string | null;
         const lastAt = row.last_turn_at as string | null;
