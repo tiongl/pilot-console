@@ -68,7 +68,9 @@ export function useCliSocket(options: UseCliSocketOptions = {}) {
       let msg: WsServerMessage;
       try { msg = JSON.parse(event.data as string) as WsServerMessage; } catch { return; }
       const opts = optionsRef.current;
-      if (msg.type === 'output') opts.onOutput?.(msg.data);
+      if (msg.type === 'output') {
+        opts.onOutput?.(msg.data);
+      }
       else if (msg.type === 'error') opts.onError?.(msg.data);
       else if (msg.type === 'exit') {
         console.log(`[useCliSocket] exit: code=${msg.code}`);

@@ -34,20 +34,58 @@ interface DaemonSession {
   proc: pty.IPty;
   outputBuffer: string;
   alive: boolean;
+  terminating: boolean; // set before proc.kill() to prevent duplicate native calls
   exitCode: number | null;
   exitedAt: number | null;
   lastOutputAt: number;
   seq: number; // monotonic output sequence counter
   subscribers: Set<net.Socket>;
   meta?: SessionMeta;
+  lastCols: number;
+  lastRows: number;
 }
 
 const sessions = new Map<string, DaemonSession>();
 const EXITED_RETENTION_MS = 5 * 60_000; // keep exited sessions 5 min for reconciliation
 
 // ---------------------------------------------------------------------------
-// Auth
+// Environment sanitization — strip Node.js/npm/tsx vars that leak from the
+// server process and would pollute child CLI processes (e.g. gh copilot).
 // ---------------------------------------------------------------------------
+
+const ENV_STRIP_PREFIXES = ['npm_', 'NPM_'];
+const ENV_STRIP_EXACT = new Set([
+  'COPILOT_LOADER_PID',
+  'TSX_TSCONFIG_PATH',
+  'TS_NODE_PROJECT',
+  'TS_NODE_COMPILER',
+  'NODE_OPTIONS',
+  'NODE_CHANNEL_FD',
+  'NODE_CHANNEL_SERIALIZATION_MODE',
+  // On Windows, TERM is not set in real terminals. node-pty injects it via
+  // the `name` param, but if it leaks into the env it can cause TUI programs
+  // (gh copilot / ink) to take incorrect Unix-style code paths on ConPTY.
+  ...(os.platform() === 'win32' ? ['TERM', 'TERM_PROGRAM', 'TERM_PROGRAM_VERSION'] : []),
+]);
+
+function cleanEnvForChild(): Record<string, string> {
+  const clean: Record<string, string> = {};
+  for (const [key, val] of Object.entries(process.env)) {
+    if (val === undefined) continue;
+    if (ENV_STRIP_EXACT.has(key)) continue;
+    if (ENV_STRIP_PREFIXES.some(p => key.startsWith(p))) continue;
+    clean[key] = val;
+  }
+  return clean;
+}
+
+const IS_WINDOWS = os.platform() === 'win32';
+
+// On Windows, real terminals (Windows Terminal, cmd.exe) do NOT set TERM.
+// node-pty's `name` param injects TERM into the child env, which causes
+// gh copilot's TUI (ink/React) to take Unix-specific rendering code paths
+// that break on ConPTY. Use a blank name on Windows to avoid this.
+const PTY_NAME = IS_WINDOWS ? '' : 'xterm-256color';
 
 const secret = crypto.randomBytes(32).toString('hex');
 const daemonId = crypto.randomUUID();
@@ -98,9 +136,11 @@ function setupClient(socket: net.Socket) {
 }
 
 function send(socket: net.Socket, msg: DaemonResponse) {
-  if (!socket.destroyed) {
-    socket.write(encodeLine(msg));
-  }
+  try {
+    if (!socket.destroyed) {
+      socket.write(encodeLine(msg));
+    }
+  } catch { /* socket write failed — client gone */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -150,11 +190,11 @@ function handleAuth(socket: net.Socket, cmd: DaemonCommand & { cmd: 'auth' }) {
 function handleCreate(socket: net.Socket, cmd: DaemonCommand & { cmd: 'create' }) {
   try {
     const proc = pty.spawn(cmd.shell, cmd.args, {
-      name: 'xterm-256color',
+      name: PTY_NAME,
       cols: cmd.cols,
       rows: cmd.rows,
       cwd: cmd.cwd,
-      env: { ...process.env } as Record<string, string>,
+      env: cleanEnvForChild(),
     });
 
     const session: DaemonSession = {
@@ -162,12 +202,15 @@ function handleCreate(socket: net.Socket, cmd: DaemonCommand & { cmd: 'create' }
       proc,
       outputBuffer: '',
       alive: true,
+      terminating: false,
       exitCode: null,
       exitedAt: null,
       lastOutputAt: 0,
       seq: 0,
       subscribers: new Set(),
       meta: cmd.meta,
+      lastCols: cmd.cols,
+      lastRows: cmd.rows,
     };
 
     proc.onData((data: string) => {
@@ -180,7 +223,7 @@ function handleCreate(socket: net.Socket, cmd: DaemonCommand & { cmd: 'create' }
       const msg: DaemonResponse = {
         type: 'output',
         sessionId: session.sessionId,
-        data,
+        data: filtered,
         seq: session.seq,
       };
       for (const sub of session.subscribers) {
@@ -220,7 +263,7 @@ function handleCreate(socket: net.Socket, cmd: DaemonCommand & { cmd: 'create' }
 
 function handleWrite(socket: net.Socket, cmd: DaemonCommand & { cmd: 'write' }) {
   const session = sessions.get(cmd.sessionId);
-  if (!session || !session.alive) {
+  if (!session || !session.alive || session.terminating) {
     send(socket, { type: 'error', reqId: cmd.reqId, error: 'Session not found or dead' });
     return;
   }
@@ -230,10 +273,17 @@ function handleWrite(socket: net.Socket, cmd: DaemonCommand & { cmd: 'write' }) 
 
 function handleResize(socket: net.Socket, cmd: DaemonCommand & { cmd: 'resize' }) {
   const session = sessions.get(cmd.sessionId);
-  if (!session || !session.alive) {
+  if (!session || !session.alive || session.terminating) {
     send(socket, { type: 'error', reqId: cmd.reqId, error: 'Session not found or dead' });
     return;
   }
+  // Skip no-op resizes — redundant ConPTY resize events can crash TUI programs
+  if (cmd.cols === session.lastCols && cmd.rows === session.lastRows) {
+    send(socket, { type: 'ok', reqId: cmd.reqId });
+    return;
+  }
+  session.lastCols = cmd.cols;
+  session.lastRows = cmd.rows;
   session.proc.resize(cmd.cols, cmd.rows);
   send(socket, { type: 'ok', reqId: cmd.reqId });
 }
@@ -244,6 +294,12 @@ function handleKill(socket: net.Socket, cmd: DaemonCommand & { cmd: 'kill' }) {
     send(socket, { type: 'error', reqId: cmd.reqId, error: 'Session not found' });
     return;
   }
+  // Already dead or being terminated — no-op to avoid duplicate native calls
+  if (!session.alive || session.terminating) {
+    send(socket, { type: 'ok', reqId: cmd.reqId });
+    return;
+  }
+  session.terminating = true;
   try {
     session.proc.kill();
   } catch { /* already dead */ }
@@ -323,11 +379,11 @@ function handleRunOnce(socket: net.Socket, cmd: DaemonCommand & { cmd: 'runOnce'
 
   try {
     const proc = pty.spawn(cmd.shell, cmd.args, {
-      name: 'xterm-256color',
+      name: PTY_NAME,
       cols: 120,
       rows: 40,
       cwd: cmd.cwd,
-      env: { ...process.env } as Record<string, string>,
+      env: cleanEnvForChild(),
     });
 
     console.log(`[daemon] runOnce: spawned PID ${proc.pid}`);
@@ -571,6 +627,15 @@ function start() {
 
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
+
+  // Log-and-exit on unexpected errors to prevent silent daemon death
+  process.on('uncaughtException', (err) => {
+    console.error('[daemon] Uncaught exception:', err);
+    shutdown();
+  });
+  process.on('unhandledRejection', (reason) => {
+    console.error('[daemon] Unhandled rejection:', reason);
+  });
 }
 
 start();
