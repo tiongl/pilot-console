@@ -77,6 +77,7 @@ function TerminalTab({
     onExit: (code) => {
       console.log(`[TerminalTab] onExit: code=${code}`);
       writeToTerm(`\r\n\x1b[33m[Process exited with code ${code}]\x1b[0m\r\n`);
+      onStatusChange('exited');
     },
     onReady: (sid) => {
       console.log(`[TerminalTab] onReady: sessionId=${sid}`);
@@ -300,7 +301,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp }
           {tabs.map(tab => {
             const isUtilTab = tab.mode === 'git' || tab.mode === 'git-status' || tab.mode === 'files';
             const st = tabStatuses[tab.id] || 'closed';
-            const stColor = { open: 'bg-green-500', connecting: 'bg-yellow-500', closed: 'bg-gray-400', error: 'bg-red-500' }[st] ?? 'bg-gray-400';
+            const stColor = { open: 'bg-green-500', connecting: 'bg-yellow-500', closed: 'bg-gray-400', error: 'bg-red-500', exited: 'bg-red-500' }[st] ?? 'bg-gray-400';
             const tabIcon = tab.mode === 'powershell'
               ? <span className="h-3 w-3 text-[9px] font-bold leading-3 text-center shrink-0">PS</span>
               : tab.mode === 'shell' ? <Terminal className="h-3 w-3 shrink-0" />

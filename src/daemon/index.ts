@@ -43,6 +43,7 @@ interface DaemonSession {
   meta?: SessionMeta;
   lastCols: number;
   lastRows: number;
+  filter: OutputFilter;
 }
 
 const sessions = new Map<string, DaemonSession>();
@@ -97,6 +98,106 @@ function writeSecret() {
 }
 
 const authenticatedClients = new WeakSet<net.Socket>();
+
+// ---------------------------------------------------------------------------
+// Output filtering — strip known noisy error lines from PTY output before
+// forwarding to subscribers.
+//
+// PTY output arrives in arbitrary chunks; a single error line often spans
+// multiple onData calls (e.g. ANSI color codes in one chunk, the text in
+// the next).  We therefore buffer incomplete lines per-session and only
+// emit a line once we see its terminating \r\n (or a new line starts).
+// ---------------------------------------------------------------------------
+
+/** Patterns to strip — matched against ANSI-stripped text */
+const NOISY_LINE_PATTERNS = [
+  // gh copilot / ink rendering glitch
+  /TypeError: Cannot read properties of undefined/,
+];
+
+/** Strip all ANSI escape sequences for pattern matching */
+function stripAnsi(s: string): string {
+  return s
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')        // CSI
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC
+    .replace(/\x1b[P_^][^\x1b]*\x1b\\/g, '')        // DCS/APC/PM
+    .replace(/\x1b[()][0-9A-Za-z]/g, '')             // Charset
+    .replace(/\x1b[=>NOcMDEHZ78]/g, '');             // Single-char
+}
+
+/** Check if a line should be suppressed */
+function isNoisyLine(line: string): boolean {
+  const plain = stripAnsi(line);
+  return NOISY_LINE_PATTERNS.some(re => re.test(plain));
+}
+
+/**
+ * Per-session line assembler that handles cross-chunk line splits.
+ * Buffers partial lines and only releases complete lines (after \n).
+ * Noisy complete lines are dropped; everything else passes through verbatim.
+ */
+class OutputFilter {
+  private pending = ''; // partial line from previous chunk
+
+  /**
+   * Feed a raw PTY chunk. Returns the filtered data to forward.
+   * May return '' if everything was noise or still buffered.
+   */
+  filter(data: string): string {
+    // Diagnostic: log any chunk that contains TypeError (raw repr)
+    if (data.includes('TypeError')) {
+      const repr = JSON.stringify(data);
+      console.log(`[daemon-filter] TypeError in raw chunk (${data.length} bytes): ${repr.slice(0, 500)}`);
+      if (this.pending) {
+        console.log(`[daemon-filter]   pending buffer was (${this.pending.length} bytes): ${JSON.stringify(this.pending).slice(0, 300)}`);
+      }
+    }
+
+    const combined = this.pending + data;
+
+    // Also check the assembled buffer — the word may span two chunks
+    if (!data.includes('TypeError') && combined.includes('TypeError')) {
+      console.log(`[daemon-filter] TypeError found after combining with pending buffer (${combined.length} bytes): ${JSON.stringify(combined).slice(0, 500)}`);
+    }
+
+    const lines = combined.split('\n');
+
+    // Last element is the unterminated partial line — keep buffering
+    this.pending = lines.pop()!;
+
+    // If there were no complete lines, everything is still buffered
+    if (lines.length === 0) return '';
+
+    // Filter complete lines
+    const kept: string[] = [];
+    for (const line of lines) {
+      if (isNoisyLine(line)) {
+        console.log(`[daemon-filter] Suppressed noisy line: ${stripAnsi(line).slice(0, 200)}`);
+      } else {
+        kept.push(line);
+      }
+    }
+
+    // Re-assemble: join kept lines with \n, then append the partial line
+    // so the downstream sees exactly the same byte boundaries minus noise
+    let result = kept.join('\n');
+    if (kept.length > 0) result += '\n'; // restore trailing \n from last complete line
+    result += this.pending;
+    this.pending = '';
+    return result;
+  }
+
+  /** Flush any remaining buffered content (call on session exit) */
+  flush(): string {
+    const leftover = this.pending;
+    this.pending = '';
+    if (leftover && isNoisyLine(leftover)) {
+      console.log(`[daemon-filter] Suppressed noisy leftover: ${stripAnsi(leftover).slice(0, 200)}`);
+      return '';
+    }
+    return leftover;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Per-client NDJSON parser
@@ -211,13 +312,16 @@ function handleCreate(socket: net.Socket, cmd: DaemonCommand & { cmd: 'create' }
       meta: cmd.meta,
       lastCols: cmd.cols,
       lastRows: cmd.rows,
+      filter: new OutputFilter(),
     };
 
     proc.onData((data: string) => {
-      session.outputBuffer += data;
+      const filtered = session.filter.filter(data);
+      session.outputBuffer += filtered;
       if (session.outputBuffer.length > MAX_SCROLLBACK) {
         session.outputBuffer = session.outputBuffer.slice(-MAX_SCROLLBACK);
       }
+      if (!filtered) return; // entire chunk was noise or still buffering
       session.lastOutputAt = Date.now();
       session.seq++;
       const msg: DaemonResponse = {
@@ -232,6 +336,22 @@ function handleCreate(socket: net.Socket, cmd: DaemonCommand & { cmd: 'create' }
     });
 
     proc.onExit(({ exitCode }) => {
+      // Flush any remaining buffered output from the filter
+      const leftover = session.filter.flush();
+      if (leftover) {
+        session.outputBuffer += leftover;
+        session.seq++;
+        const outMsg: DaemonResponse = {
+          type: 'output',
+          sessionId: session.sessionId,
+          data: leftover,
+          seq: session.seq,
+        };
+        for (const sub of session.subscribers) {
+          send(sub, outMsg);
+        }
+      }
+
       session.alive = false;
       session.exitCode = exitCode;
       session.exitedAt = Date.now();
@@ -420,21 +540,25 @@ function handleRunOnce(socket: net.Socket, cmd: DaemonCommand & { cmd: 'runOnce'
       }, 500);
     }
 
+    const runOnceFilter = new OutputFilter();
+
     proc.onData((data: string) => {
       if (finished) return;
-      if (output.length + data.length > maxOutput) {
+      const filtered = runOnceFilter.filter(data);
+      if (!filtered) return;
+      if (output.length + filtered.length > maxOutput) {
         const remaining = maxOutput - output.length;
-        if (remaining > 0) output += data.slice(0, remaining);
+        if (remaining > 0) output += filtered.slice(0, remaining);
         wasTruncated = true;
       } else {
-        output += data;
+        output += filtered;
       }
       // Stream output chunks to caller
       send(socket, {
         type: 'runOnceOutput',
         reqId: cmd.reqId,
         sessionId: cmd.sessionId,
-        data,
+        data: filtered,
       });
     });
 
