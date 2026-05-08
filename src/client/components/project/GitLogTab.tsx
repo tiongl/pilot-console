@@ -30,6 +30,7 @@ interface CommitDetail {
 
 interface Props {
   projectId: string;
+  worktreeId?: string;
 }
 
 const FILE_STATUS_LABELS: Record<string, { label: string; color: string }> = {
@@ -56,7 +57,7 @@ function relativeTime(dateStr: string): string {
   return `${Math.floor(months / 12)}y ago`;
 }
 
-export default function GitLogTab({ projectId }: Props) {
+export default function GitLogTab({ projectId, worktreeId }: Props) {
   const [commits, setCommits] = useState<Commit[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [page, setPage] = useState(1);
@@ -81,7 +82,8 @@ export default function GitLogTab({ projectId }: Props) {
     if (append) setLoadingMore(true); else setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/projects/${projectId}/git-log?page=${pageNum}&limit=30`);
+      const wtParam = worktreeId ? `&worktreeId=${encodeURIComponent(worktreeId)}` : '';
+      const res = await fetch(`/api/projects/${projectId}/git-log?page=${pageNum}&limit=30${wtParam}`);
       if (res.ok) {
         const data = await res.json();
         setCommits(prev => append ? [...prev, ...data.commits] : data.commits);
@@ -97,7 +99,7 @@ export default function GitLogTab({ projectId }: Props) {
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [projectId]);
+  }, [projectId, worktreeId]);
 
   useEffect(() => { fetchLog(1, false); }, [fetchLog]);
 
@@ -114,7 +116,8 @@ export default function GitLogTab({ projectId }: Props) {
     setDiffContent(null);
     setDetailLoading(true);
     try {
-      const res = await fetch(`/api/projects/${projectId}/git-commit/${hash}`);
+      const wtParam = worktreeId ? `?worktreeId=${encodeURIComponent(worktreeId)}` : '';
+      const res = await fetch(`/api/projects/${projectId}/git-commit/${hash}${wtParam}`);
       if (res.ok) {
         setCommitDetail(await res.json());
       }
@@ -134,7 +137,8 @@ export default function GitLogTab({ projectId }: Props) {
     setDiffFile(filePath);
     setDiffLoading(true);
     try {
-      const res = await fetch(`/api/projects/${projectId}/git-commit/${hash}/diff?file=${encodeURIComponent(filePath)}`);
+      const wtParam = worktreeId ? `&worktreeId=${encodeURIComponent(worktreeId)}` : '';
+      const res = await fetch(`/api/projects/${projectId}/git-commit/${hash}/diff?file=${encodeURIComponent(filePath)}${wtParam}`);
       if (res.ok) {
         const data = await res.json();
         setDiffContent(data.diff);

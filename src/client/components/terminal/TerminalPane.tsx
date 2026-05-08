@@ -40,8 +40,23 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
   const fitRef = useRef<FitAddon | null>(null);
   const onInputRef = useRef(onInput);
   const onResizeRef = useRef(onResize);
+  const lastSentDimsRef = useRef({ cols: 0, rows: 0 });
   onInputRef.current = onInput;
   onResizeRef.current = onResize;
+
+  /** Only notify when dimensions actually changed to avoid flooding the PTY
+   *  with redundant WINDOW_BUFFER_SIZE events that can crash TUI programs. */
+  const notifyResizeIfChanged = useCallback(() => {
+    const term = termRef.current;
+    if (!term) return;
+    const { cols, rows } = term;
+    const last = lastSentDimsRef.current;
+    if (cols !== last.cols || rows !== last.rows) {
+      last.cols = cols;
+      last.rows = rows;
+      onResizeRef.current?.(cols, rows);
+    }
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current || termRef.current) return;
@@ -77,13 +92,17 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
     term.loadAddon(fit);
     term.open(containerRef.current);
 
+    // Track last-sent dimensions so we never send redundant resize events.
+    // Redundant resizes flood the PTY child process with WINDOW_BUFFER_SIZE
+    // events, which can trigger bugs in interactive TUI programs like gh copilot.
+
     // Defer initial fit to ensure the container has been laid out.
     // xterm renders to a canvas, so opening into a zero-sized container
     // leaves it in a broken state where keyboard input doesn't work.
     requestAnimationFrame(() => {
       fit.fit();
       term.focus();
-      onResizeRef.current?.(term.cols, term.rows);
+      notifyResizeIfChanged();
     });
 
     term.onData((data) => onInputRef.current(data));
@@ -99,7 +118,7 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
       },
       fit: () => {
         fit.fit();
-        onResizeRef.current?.(term.cols, term.rows);
+        notifyResizeIfChanged();
       },
       focus: () => term.focus(),
     };
@@ -110,7 +129,7 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
     const safetyRefit = setTimeout(() => {
       fit.fit();
       term.focus();
-      onResizeRef.current?.(term.cols, term.rows);
+      notifyResizeIfChanged();
     }, 150);
 
     // Re-sync dimensions after output bursts settle (debounced 500ms)
@@ -119,7 +138,7 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
       if (resyncTimeout) clearTimeout(resyncTimeout);
       resyncTimeout = setTimeout(() => {
         fit.fit();
-        onResizeRef.current?.(term.cols, term.rows);
+        notifyResizeIfChanged();
       }, 500);
     }
 
@@ -128,7 +147,7 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
       if (resizeTimeout) clearTimeout(resizeTimeout);
       resizeTimeout = setTimeout(() => {
         fit.fit();
-        onResizeRef.current?.(term.cols, term.rows);
+        notifyResizeIfChanged();
       }, 50);
     });
     resizeObserver.observe(containerRef.current);
@@ -156,24 +175,24 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
     if (!termRef.current || !fitRef.current) return;
     termRef.current.options.fontSize = fontSize;
     fitRef.current.fit();
-    onResizeRef.current?.(termRef.current.cols, termRef.current.rows);
-  }, [fontSize]);
+    notifyResizeIfChanged();
+  }, [fontSize, notifyResizeIfChanged]);
 
   // Apply font family changes
   useEffect(() => {
     if (!termRef.current || !fitRef.current) return;
     termRef.current.options.fontFamily = fontFamily || TERMINAL_FONTS[0].family;
     fitRef.current.fit();
-    onResizeRef.current?.(termRef.current.cols, termRef.current.rows);
-  }, [fontFamily]);
+    notifyResizeIfChanged();
+  }, [fontFamily, notifyResizeIfChanged]);
 
   const handleClick = useCallback(() => {
     if (termRef.current && fitRef.current) {
       termRef.current.focus();
       fitRef.current.fit();
-      onResizeRef.current?.(termRef.current.cols, termRef.current.rows);
+      notifyResizeIfChanged();
     }
-  }, []);
+  }, [notifyResizeIfChanged]);
 
   // Auto-focus the terminal when user types and focus isn't in a form element.
   // This recovers from focus loss after clicking tab bar, dropdowns, etc.

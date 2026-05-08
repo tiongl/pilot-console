@@ -289,10 +289,10 @@ app.delete('/api/snippets/:id', (req, res) => {
 
 // --- Git ---
 app.get('/api/projects/:id/git-status', (req, res) => {
-  const project = getProjectById(req.params.id);
-  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const result = getGitCwd(req.params.id, req.query.worktreeId);
+  if ('error' in result) { res.status(result.status).json({ error: result.error }); return; }
   try {
-    const opts = { cwd: project.repoPath, encoding: 'utf-8' as const, timeout: 5000 };
+    const opts = { cwd: result.cwd, encoding: 'utf-8' as const, timeout: 5000 };
     const branch = execSync('git rev-parse --abbrev-ref HEAD', opts).trim();
     const status = execSync('git status --porcelain', opts).trim();
     const diffStat = execSync('git diff --stat', opts).trim();
@@ -308,10 +308,11 @@ app.get('/api/projects/:id/git-status', (req, res) => {
 
 app.get('/api/projects/:id/git-diff', (req, res) => {
   const filePath = req.query.file as string;
-  const project = getProjectById(req.params.id);
-  if (!project || !filePath) { res.status(400).json({ error: 'Missing project or file' }); return; }
+  const result = getGitCwd(req.params.id, req.query.worktreeId);
+  if ('error' in result) { res.status(result.status).json({ error: result.error }); return; }
+  if (!filePath) { res.status(400).json({ error: 'Missing file' }); return; }
   try {
-    const opts = { cwd: project.repoPath, encoding: 'utf-8' as const, timeout: 5000 };
+    const opts = { cwd: result.cwd, encoding: 'utf-8' as const, timeout: 5000 };
     let diff = '';
     try { diff = execSync(`git diff -- "${filePath}"`, opts).trim(); } catch {}
     if (!diff) {
@@ -324,13 +325,13 @@ app.get('/api/projects/:id/git-diff', (req, res) => {
 });
 
 app.get('/api/projects/:id/git-log', (req, res) => {
-  const project = getProjectById(req.params.id);
-  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const result = getGitCwd(req.params.id, req.query.worktreeId);
+  if ('error' in result) { res.status(result.status).json({ error: result.error }); return; }
   const page = Math.max(1, parseInt(req.query.page as string) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 30));
   const skip = (page - 1) * limit;
   try {
-    const opts = { cwd: project.repoPath, encoding: 'utf-8' as const, timeout: 10000, maxBuffer: 2 * 1024 * 1024 };
+    const opts = { cwd: result.cwd, encoding: 'utf-8' as const, timeout: 10000, maxBuffer: 2 * 1024 * 1024 };
     // Use a unique delimiter to parse fields reliably
     const SEP = '<<GCL_SEP>>';
     const END = '<<GCL_END>>';
@@ -353,12 +354,12 @@ app.get('/api/projects/:id/git-log', (req, res) => {
 });
 
 app.get('/api/projects/:id/git-commit/:hash', (req, res) => {
-  const project = getProjectById(req.params.id);
-  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const result = getGitCwd(req.params.id, req.query.worktreeId);
+  if ('error' in result) { res.status(result.status).json({ error: result.error }); return; }
   const hash = req.params.hash.replace(/[^a-fA-F0-9]/g, '');
   if (!hash) { res.status(400).json({ error: 'Invalid hash' }); return; }
   try {
-    const opts = { cwd: project.repoPath, encoding: 'utf-8' as const, timeout: 10000, maxBuffer: 2 * 1024 * 1024 };
+    const opts = { cwd: result.cwd, encoding: 'utf-8' as const, timeout: 10000, maxBuffer: 2 * 1024 * 1024 };
     const SEP = '<<GCL_SEP>>';
     const format = [`%H`, `%h`, `%an`, `%ae`, `%aI`, `%B`].join(SEP);
     const meta = execSync(`git show -s --format="${format}" ${hash}`, opts).trim();
@@ -380,13 +381,13 @@ app.get('/api/projects/:id/git-commit/:hash', (req, res) => {
 });
 
 app.get('/api/projects/:id/git-commit/:hash/diff', (req, res) => {
-  const project = getProjectById(req.params.id);
-  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const result = getGitCwd(req.params.id, req.query.worktreeId);
+  if ('error' in result) { res.status(result.status).json({ error: result.error }); return; }
   const hash = req.params.hash.replace(/[^a-fA-F0-9]/g, '');
   if (!hash) { res.status(400).json({ error: 'Invalid hash' }); return; }
   const filePath = req.query.file as string | undefined;
   try {
-    const opts = { cwd: project.repoPath, encoding: 'utf-8' as const, timeout: 10000, maxBuffer: 5 * 1024 * 1024 };
+    const opts = { cwd: result.cwd, encoding: 'utf-8' as const, timeout: 10000, maxBuffer: 5 * 1024 * 1024 };
     const fileArg = filePath ? ` -- "${filePath}"` : '';
     const diff = execSync(`git show --format="" ${hash}${fileArg}`, opts).trim();
     res.json({ diff: diff || 'No changes' });
@@ -399,6 +400,18 @@ app.get('/api/projects/:id/git-commit/:hash/diff', (req, res) => {
 function isPathInside(root: string, target: string): boolean {
   const relative = path.relative(root, target);
   return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+/** Resolve the git working directory for a project, optionally scoped to a worktree. */
+function getGitCwd(projectId: string, worktreeId: unknown): { cwd: string } | { status: number; error: string } {
+  const project = getProjectById(projectId);
+  if (!project) return { status: 404, error: 'Project not found' };
+  if (typeof worktreeId === 'string' && worktreeId.trim()) {
+    const wt = getWorktreeById(worktreeId);
+    if (!wt || wt.projectId !== projectId) return { status: 404, error: 'Worktree not found' };
+    return { cwd: path.resolve(wt.worktreePath) };
+  }
+  return { cwd: path.resolve(project.repoPath) };
 }
 
 function getFileExplorerRoot(projectId: string, worktreeId: unknown): { root: string } | { status: number; error: string } {
@@ -947,7 +960,7 @@ app.delete('/api/daemon/sessions/:id', requireAuth, async (req, res) => {
   const client = getDaemonClient();
   try {
     await client.killSession(String(req.params.id));
-    endCliSession(String(req.params.id));
+    endCliSession(String(req.params.id), { skipDaemonKill: true });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });

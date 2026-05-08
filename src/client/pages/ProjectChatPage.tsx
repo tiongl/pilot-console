@@ -460,7 +460,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp }
                 zIndex: tab.id === activeTabId ? 2 : 0,
                 display: tab.id === activeTabId ? 'block' : 'none',
               }}>
-                <GitLogTab projectId={projectId} />
+                <GitLogTab projectId={projectId} worktreeId={worktreeId} />
               </div>
             );
           }
@@ -472,7 +472,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp }
                 zIndex: tab.id === activeTabId ? 2 : 0,
                 display: tab.id === activeTabId ? 'block' : 'none',
               }}>
-                <GitPanel projectId={projectId} />
+                <GitPanel projectId={projectId} worktreeId={worktreeId} />
               </div>
             );
           }

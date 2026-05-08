@@ -13,6 +13,7 @@ interface GitFile {
 
 interface Props {
   projectId: string;
+  worktreeId?: string;
 }
 
 const STATUS_LABELS: Record<string, { label: string; color: string }> = {
@@ -25,7 +26,7 @@ const STATUS_LABELS: Record<string, { label: string; color: string }> = {
   'U': { label: 'Unmerged', color: 'text-orange-500' },
 };
 
-export default function GitPanel({ projectId }: Props) {
+export default function GitPanel({ projectId, worktreeId }: Props) {
   const [branch, setBranch] = useState('');
   const [files, setFiles] = useState<GitFile[]>([]);
   const [loading, setLoading] = useState(true);
@@ -37,7 +38,8 @@ export default function GitPanel({ projectId }: Props) {
   const fetchStatus = useCallback(async () => {
     try {
       setError(null);
-      const res = await fetch(`/api/projects/${projectId}/git-status`);
+      const wtParam = worktreeId ? `?worktreeId=${encodeURIComponent(worktreeId)}` : '';
+      const res = await fetch(`/api/projects/${projectId}/git-status${wtParam}`);
       if (res.ok) {
         const data = await res.json();
         setBranch(data.branch);
@@ -51,7 +53,7 @@ export default function GitPanel({ projectId }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, worktreeId]);
 
   useEffect(() => {
     fetchStatus();
@@ -68,7 +70,8 @@ export default function GitPanel({ projectId }: Props) {
     setExpandedFile(filePath);
     setDiffLoading(true);
     try {
-      const res = await fetch(`/api/projects/${projectId}/git-diff?file=${encodeURIComponent(filePath)}`);
+      const wtParam = worktreeId ? `&worktreeId=${encodeURIComponent(worktreeId)}` : '';
+      const res = await fetch(`/api/projects/${projectId}/git-diff?file=${encodeURIComponent(filePath)}${wtParam}`);
       if (res.ok) {
         const data = await res.json();
         setDiff(data.diff);

@@ -255,13 +255,15 @@ export function writeToSession(sessionId: string, data: string): boolean {
   return true;
 }
 
-export function endCliSession(sessionId: string): void {
+export function endCliSession(sessionId: string, opts?: { skipDaemonKill?: boolean }): void {
   const session = activeSessions.get(sessionId);
   if (!session) return;
   getDb()
     .prepare("UPDATE cli_sessions SET ended_at = datetime('now'), output_log = ? WHERE id = ?")
     .run(session.outputBuffer || null, sessionId);
-  getDaemonClient().killSession(sessionId).catch(() => { /* ok */ });
+  if (!opts?.skipDaemonKill) {
+    getDaemonClient().killSession(sessionId).catch(() => { /* ok */ });
+  }
   getDaemonClient().removeListeners(sessionId);
   activeSessions.delete(sessionId);
 }
