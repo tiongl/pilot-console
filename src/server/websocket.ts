@@ -183,7 +183,7 @@ export function setupWebSocketServer(): WebSocketServer {
       } else if (msg.type === 'resize') {
         if (managed && msg.cols && msg.rows) {
           managed.lastResizeAt = Date.now();
-          getDaemonClient().resizeSession(managed.sessionId, msg.cols, msg.rows).catch(() => {});
+          getDaemonClient().resizeSession(managed.sessionId, msg.cols, msg.rows);
         }
       } else if (msg.type === 'ping') {
         send({ type: 'pong' });

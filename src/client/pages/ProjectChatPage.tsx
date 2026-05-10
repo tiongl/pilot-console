@@ -34,7 +34,7 @@ const projectTabStates = new Map<string, ProjectTabState>();
  * Output is written directly to xterm (no React state accumulation).
  */
 function TerminalTab({
-  projectId, worktreeId, fontSize, fontFamily, themeName, active, forceNew, mode, sessionId: initialSessionId, onStatusChange, onKill, onSessionId,
+  projectId, worktreeId, fontSize, fontFamily, themeName, active, forceNew, mode, sessionId: initialSessionId, onStatusChange, onKill, onSessionId, visible = true,
 }: {
   projectId?: string;
   worktreeId?: string;
@@ -48,6 +48,8 @@ function TerminalTab({
   onStatusChange: (status: string) => void;
   onKill: (sessionId: string | null) => void;
   onSessionId?: (sessionId: string) => void;
+  /** Whether this terminal's project is currently visible on screen */
+  visible?: boolean;
 }) {
   const sessionIdRef = useRef<string | null>(initialSessionId ?? null);
   const termApiRef = useRef<TerminalPaneAPI | null>(null);
@@ -124,23 +126,22 @@ function TerminalTab({
     }}>
       <TerminalPane
         onInput={(data) => {
-          console.log(`[TerminalTab] onInput: ${JSON.stringify(data)}, wsState=${state}`);
           send({ type: 'input', data });
         }}
         onResize={(cols, rows) => {
-          console.log(`[TerminalTab] onResize: ${cols}x${rows}`);
           send({ type: 'resize', cols, rows });
         }}
         fontSize={fontSize}
         fontFamily={fontFamily}
         themeName={themeName}
+        visible={visible && active}
         onReady={handleTermReady}
       />
     </div>
   );
 }
 
-export default function ProjectChatPage({ worktreeId, projectId: projectIdProp }: { worktreeId?: string; projectId?: string }) {
+export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, visible = true }: { worktreeId?: string; projectId?: string; visible?: boolean }) {
   const { id: routeProjectId } = useParams<{ id: string }>();
   const projectId = projectIdProp || routeProjectId;
 
@@ -507,6 +508,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp }
               forceNew={tab.mode !== 'cli' || tab.id !== firstTabId.current}
               mode={tab.mode || 'cli'}
               sessionId={tab.sessionId}
+              visible={visible}
               onStatusChange={statusCallbacksRef.current[tab.id]}
               onKill={killCallbacksRef.current[tab.id]}
               onSessionId={(sid) => setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, sessionId: sid } : t))}

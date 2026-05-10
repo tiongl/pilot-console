@@ -103,6 +103,7 @@ const authenticatedClients = new WeakSet<net.Socket>();
 // ---------------------------------------------------------------------------
 
 function setupClient(socket: net.Socket) {
+  socket.setNoDelay(true);
   let buffer = '';
 
   socket.on('data', (chunk) => {

@@ -288,14 +288,42 @@ app.delete('/api/snippets/:id', (req, res) => {
 });
 
 // --- Git ---
+
+/** Check whether the cwd is inside a git repo. */
+function isGitRepo(cwd: string): boolean {
+  try {
+    execSync('git rev-parse --git-dir', { cwd, encoding: 'utf-8', timeout: 3000, stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Check whether the repo has at least one commit. */
+function hasGitCommits(cwd: string): boolean {
+  try {
+    execSync('git rev-parse HEAD', { cwd, encoding: 'utf-8', timeout: 3000, stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 app.get('/api/projects/:id/git-status', (req, res) => {
   const result = getGitCwd(req.params.id, req.query.worktreeId);
   if ('error' in result) { res.status(result.status).json({ error: result.error }); return; }
+  if (!isGitRepo(result.cwd)) { res.json({ branch: null, files: [], diffStat: '', noGit: true }); return; }
   try {
-    const opts = { cwd: result.cwd, encoding: 'utf-8' as const, timeout: 5000 };
-    const branch = execSync('git rev-parse --abbrev-ref HEAD', opts).trim();
+    const opts = { cwd: result.cwd, encoding: 'utf-8' as const, timeout: 5000, stdio: 'pipe' as const };
+    let branch = '(no commits)';
+    if (hasGitCommits(result.cwd)) {
+      branch = execSync('git rev-parse --abbrev-ref HEAD', opts).trim();
+    }
     const status = execSync('git status --porcelain', opts).trim();
-    const diffStat = execSync('git diff --stat', opts).trim();
+    let diffStat = '';
+    if (hasGitCommits(result.cwd)) {
+      try { diffStat = execSync('git diff --stat', opts).trim(); } catch {}
+    }
     const files = status ? status.split('\n').map(line => ({
       status: line.substring(0, 2).trim(),
       path: line.substring(3),
@@ -311,6 +339,7 @@ app.get('/api/projects/:id/git-diff', (req, res) => {
   const result = getGitCwd(req.params.id, req.query.worktreeId);
   if ('error' in result) { res.status(result.status).json({ error: result.error }); return; }
   if (!filePath) { res.status(400).json({ error: 'Missing file' }); return; }
+  if (!isGitRepo(result.cwd)) { res.json({ diff: 'Not a git repository' }); return; }
   try {
     const opts = { cwd: result.cwd, encoding: 'utf-8' as const, timeout: 5000 };
     let diff = '';
@@ -327,6 +356,10 @@ app.get('/api/projects/:id/git-diff', (req, res) => {
 app.get('/api/projects/:id/git-log', (req, res) => {
   const result = getGitCwd(req.params.id, req.query.worktreeId);
   if ('error' in result) { res.status(result.status).json({ error: result.error }); return; }
+  if (!isGitRepo(result.cwd) || !hasGitCommits(result.cwd)) {
+    res.json({ commits: [], hasMore: false, noGit: !isGitRepo(result.cwd) });
+    return;
+  }
   const page = Math.max(1, parseInt(req.query.page as string) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 30));
   const skip = (page - 1) * limit;
@@ -356,6 +389,10 @@ app.get('/api/projects/:id/git-log', (req, res) => {
 app.get('/api/projects/:id/git-commit/:hash', (req, res) => {
   const result = getGitCwd(req.params.id, req.query.worktreeId);
   if ('error' in result) { res.status(result.status).json({ error: result.error }); return; }
+  if (!isGitRepo(result.cwd) || !hasGitCommits(result.cwd)) {
+    res.status(404).json({ error: 'No git history available' });
+    return;
+  }
   const hash = req.params.hash.replace(/[^a-fA-F0-9]/g, '');
   if (!hash) { res.status(400).json({ error: 'Invalid hash' }); return; }
   try {
@@ -383,6 +420,10 @@ app.get('/api/projects/:id/git-commit/:hash', (req, res) => {
 app.get('/api/projects/:id/git-commit/:hash/diff', (req, res) => {
   const result = getGitCwd(req.params.id, req.query.worktreeId);
   if ('error' in result) { res.status(result.status).json({ error: result.error }); return; }
+  if (!isGitRepo(result.cwd) || !hasGitCommits(result.cwd)) {
+    res.status(404).json({ error: 'No git history available' });
+    return;
+  }
   const hash = req.params.hash.replace(/[^a-fA-F0-9]/g, '');
   if (!hash) { res.status(400).json({ error: 'Invalid hash' }); return; }
   const filePath = req.query.file as string | undefined;

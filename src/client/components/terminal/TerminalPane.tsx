@@ -12,6 +12,9 @@ interface Props {
   fontSize?: number;
   fontFamily?: string;
   themeName?: string;
+  /** Whether this terminal is currently visible on screen.
+   *  When false, focus/auto-focus and resize notifications are suppressed. */
+  visible?: boolean;
   onReady?: (api: TerminalPaneAPI) => void;
 }
 
@@ -34,15 +37,17 @@ export const TERMINAL_FONTS = [
 
 export type TerminalFontId = (typeof TERMINAL_FONTS)[number]['id'];
 
-export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFamily, themeName, onReady }: Props) {
+export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFamily, themeName, visible = true, onReady }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const onInputRef = useRef(onInput);
   const onResizeRef = useRef(onResize);
   const lastSentDimsRef = useRef({ cols: 0, rows: 0 });
+  const visibleRef = useRef(visible);
   onInputRef.current = onInput;
   onResizeRef.current = onResize;
+  visibleRef.current = visible;
 
   /** Only notify when dimensions actually changed to avoid flooding the PTY
    *  with redundant WINDOW_BUFFER_SIZE events that can crash TUI programs. */
@@ -96,15 +101,6 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
     // Redundant resizes flood the PTY child process with WINDOW_BUFFER_SIZE
     // events, which can trigger bugs in interactive TUI programs like gh copilot.
 
-    // Defer initial fit to ensure the container has been laid out.
-    // xterm renders to a canvas, so opening into a zero-sized container
-    // leaves it in a broken state where keyboard input doesn't work.
-    requestAnimationFrame(() => {
-      fit.fit();
-      term.focus();
-      notifyResizeIfChanged();
-    });
-
     term.onData((data) => onInputRef.current(data));
 
     termRef.current = term;
@@ -113,8 +109,6 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
     const api: TerminalPaneAPI = {
       write: (data: string) => {
         term.write(data);
-        // After output settles, re-sync dimensions in case they drifted
-        scheduleResync();
       },
       fit: () => {
         fit.fit();
@@ -122,7 +116,18 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
       },
       focus: () => term.focus(),
     };
-    onReady?.(api);
+
+    // Defer initial fit to ensure the container has been laid out.
+    // xterm renders to a canvas, so opening into a zero-sized container
+    // leaves it in a broken state where keyboard input doesn't work.
+    // onReady must fire AFTER fit so callers flushing buffered output
+    // write into a properly-sized terminal (avoids cursor corruption).
+    requestAnimationFrame(() => {
+      fit.fit();
+      term.focus();
+      notifyResizeIfChanged();
+      onReady?.(api);
+    });
 
     // Safety refit after a short delay in case the initial rAF ran
     // before CSS transitions or panel animations finished.
@@ -132,18 +137,9 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
       notifyResizeIfChanged();
     }, 150);
 
-    // Re-sync dimensions after output bursts settle (debounced 500ms)
-    let resyncTimeout: ReturnType<typeof setTimeout> | null = null;
-    function scheduleResync() {
-      if (resyncTimeout) clearTimeout(resyncTimeout);
-      resyncTimeout = setTimeout(() => {
-        fit.fit();
-        notifyResizeIfChanged();
-      }, 500);
-    }
-
     let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
     const resizeObserver = new ResizeObserver(() => {
+      if (!visibleRef.current) return; // skip resize while hidden
       if (resizeTimeout) clearTimeout(resizeTimeout);
       resizeTimeout = setTimeout(() => {
         fit.fit();
@@ -154,7 +150,6 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
 
     return () => {
       if (resizeTimeout) clearTimeout(resizeTimeout);
-      if (resyncTimeout) clearTimeout(resyncTimeout);
       clearTimeout(safetyRefit);
       resizeObserver.disconnect();
       term.dispose();
@@ -194,10 +189,21 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
     }
   }, [notifyResizeIfChanged]);
 
+  // Refit and focus when this terminal becomes visible (e.g. project switch)
+  useEffect(() => {
+    if (visible && termRef.current && fitRef.current) {
+      fitRef.current.fit();
+      termRef.current.refresh(0, termRef.current.rows - 1); // force full redraw
+      termRef.current.focus();
+      notifyResizeIfChanged();
+    }
+  }, [visible, notifyResizeIfChanged]);
+
   // Auto-focus the terminal when user types and focus isn't in a form element.
   // This recovers from focus loss after clicking tab bar, dropdowns, etc.
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
+      if (!visibleRef.current) return; // don't steal focus from hidden terminals
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       // Ignore modifier-only keys and browser shortcuts

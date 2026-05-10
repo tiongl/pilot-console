@@ -10,7 +10,7 @@ import SessionsPage from './pages/SessionsPage';
 import AgentsPage from './pages/AgentsPage';
 import NewProjectPage from './pages/NewProjectPage';
 import ProjectLayout from './pages/ProjectLayout';
-import ProjectChatPage from './pages/ProjectChatPage';
+import KeepAliveChat from './components/KeepAliveChat';
 import ProjectSkillsPage from './pages/ProjectSkillsPage';
 import ProjectSettingsPage from './pages/ProjectSettingsPage';
 import WorktreeLayout from './pages/WorktreeLayout';
@@ -25,10 +25,10 @@ import AutomationHistoryPage from './pages/AutomationHistoryPage';
 import { Toaster } from './components/ui/sonner';
 import { useReportNotifications } from './hooks/useReportNotifications';
 
-/** Forces ProjectChatPage to remount when switching projects */
-function ProjectChatPageKeyed() {
+/** Uses KeepAliveChat to keep recently-used project terminals alive across switches */
+function ProjectChatKeepAlive() {
   const { id } = useParams<{ id: string }>();
-  return <ProjectChatPage key={id} />;
+  return <KeepAliveChat projectId={id} />;
 }
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -59,7 +59,7 @@ export function App() {
             <Route path="projects/new" element={<NewProjectPage />} />
             <Route path="projects/:id" element={<ProjectLayout />}>
               <Route index element={<Navigate to="chat" replace />} />
-              <Route path="chat" element={<ProjectChatPageKeyed />} />
+              <Route path="chat" element={<ProjectChatKeepAlive />} />
               <Route path="skills" element={<ProjectSkillsPage />} />
               <Route path="settings" element={<ProjectSettingsPage />} />
             </Route>

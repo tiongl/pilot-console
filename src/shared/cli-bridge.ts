@@ -113,21 +113,13 @@ function wireDaemonListeners(managed: ManagedProcess) {
     if (managed.outputBuffer.length > MAX_SCROLLBACK) {
       managed.outputBuffer = managed.outputBuffer.slice(-MAX_SCROLLBACK);
     }
-    // Only count output with visible content for idle detection.
-    // Strip ANSI escapes, control chars, and whitespace — if nothing
-    // remains, this is just cursor/prompt noise, not real work.
-    const visible = data
-      .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')        // CSI sequences
-      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC (window title)
-      .replace(/\x1b[P_^][^\x1b]*\x1b\\/g, '')        // DCS/APC/PM
-      .replace(/\x1b[()][0-9A-Za-z]/g, '')             // Charset selection
-      .replace(/\x1b[=>NOcMDEHZ78]/g, '')              // Single-char escapes
-      .replace(/[\x07\x08\r\n\t ]/g, '')               // Control chars + whitespace
-      .trim();
-    // Ignore output that arrives within 2s of a resize — it's just a UI redraw
-    const sinceResize = managed.lastResizeAt ? Date.now() - managed.lastResizeAt : Infinity;
-    if (visible.length > 3 && sinceResize > 2_000) {
-      managed.lastOutputAt = Date.now();
+    // Quick idle detection: only check for visible content if the chunk
+    // contains at least one non-escape, non-whitespace byte.
+    if (/[^\x1b\x07\x08\r\n\t ]/.test(data)) {
+      const sinceResize = managed.lastResizeAt ? Date.now() - managed.lastResizeAt : Infinity;
+      if (sinceResize > 2_000) {
+        managed.lastOutputAt = Date.now();
+      }
     }
     managed.onOutput?.(data);
     if (managed.mode === 'cli') {
@@ -249,10 +241,7 @@ export function createCliSession(userId: string, projectId?: string | null, mode
 export function writeToSession(sessionId: string, data: string): boolean {
   const session = activeSessions.get(sessionId);
   if (!session || !session.alive) return false;
-  getDaemonClient().writeToSession(sessionId, data).catch((err) => {
-    console.error(`[cli-bridge] writeToSession failed for ${sessionId}:`, err);
-  });
-  return true;
+  return getDaemonClient().writeToSession(sessionId, data);
 }
 
 export function endCliSession(sessionId: string, opts?: { skipDaemonKill?: boolean }): void {
@@ -418,8 +407,12 @@ async function reconcileDaemonSessions(client: ReturnType<typeof getDaemonClient
   }
 }
 
+/** Set of sessions that already have a copilot_session_id — skip further extraction */
+const capturedCopilotSessions = new Set<string>();
+
 /** Try to extract a Copilot session UUID from CLI output and persist it */
 function extractAndStoreSessionId(sessionId: string, output: string) {
+  if (capturedCopilotSessions.has(sessionId)) return;
   const match = output.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
   if (match) {
     const db = getDb();
@@ -427,5 +420,6 @@ function extractAndStoreSessionId(sessionId: string, output: string) {
     if (row && !row.copilot_session_id) {
       db.prepare('UPDATE cli_sessions SET copilot_session_id = ? WHERE id = ?').run(match[0], sessionId);
     }
+    capturedCopilotSessions.add(sessionId);
   }
 }

@@ -134,6 +134,7 @@ export class DaemonClient {
   }
 
   private setupSocket(socket: net.Socket) {
+    socket.setNoDelay(true);
     socket.on('data', (chunk) => {
       this.buffer += chunk.toString();
       let idx: number;
@@ -353,26 +354,29 @@ export class DaemonClient {
     return opts.sessionId;
   }
 
-  async writeToSession(sessionId: string, data: string): Promise<boolean> {
-    await this.ensureConnected();
-    const resp = await this.request({
+  writeToSession(sessionId: string, data: string): boolean {
+    if (!this.connected || !this.socket || this.socket.destroyed) return false;
+    // Fire-and-forget — don't wait for 'ok' response to minimize latency.
+    // Errors (session gone) are non-fatal; the next write will also fail.
+    this.socket.write(encodeLine({
       cmd: 'write',
-      reqId: this.nextReqId(),
+      reqId: '',
       sessionId,
       data,
-    });
-    return resp.type !== 'error';
+    }));
+    return true;
   }
 
-  async resizeSession(sessionId: string, cols: number, rows: number): Promise<void> {
-    await this.ensureConnected();
-    await this.request({
+  resizeSession(sessionId: string, cols: number, rows: number): void {
+    if (!this.connected || !this.socket || this.socket.destroyed) return;
+    // Fire-and-forget — resize is best-effort
+    this.socket.write(encodeLine({
       cmd: 'resize',
-      reqId: this.nextReqId(),
+      reqId: '',
       sessionId,
       cols,
       rows,
-    });
+    }));
   }
 
   async killSession(sessionId: string): Promise<void> {

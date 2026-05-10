@@ -14,7 +14,7 @@ import { useAutomation } from '../lib/automation-context';
 
 const ProjectLayout = lazy(() => import('./ProjectLayout'));
 const WorktreeLayout = lazy(() => import('./WorktreeLayout'));
-const ProjectChatPage = lazy(() => import('./ProjectChatPage'));
+const KeepAliveChat = lazy(() => import('../components/KeepAliveChat'));
 const AutomationHistoryCore = lazy(() => import('./AutomationHistoryPage').then(m => ({ default: m.AutomationHistoryCore })));
 const SchedulesPage = lazy(() => import('./SchedulesPage'));
 
@@ -553,7 +553,7 @@ export default function DashboardLayout() {
       return (
         <Suspense fallback={<div className="p-6 text-muted-foreground">Loading…</div>}>
           <ProjectLayout projectId={content.projectId} key={content.projectId}>
-            <ProjectChatPage projectId={content.projectId} key={`chat-${content.projectId}`} />
+            <KeepAliveChat projectId={content.projectId} />
           </ProjectLayout>
         </Suspense>
       );
@@ -562,7 +562,7 @@ export default function DashboardLayout() {
       return (
         <Suspense fallback={<div className="p-6 text-muted-foreground">Loading…</div>}>
           <WorktreeLayout projectId={content.projectId} worktreeId={content.worktreeId} key={`${content.projectId}-${content.worktreeId}`}>
-            <ProjectChatPage projectId={content.projectId} worktreeId={content.worktreeId} key={`chat-${content.projectId}-${content.worktreeId}`} />
+            <KeepAliveChat projectId={content.projectId} worktreeId={content.worktreeId} />
           </WorktreeLayout>
         </Suspense>
       );

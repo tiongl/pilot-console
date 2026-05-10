@@ -1,11 +1,10 @@
 import { useParams } from 'react-router';
-import ProjectChatPage from './ProjectChatPage';
+import KeepAliveChat from '../components/KeepAliveChat';
 
 /**
- * Wraps ProjectChatPage with worktreeId context.
- * Forces remount when worktreeId changes.
+ * Wraps KeepAliveChat with worktreeId context for git worktree routes.
  */
 export default function WorktreeChatPage() {
   const { id, worktreeId } = useParams<{ id: string; worktreeId: string }>();
-  return <ProjectChatPage key={`${id}-${worktreeId}`} worktreeId={worktreeId} />;
+  return <KeepAliveChat projectId={id} worktreeId={worktreeId} />;
 }
