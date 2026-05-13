@@ -1,17 +1,32 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import TerminalPane, { type TerminalPaneAPI } from '../components/terminal/TerminalPane';
 import { useCliSocket } from '../hooks/useCliSocket';
+import { OutputFilter, DEFAULT_FILTER_PATTERNS } from '../lib/output-filter';
 
 export default function ChatPage() {
   const termApiRef = useRef<TerminalPaneAPI | null>(null);
   const pendingOutput = useRef<string[]>([]);
 
-  const writeToTerm = useCallback((data: string) => {
+  const filterRef = useRef<OutputFilter | null>(null);
+  if (!filterRef.current) {
+    filterRef.current = new OutputFilter({ patterns: DEFAULT_FILTER_PATTERNS });
+  }
+
+  const rawWrite = useCallback((data: string) => {
     if (termApiRef.current) {
       termApiRef.current.write(data);
     } else {
       pendingOutput.current.push(data);
     }
+  }, []);
+
+  useEffect(() => {
+    filterRef.current!.setOutput(rawWrite);
+    return () => filterRef.current!.dispose();
+  }, [rawWrite]);
+
+  const writeToTerm = useCallback((data: string) => {
+    filterRef.current!.push(data);
   }, []);
 
   const { send } = useCliSocket({

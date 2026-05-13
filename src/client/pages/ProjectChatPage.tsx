@@ -8,6 +8,7 @@ import { Square, Minus, Plus, Palette, Type, X as XIcon, Terminal, Bot, GitCommi
 import { THEMES } from '../lib/terminal-themes';
 import GitLogTab from '../components/project/GitLogTab';
 import GitPanel from '../components/project/GitPanel';
+import { OutputFilter, DEFAULT_FILTER_PATTERNS } from '../lib/output-filter';
 import FileExplorer from '../components/project/FileExplorer';
 
 interface TabMeta {
@@ -62,15 +63,17 @@ const TerminalTab = React.memo(function TerminalTab({
 
   const pendingLen = useRef(0);
 
-  const writeToTerm = useCallback((data: string) => {
+  // Output filter — strips known Copilot CLI internal errors from the stream
+  const filterRef = useRef<OutputFilter | null>(null);
+  if (!filterRef.current) {
+    filterRef.current = new OutputFilter({ patterns: DEFAULT_FILTER_PATTERNS });
+  }
+
+  const rawWriteToTerm = useCallback((data: string) => {
     if (termApiRef.current) {
-      // Buffer output for hidden/inactive terminals to avoid xterm rendering
-      // work on the main thread while the user is typing in another tab.
       if (!visibleAndActiveRef.current) {
         pendingOutput.current.push(data);
         pendingLen.current += data.length;
-        // Cap hidden buffer to prevent unbounded memory growth.
-        // When over limit, compact to the tail (most recent output).
         if (pendingLen.current > MAX_HIDDEN_BUFFER) {
           const joined = pendingOutput.current.join('');
           const trimmed = joined.slice(-MAX_HIDDEN_BUFFER);
@@ -79,12 +82,21 @@ const TerminalTab = React.memo(function TerminalTab({
         }
         return;
       }
-      // Use batched writes so rapid WS messages coalesce into one render frame
       termApiRef.current.writeBatched(data);
     } else {
       pendingOutput.current.push(data);
       pendingLen.current += data.length;
     }
+  }, []);
+
+  // Wire filter output to rawWriteToTerm on mount
+  useEffect(() => {
+    filterRef.current!.setOutput(rawWriteToTerm);
+    return () => filterRef.current!.dispose();
+  }, [rawWriteToTerm]);
+
+  const writeToTerm = useCallback((data: string) => {
+    filterRef.current!.push(data);
   }, []);
 
   // Flush buffered output when this tab becomes visible & active
