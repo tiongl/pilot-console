@@ -43,7 +43,7 @@ export default function GitPanel({ projectId, worktreeId }: Props) {
       if (res.ok) {
         const data = await res.json();
         setBranch(data.branch);
-        setFiles(data.files);
+        setFiles(data.files || []);
       } else {
         const data = await res.json();
         setError(data.error || 'Failed to fetch git status');

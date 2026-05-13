@@ -47,7 +47,7 @@ export default function ProjectNav({ projects }: Props) {
             sessions: Array<{ projectId: string; sessionId: string }>;
           };
           if (!cancelled) {
-            setActiveProjectIds(new Set(data.sessions.map((s) => s.projectId)));
+            setActiveProjectIds(new Set((data.sessions || []).map((s) => s.projectId)));
           }
         }
       } catch {
@@ -68,7 +68,7 @@ export default function ProjectNav({ projects }: Props) {
       const res = await fetch(`/api/projects/${projectId}/worktrees`);
       if (res.ok) {
         const data = (await res.json()) as { worktrees: Worktree[] };
-        setWorktreeMap(prev => ({ ...prev, [projectId]: data.worktrees }));
+        setWorktreeMap(prev => ({ ...prev, [projectId]: data.worktrees || [] }));
       }
     } catch {
       // ignore

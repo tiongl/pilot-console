@@ -59,7 +59,7 @@ export default function SessionHistory({ projectId }: Props) {
       const res = await fetch(`/api/projects/${projectId}/sessions${params}`);
       if (res.ok && fetchIdRef.current === id) {
         const data = await res.json();
-        setSessions(data.sessions);
+        setSessions(data.sessions || []);
       }
     } finally {
       if (fetchIdRef.current === id) {

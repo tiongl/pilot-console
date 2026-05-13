@@ -86,7 +86,7 @@ export default function GitLogTab({ projectId, worktreeId }: Props) {
       const res = await fetch(`/api/projects/${projectId}/git-log?page=${pageNum}&limit=30${wtParam}`);
       if (res.ok) {
         const data = await res.json();
-        setCommits(prev => append ? [...prev, ...data.commits] : data.commits);
+        setCommits(prev => append ? [...prev, ...(data.commits || [])] : (data.commits || []));
         setHasMore(data.hasMore);
         setPage(pageNum);
       } else {
