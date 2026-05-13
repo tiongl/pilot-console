@@ -119,6 +119,20 @@ export function traceStart(label: string): () => void {
   };
 }
 
+/** Record an API request duration for stall attribution */
+export function recordApiCall(route: string, durationMs: number) {
+  const label = 'api:' + route;
+  let bucket = stallBuckets.get(label);
+  if (!bucket) {
+    bucket = { totalMs: 0, calls: 0, peakMs: 0, slowCalls: 0 };
+    stallBuckets.set(label, bucket);
+  }
+  bucket.totalMs += durationMs;
+  bucket.calls++;
+  if (durationMs > bucket.peakMs) bucket.peakMs = durationMs;
+  if (durationMs > 50) bucket.slowCalls++;
+}
+
 // ---------------------------------------------------------------------------
 // Per-session WS round-trip latency
 // ---------------------------------------------------------------------------

@@ -5,7 +5,8 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { execSync } from 'child_process';
+import { execSync, execFile } from 'child_process';
+import { promisify } from 'util';
 import { parse } from 'url';
 import { requireAuth, SESSION_COOKIE, createSession, destroySession, getUserFromToken } from './middleware/auth';
 import { getGitHubCliProfile } from '../shared/gh-cli-auth';
@@ -17,12 +18,25 @@ import { getAllSessions, getAllSessionsWithExited, getSessionStatus, endCliSessi
 import { getDb } from '../shared/db';
 import scheduleRoutes from './routes/schedules';
 import { startScheduler } from './scheduler';
-import { startLagMonitor, getPerfSnapshot } from './perf-monitor';
+import { startLagMonitor, getPerfSnapshot, recordApiCall } from './perf-monitor';
 import './renderers'; // register built-in renderers
 
 const app = express();
 app.use(express.json());
 app.use(cookieParser());
+
+// ---------------------------------------------------------------------------
+// Slow API request tracing — tracks which endpoints block the event loop
+// ---------------------------------------------------------------------------
+app.use('/api', (req, res, next) => {
+  const start = performance.now();
+  const route = req.method + ' ' + req.originalUrl.split('?')[0];
+  res.on('finish', () => {
+    const dur = performance.now() - start;
+    recordApiCall(route, dur);
+  });
+  next();
+});
 
 // ---------------------------------------------------------------------------
 // Auth routes (no auth required)
@@ -290,10 +304,33 @@ app.delete('/api/snippets/:id', (req, res) => {
 
 // --- Git ---
 
-/** Check whether the cwd is inside a git repo. */
+const execFileAsync = promisify(execFile);
+
+/** Run a git command asynchronously — does NOT block the event loop. */
+async function gitAsync(args: string[], cwd: string, timeoutMs = 5000): Promise<string> {
+  const { stdout } = await execFileAsync('git', args, {
+    cwd,
+    encoding: 'utf-8',
+    timeout: timeoutMs,
+    maxBuffer: 5 * 1024 * 1024,
+  });
+  return stdout.trim();
+}
+
+/** Check whether the cwd is inside a git repo (sync — only used in non-hot paths). */
 function isGitRepo(cwd: string): boolean {
   try {
     execSync('git rev-parse --git-dir', { cwd, encoding: 'utf-8', timeout: 3000, stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Async version of isGitRepo. */
+async function isGitRepoAsync(cwd: string): Promise<boolean> {
+  try {
+    await gitAsync(['rev-parse', '--git-dir'], cwd, 3000);
     return true;
   } catch {
     return false;
@@ -310,20 +347,30 @@ function hasGitCommits(cwd: string): boolean {
   }
 }
 
-app.get('/api/projects/:id/git-status', (req, res) => {
+/** Async version of hasGitCommits. */
+async function hasGitCommitsAsync(cwd: string): Promise<boolean> {
+  try {
+    await gitAsync(['rev-parse', 'HEAD'], cwd, 3000);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+app.get('/api/projects/:id/git-status', async (req, res) => {
   const result = getGitCwd(req.params.id, req.query.worktreeId);
   if ('error' in result) { res.status(result.status).json({ error: result.error }); return; }
-  if (!isGitRepo(result.cwd)) { res.json({ branch: null, files: [], diffStat: '', noGit: true }); return; }
+  if (!await isGitRepoAsync(result.cwd)) { res.json({ branch: null, files: [], diffStat: '', noGit: true }); return; }
   try {
-    const opts = { cwd: result.cwd, encoding: 'utf-8' as const, timeout: 5000, stdio: 'pipe' as const };
     let branch = '(no commits)';
-    if (hasGitCommits(result.cwd)) {
-      branch = execSync('git rev-parse --abbrev-ref HEAD', opts).trim();
+    const hasCommits = await hasGitCommitsAsync(result.cwd);
+    if (hasCommits) {
+      branch = await gitAsync(['rev-parse', '--abbrev-ref', 'HEAD'], result.cwd);
     }
-    const status = execSync('git status --porcelain', opts).trim();
+    const status = await gitAsync(['status', '--porcelain'], result.cwd);
     let diffStat = '';
-    if (hasGitCommits(result.cwd)) {
-      try { diffStat = execSync('git diff --stat', opts).trim(); } catch {}
+    if (hasCommits) {
+      try { diffStat = await gitAsync(['diff', '--stat'], result.cwd); } catch {}
     }
     const files = status ? status.split('\n').map(line => ({
       status: line.substring(0, 2).trim(),
@@ -335,18 +382,17 @@ app.get('/api/projects/:id/git-status', (req, res) => {
   }
 });
 
-app.get('/api/projects/:id/git-diff', (req, res) => {
+app.get('/api/projects/:id/git-diff', async (req, res) => {
   const filePath = req.query.file as string;
   const result = getGitCwd(req.params.id, req.query.worktreeId);
   if ('error' in result) { res.status(result.status).json({ error: result.error }); return; }
   if (!filePath) { res.status(400).json({ error: 'Missing file' }); return; }
-  if (!isGitRepo(result.cwd)) { res.json({ diff: 'Not a git repository' }); return; }
+  if (!await isGitRepoAsync(result.cwd)) { res.json({ diff: 'Not a git repository' }); return; }
   try {
-    const opts = { cwd: result.cwd, encoding: 'utf-8' as const, timeout: 5000 };
     let diff = '';
-    try { diff = execSync(`git diff -- "${filePath}"`, opts).trim(); } catch {}
+    try { diff = await gitAsync(['diff', '--', filePath], result.cwd); } catch {}
     if (!diff) {
-      try { diff = execSync(`git diff --cached -- "${filePath}"`, opts).trim(); } catch {}
+      try { diff = await gitAsync(['diff', '--cached', '--', filePath], result.cwd); } catch {}
     }
     res.json({ diff: diff || 'No changes' });
   } catch (err) {
@@ -354,26 +400,24 @@ app.get('/api/projects/:id/git-diff', (req, res) => {
   }
 });
 
-app.get('/api/projects/:id/git-log', (req, res) => {
+app.get('/api/projects/:id/git-log', async (req, res) => {
   const result = getGitCwd(req.params.id, req.query.worktreeId);
   if ('error' in result) { res.status(result.status).json({ error: result.error }); return; }
-  if (!isGitRepo(result.cwd) || !hasGitCommits(result.cwd)) {
-    res.json({ commits: [], hasMore: false, noGit: !isGitRepo(result.cwd) });
+  if (!await isGitRepoAsync(result.cwd) || !await hasGitCommitsAsync(result.cwd)) {
+    res.json({ commits: [], hasMore: false, noGit: !await isGitRepoAsync(result.cwd) });
     return;
   }
   const page = Math.max(1, parseInt(req.query.page as string) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 30));
   const skip = (page - 1) * limit;
   try {
-    const opts = { cwd: result.cwd, encoding: 'utf-8' as const, timeout: 10000, maxBuffer: 2 * 1024 * 1024 };
-    // Use a unique delimiter to parse fields reliably
     const SEP = '<<GCL_SEP>>';
     const END = '<<GCL_END>>';
     const format = [`%H`, `%h`, `%an`, `%ae`, `%aI`, `%s`].join(SEP) + END;
-    const raw = execSync(
-      `git log --format="${format}" --skip=${skip} --max-count=${limit + 1}`,
-      opts,
-    ).trim();
+    const raw = await gitAsync(
+      ['log', `--format=${format}`, `--skip=${skip}`, `--max-count=${limit + 1}`],
+      result.cwd, 10000,
+    );
     if (!raw) { res.json({ commits: [], hasMore: false }); return; }
     const lines = raw.split(END).filter(l => l.trim());
     const hasMore = lines.length > limit;
@@ -387,26 +431,24 @@ app.get('/api/projects/:id/git-log', (req, res) => {
   }
 });
 
-app.get('/api/projects/:id/git-commit/:hash', (req, res) => {
+app.get('/api/projects/:id/git-commit/:hash', async (req, res) => {
   const result = getGitCwd(req.params.id, req.query.worktreeId);
   if ('error' in result) { res.status(result.status).json({ error: result.error }); return; }
-  if (!isGitRepo(result.cwd) || !hasGitCommits(result.cwd)) {
+  if (!await isGitRepoAsync(result.cwd) || !await hasGitCommitsAsync(result.cwd)) {
     res.status(404).json({ error: 'No git history available' });
     return;
   }
   const hash = req.params.hash.replace(/[^a-fA-F0-9]/g, '');
   if (!hash) { res.status(400).json({ error: 'Invalid hash' }); return; }
   try {
-    const opts = { cwd: result.cwd, encoding: 'utf-8' as const, timeout: 10000, maxBuffer: 2 * 1024 * 1024 };
     const SEP = '<<GCL_SEP>>';
     const format = [`%H`, `%h`, `%an`, `%ae`, `%aI`, `%B`].join(SEP);
-    const meta = execSync(`git show -s --format="${format}" ${hash}`, opts).trim();
+    const meta = await gitAsync(['show', '-s', `--format=${format}`, hash], result.cwd, 10000);
     const [commitHash, shortHash, author, authorEmail, date, ...msgParts] = meta.split(SEP);
     const message = msgParts.join(SEP).trim();
 
-    // Get changed files
     let filesRaw = '';
-    try { filesRaw = execSync(`git diff-tree --no-commit-id -r --name-status ${hash}`, opts).trim(); } catch {}
+    try { filesRaw = await gitAsync(['diff-tree', '--no-commit-id', '-r', '--name-status', hash], result.cwd, 10000); } catch {}
     const files = filesRaw ? filesRaw.split('\n').map(line => {
       const [status, ...pathParts] = line.split('\t');
       return { status: status.trim(), path: pathParts.join('\t') };
@@ -418,10 +460,10 @@ app.get('/api/projects/:id/git-commit/:hash', (req, res) => {
   }
 });
 
-app.get('/api/projects/:id/git-commit/:hash/diff', (req, res) => {
+app.get('/api/projects/:id/git-commit/:hash/diff', async (req, res) => {
   const result = getGitCwd(req.params.id, req.query.worktreeId);
   if ('error' in result) { res.status(result.status).json({ error: result.error }); return; }
-  if (!isGitRepo(result.cwd) || !hasGitCommits(result.cwd)) {
+  if (!await isGitRepoAsync(result.cwd) || !await hasGitCommitsAsync(result.cwd)) {
     res.status(404).json({ error: 'No git history available' });
     return;
   }
@@ -429,9 +471,9 @@ app.get('/api/projects/:id/git-commit/:hash/diff', (req, res) => {
   if (!hash) { res.status(400).json({ error: 'Invalid hash' }); return; }
   const filePath = req.query.file as string | undefined;
   try {
-    const opts = { cwd: result.cwd, encoding: 'utf-8' as const, timeout: 10000, maxBuffer: 5 * 1024 * 1024 };
-    const fileArg = filePath ? ` -- "${filePath}"` : '';
-    const diff = execSync(`git show --format="" ${hash}${fileArg}`, opts).trim();
+    const args = ['show', '--format=', hash];
+    if (filePath) args.push('--', filePath);
+    const diff = await gitAsync(args, result.cwd, 10000);
     res.json({ diff: diff || 'No changes' });
   } catch (err) {
     res.status(500).json({ error: 'Git diff failed', message: String(err) });
