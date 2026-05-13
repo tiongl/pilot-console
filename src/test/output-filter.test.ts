@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { OutputFilter, DEFAULT_FILTER_PATTERNS } from '../client/lib/output-filter';
 
 function collect(filter: OutputFilter): string[] {
@@ -12,7 +12,6 @@ describe('OutputFilter', () => {
   let out: string[];
 
   beforeEach(() => {
-    vi.useFakeTimers();
     filter = new OutputFilter({ patterns: DEFAULT_FILTER_PATTERNS });
     out = collect(filter);
   });
@@ -33,7 +32,6 @@ describe('OutputFilter', () => {
   });
 
   it('filters TypeError with ANSI color codes around it', () => {
-    // Simulates: \x1b[31m✗\x1b[0m TypeError: ...
     filter.push('\x1b[31m✗\x1b[0m TypeError: Cannot read properties of undefined (reading \'forEach\')\r\n');
     expect(out).toHaveLength(0);
   });
@@ -58,30 +56,14 @@ describe('OutputFilter', () => {
     expect(out.join('')).toBe('keep\r\nkeep2\r\n');
   });
 
-  it('buffers incomplete lines and flushes on timeout', () => {
+  it('passes through incomplete fragments immediately (zero latency)', () => {
     filter.push('prompt> ');
-    // No output yet — line is incomplete
-    expect(out).toHaveLength(0);
-
-    vi.advanceTimersByTime(200);
     expect(out.join('')).toBe('prompt> ');
   });
 
-  it('completes a buffered line when more data arrives', () => {
-    filter.push('hel');
-    expect(out).toHaveLength(0);
-
-    filter.push('lo\n');
-    expect(out.join('')).toBe('hello\n');
-  });
-
-  it('filters a line that arrives across two chunks', () => {
-    filter.push('✗ TypeError: Cannot read properties');
-    expect(out).toHaveLength(0);
-
-    filter.push(' of undefined (reading \'forEach\')\n');
-    // The complete line should be filtered
-    expect(out).toHaveLength(0);
+  it('passes through chunks with no newlines immediately', () => {
+    filter.push('typing...');
+    expect(out.join('')).toBe('typing...');
   });
 
   it('does not filter partial match that completes as non-match', () => {
@@ -102,24 +84,8 @@ describe('OutputFilter', () => {
   });
 
   it('handles chunk that is just a line ending', () => {
-    filter.push('hello');
     filter.push('\n');
-    expect(out.join('')).toBe('hello\n');
-  });
-
-  it('flush() forces pending fragment out immediately', () => {
-    filter.push('waiting...');
-    expect(out).toHaveLength(0);
-
-    filter.flush();
-    expect(out.join('')).toBe('waiting...');
-  });
-
-  it('dispose() cancels pending flush', () => {
-    filter.push('pending');
-    filter.dispose();
-    vi.advanceTimersByTime(300);
-    expect(out).toHaveLength(0);
+    expect(out.join('')).toBe('\n');
   });
 
   it('handles mixed filtered and unfiltered in rapid succession', () => {
@@ -129,5 +95,11 @@ describe('OutputFilter', () => {
     filter.push('✗ TypeError: Cannot read properties of null (reading \'map\')\n');
     filter.push('ok3\n');
     expect(out.join('')).toBe('ok1\nok2\nok3\n');
+  });
+
+  it('filters line embedded in a mixed chunk', () => {
+    const chunk = 'good\n✗ TypeError: Cannot read properties of undefined (reading \'forEach\')\nalso good\n';
+    filter.push(chunk);
+    expect(out.join('')).toBe('good\nalso good\n');
   });
 });

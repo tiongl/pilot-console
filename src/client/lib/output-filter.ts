@@ -4,14 +4,10 @@
  * Filters out known noise lines (e.g. internal Copilot CLI errors) while
  * preserving the raw byte stream — ANSI codes, cursor movement, and all.
  *
- * Design:
- * - Splits incoming chunks on line boundaries (\r\n or \n).
- * - Complete lines are checked against filter patterns (ANSI-stripped).
- * - Matched lines (+ their line ending) are silently dropped.
- * - Unmatched lines pass through verbatim (ANSI intact).
- * - An incomplete trailing fragment is held in a buffer until the next
- *   chunk arrives or a flush timeout fires (default 150 ms) so interactive
- *   prompts aren't delayed.
+ * **Zero-latency design**: only complete lines are inspected. Incomplete
+ * trailing fragments pass through immediately — no buffering, no timers,
+ * no typing lag. The trade-off is that a filtered line split across two
+ * WS chunks won't be caught, but that's rare and cosmetic.
  */
 
 import { stripAnsi } from './strip-ansi';
@@ -19,8 +15,6 @@ import { stripAnsi } from './strip-ansi';
 export interface OutputFilterOptions {
   /** Patterns to match against ANSI-stripped line text. */
   patterns: RegExp[];
-  /** Max ms to hold an incomplete line before flushing (default 150). */
-  flushTimeoutMs?: number;
 }
 
 /** Default patterns: known Copilot CLI internal errors. */
@@ -33,14 +27,10 @@ export const DEFAULT_FILTER_PATTERNS: RegExp[] = [
 
 export class OutputFilter {
   private patterns: RegExp[];
-  private flushMs: number;
-  private pending = '';
-  private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private onFlush: ((data: string) => void) | null = null;
 
   constructor(opts: OutputFilterOptions) {
     this.patterns = opts.patterns;
-    this.flushMs = opts.flushTimeoutMs ?? 150;
   }
 
   /**
@@ -53,29 +43,28 @@ export class OutputFilter {
 
   /**
    * Feed raw terminal data into the filter.
-   * Filtered output is delivered synchronously via the `onFlush` callback
-   * for complete lines, or asynchronously after the flush timeout for
-   * trailing fragments.
+   * Complete lines are checked against patterns; everything else passes
+   * through synchronously with zero delay.
    */
   push(chunk: string): void {
-    this.cancelFlushTimer();
+    if (!chunk) return;
 
-    const input = this.pending + chunk;
-    this.pending = '';
+    // Fast path: if no line endings at all, pass through immediately
+    if (!chunk.includes('\n')) {
+      this.onFlush?.(chunk);
+      return;
+    }
 
     // Split on line boundaries while keeping the delimiters.
-    // Groups: (line content)(line ending) or trailing fragment.
-    const parts = input.split(/(\r?\n)/);
+    const parts = chunk.split(/(\r?\n)/);
 
     let out = '';
 
     for (let i = 0; i < parts.length; i++) {
       const segment = parts[i];
 
-      // Line-ending tokens (\n or \r\n) are always attached to the
-      // preceding segment — they never appear as the first element.
-      const isLineEnding = segment === '\n' || segment === '\r\n';
-      if (isLineEnding) continue; // handled below when we process the preceding segment
+      // Line-ending tokens (\n or \r\n) — skip, handled with preceding segment
+      if (segment === '\n' || segment === '\r\n') continue;
 
       const lineEnding = parts[i + 1] ?? '';
       const hasLineEnding = lineEnding === '\n' || lineEnding === '\r\n';
@@ -84,63 +73,30 @@ export class OutputFilter {
         // Complete line — check against filters
         const stripped = stripAnsi(segment).trim();
         if (this.shouldFilter(stripped)) {
-          // Drop the line and its ending
           i++; // skip the line-ending token
           continue;
         }
         out += segment + lineEnding;
         i++; // skip the line-ending token
       } else {
-        // Trailing fragment (no line ending yet)
-        this.pending = segment;
+        // Trailing fragment — pass through immediately (no buffering)
+        out += segment;
       }
     }
 
     if (out) {
       this.onFlush?.(out);
     }
-
-    // If there's a pending fragment, schedule a flush so interactive
-    // prompts aren't held indefinitely.
-    if (this.pending) {
-      this.startFlushTimer();
-    }
   }
 
-  /** Force-flush any buffered fragment immediately. */
-  flush(): void {
-    this.cancelFlushTimer();
-    if (this.pending) {
-      this.onFlush?.(this.pending);
-      this.pending = '';
-    }
-  }
+  /** No-op — kept for API compatibility. */
+  flush(): void {}
 
-  /** Clean up timers. Call when the terminal is disposed. */
-  dispose(): void {
-    this.cancelFlushTimer();
-    this.pending = '';
-  }
+  /** No-op — kept for API compatibility. */
+  dispose(): void {}
 
   private shouldFilter(stripped: string): boolean {
     if (!stripped) return false;
     return this.patterns.some((re) => re.test(stripped));
-  }
-
-  private startFlushTimer(): void {
-    this.flushTimer = setTimeout(() => {
-      this.flushTimer = null;
-      if (this.pending) {
-        this.onFlush?.(this.pending);
-        this.pending = '';
-      }
-    }, this.flushMs);
-  }
-
-  private cancelFlushTimer(): void {
-    if (this.flushTimer !== null) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = null;
-    }
   }
 }
