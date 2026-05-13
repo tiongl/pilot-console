@@ -17,12 +17,21 @@ export interface OutputFilterOptions {
   patterns: RegExp[];
 }
 
+/** Convert a string to a hex dump for debugging terminal escape sequences */
+function hexDump(s: string): string {
+  return Array.from(s).map(c => {
+    const code = c.charCodeAt(0);
+    if (code >= 0x20 && code < 0x7F) return c;
+    if (code < 0x100) return `\\x${code.toString(16).padStart(2, '0')}`;
+    return `\\u${code.toString(16).padStart(4, '0')}`;
+  }).join('');
+}
+
 /** Default patterns: known Copilot CLI internal errors. */
 export const DEFAULT_FILTER_PATTERNS: RegExp[] = [
-  // "✗ TypeError: Cannot read properties of undefined (reading 'forEach')"
-  /^✗?\s*TypeError: Cannot read properties of undefined/,
-  // Broader: any single-line JS TypeError from the CLI runtime
-  /^✗?\s*TypeError: Cannot read properties of (undefined|null)/,
+  // Match the error anywhere in the line (not just at start) to handle
+  // cursor movement / ANSI prefixes that leave leading content
+  /TypeError: Cannot read properties of (undefined|null)/,
 ];
 
 export class OutputFilter {
@@ -49,8 +58,22 @@ export class OutputFilter {
   push(chunk: string): void {
     if (!chunk) return;
 
-    // Fast path: if no line endings at all, pass through immediately
+    // Diagnostic: log raw hex when "TypeError" appears anywhere in the chunk
+    // so we can see exactly what bytes the CLI sends.
+    if (chunk.includes('TypeError')) {
+      console.warn('[OutputFilter] TypeError detected in chunk. Raw hex:', hexDump(chunk));
+      console.warn('[OutputFilter] Stripped:', stripAnsi(chunk));
+      console.warn('[OutputFilter] Has newline:', chunk.includes('\n'));
+    }
+
+    // Fast path: if no line endings at all, check for filter matches
+    // even on fragments (the error may arrive without a trailing newline)
     if (!chunk.includes('\n')) {
+      const stripped = stripAnsi(chunk).trim();
+      if (stripped && this.shouldFilter(stripped)) {
+        console.warn('[OutputFilter] Filtered fragment (no newline):', hexDump(chunk));
+        return; // drop it
+      }
       this.onFlush?.(chunk);
       return;
     }
@@ -79,7 +102,11 @@ export class OutputFilter {
         out += segment + lineEnding;
         i++; // skip the line-ending token
       } else {
-        // Trailing fragment — pass through immediately (no buffering)
+        // Trailing fragment — also check against filters
+        const stripped = stripAnsi(segment).trim();
+        if (stripped && this.shouldFilter(stripped)) {
+          continue; // drop it
+        }
         out += segment;
       }
     }

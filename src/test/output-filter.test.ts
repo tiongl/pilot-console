@@ -56,14 +56,24 @@ describe('OutputFilter', () => {
     expect(out.join('')).toBe('keep\r\nkeep2\r\n');
   });
 
-  it('passes through incomplete fragments immediately (zero latency)', () => {
+  it('passes through normal incomplete fragments immediately', () => {
     filter.push('prompt> ');
     expect(out.join('')).toBe('prompt> ');
   });
 
-  it('passes through chunks with no newlines immediately', () => {
+  it('passes through normal chunks with no newlines immediately', () => {
     filter.push('typing...');
     expect(out.join('')).toBe('typing...');
+  });
+
+  it('filters TypeError fragment WITHOUT a newline', () => {
+    filter.push('✗ TypeError: Cannot read properties of undefined (reading \'forEach\')');
+    expect(out).toHaveLength(0);
+  });
+
+  it('filters TypeError trailing fragment after good lines', () => {
+    filter.push('ok\nTypeError: Cannot read properties of undefined (reading \'forEach\')');
+    expect(out.join('')).toBe('ok\n');
   });
 
   it('does not filter partial match that completes as non-match', () => {
@@ -101,5 +111,11 @@ describe('OutputFilter', () => {
     const chunk = 'good\n✗ TypeError: Cannot read properties of undefined (reading \'forEach\')\nalso good\n';
     filter.push(chunk);
     expect(out.join('')).toBe('good\nalso good\n');
+  });
+
+  it('filters TypeError with cursor movement prefixes', () => {
+    // Terminal may have cursor-position ANSI before the error
+    filter.push('\x1b[2K\x1b[1G\x1b[31m✗\x1b[39m TypeError: Cannot read properties of undefined (reading \'forEach\')\n');
+    expect(out).toHaveLength(0);
   });
 });
