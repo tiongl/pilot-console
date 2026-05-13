@@ -52,7 +52,8 @@ export type WsClientMessage =
   | { type: 'input'; data: string }
   | { type: 'resize'; cols: number; rows: number }
   | { type: 'ping' }
-  | { type: 'perf-pong'; ts: number };
+  | { type: 'perf-pong'; ts: number }
+  | { type: 'replay' };
 
 // WebSocket message types (Server → Client)
 export type WsServerMessage =

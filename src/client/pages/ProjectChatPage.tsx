@@ -109,7 +109,7 @@ const TerminalTab = React.memo(function TerminalTab({
     }
   }, [visible, active]);
 
-  const { state, send } = useCliSocket({
+  const { state, send, requestReplay } = useCliSocket({
     projectId,
     worktreeId,
     sessionId: initialSessionId,
@@ -154,15 +154,24 @@ const TerminalTab = React.memo(function TerminalTab({
     onStatusChange(state);
   }, [state, onStatusChange]);
 
+  const wasVisibleRef = useRef(visible && active);
   useEffect(() => {
-    if (active && visible && termApiRef.current) {
-      // Defer to let CSS display:block take effect before measuring
+    const nowVisible = active && visible;
+    const wasHidden = !wasVisibleRef.current;
+    wasVisibleRef.current = nowVisible;
+
+    if (nowVisible && termApiRef.current) {
       requestAnimationFrame(() => {
         termApiRef.current?.fit();
         termApiRef.current?.focus();
       });
+      // Request buffer replay if terminal was previously hidden
+      // (xterm canvas may have been empty after remount/eviction)
+      if (wasHidden) {
+        requestReplay();
+      }
     }
-  }, [active, visible]);
+  }, [active, visible, requestReplay]);
 
   useEffect(() => {
     (onKill as unknown as { _getSessionId?: () => string | null })._getSessionId = () => sessionIdRef.current;

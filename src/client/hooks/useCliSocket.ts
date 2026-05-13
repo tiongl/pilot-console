@@ -165,5 +165,10 @@ export function useCliSocket(options: UseCliSocketOptions = {}) {
     }
   }, []);
 
-  return { state, send };
+  /** Request the server to replay the full output buffer (e.g. after terminal remount) */
+  const requestReplay = useCallback(() => {
+    send({ type: 'replay' });
+  }, [send]);
+
+  return { state, send, requestReplay };
 }

@@ -231,12 +231,16 @@ export function setupWebSocketServer(): WebSocketServer {
       }
     }, 5_000);
 
-    console.log(`[ws] WS ${ws.wsId} session ready: ${managed.sessionId}, isReconnect=${isReconnect}, alive=${managed.alive}, bufferLen=${managed.outputBuffer?.length ?? 0}`);
+    console.log(`[ws] WS ${ws.wsId} session ready: ${managed.sessionId}, isReconnect=${isReconnect}, alive=${managed.alive}, bufferLen=${managed.outputBuffer?.length ?? 0}, chunksLen=${managed._outputChunksLen}`);
     send({ type: 'ready', sessionId: managed.sessionId });
 
-    if (isReconnect && managed.outputBuffer) {
+    if (isReconnect) {
+      // Compact pending chunks into outputBuffer and replay the full scrollback.
+      // This covers output that arrived while no WS was connected.
       flushOutputBuffer(managed);
-      send({ type: 'output', data: managed.outputBuffer });
+      if (managed.outputBuffer) {
+        send({ type: 'output', data: managed.outputBuffer });
+      }
     }
 
     ws.on('message', (raw) => {
@@ -254,6 +258,14 @@ export function setupWebSocketServer(): WebSocketServer {
         send({ type: 'pong' });
       } else if (msg.type === 'perf-pong') {
         recordPerfPong(ws.sessionId!);
+      } else if (msg.type === 'replay') {
+        // Client requests buffer replay (e.g. after terminal remount)
+        if (managed) {
+          flushOutputBuffer(managed);
+          if (managed.outputBuffer) {
+            send({ type: 'output', data: managed.outputBuffer });
+          }
+        }
       }
     });
 
