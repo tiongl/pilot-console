@@ -24,6 +24,8 @@ export interface TerminalPaneAPI {
   writeBatched: (data: string) => void;
   fit: () => void;
   focus: () => void;
+  /** Force a full canvas redraw (fixes corruption after re-mount/visibility change) */
+  refresh: () => void;
 }
 
 export const TERMINAL_FONTS = [
@@ -136,6 +138,7 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
         notifyResizeIfChanged();
       },
       focus: () => term.focus(),
+      refresh: () => term.refresh(0, term.rows - 1),
     };
 
     // Defer initial fit to ensure the container has been laid out.
@@ -211,10 +214,16 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
   // Refit and focus when this terminal becomes visible (e.g. project switch)
   useEffect(() => {
     if (visible && termRef.current && fitRef.current) {
-      fitRef.current.fit();
-      termRef.current.refresh(0, termRef.current.rows - 1); // force full redraw
-      termRef.current.focus();
-      notifyResizeIfChanged();
+      // Defer to next frame so container has its final layout after CSS changes
+      const fit = fitRef.current;
+      const term = termRef.current;
+      const raf = requestAnimationFrame(() => {
+        fit.fit();
+        term.refresh(0, term.rows - 1);
+        term.focus();
+        notifyResizeIfChanged();
+      });
+      return () => cancelAnimationFrame(raf);
     }
   }, [visible, notifyResizeIfChanged]);
 

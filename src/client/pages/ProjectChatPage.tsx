@@ -155,11 +155,14 @@ const TerminalTab = React.memo(function TerminalTab({
   }, [state, onStatusChange]);
 
   useEffect(() => {
-    if (active && termApiRef.current) {
-      termApiRef.current.fit();
-      termApiRef.current.focus();
+    if (active && visible && termApiRef.current) {
+      // Defer to let CSS display:block take effect before measuring
+      requestAnimationFrame(() => {
+        termApiRef.current?.fit();
+        termApiRef.current?.focus();
+      });
     }
-  }, [active]);
+  }, [active, visible]);
 
   useEffect(() => {
     (onKill as unknown as { _getSessionId?: () => string | null })._getSessionId = () => sessionIdRef.current;
