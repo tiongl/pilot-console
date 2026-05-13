@@ -55,6 +55,8 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
 
   /** Only notify when dimensions actually changed to avoid flooding the PTY
    *  with redundant WINDOW_BUFFER_SIZE events that can crash TUI programs. */
+  const resizeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const notifyResizeIfChanged = useCallback(() => {
     const term = termRef.current;
     if (!term) return;
@@ -63,7 +65,17 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
     if (cols !== last.cols || rows !== last.rows) {
       last.cols = cols;
       last.rows = rows;
-      onResizeRef.current?.(cols, rows);
+      // Debounce resize events during rapid font size changes to avoid
+      // the shell redrawing its prompt on every intermediate step
+      if (resizeDebounceRef.current) clearTimeout(resizeDebounceRef.current);
+      resizeDebounceRef.current = setTimeout(() => {
+        resizeDebounceRef.current = null;
+        // Re-check dims in case they changed during debounce
+        const t = termRef.current;
+        if (!t) return;
+        onResizeRef.current?.(t.cols, t.rows);
+        lastSentDimsRef.current = { cols: t.cols, rows: t.rows };
+      }, 300);
     }
   }, []);
 
@@ -193,16 +205,25 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
   useEffect(() => {
     if (!termRef.current || !fitRef.current) return;
     termRef.current.options.fontSize = fontSize;
-    fitRef.current.fit();
-    notifyResizeIfChanged();
+    // Defer fit to next frame so xterm finishes re-measuring glyphs
+    requestAnimationFrame(() => {
+      if (!termRef.current || !fitRef.current) return;
+      fitRef.current.fit();
+      termRef.current.refresh(0, termRef.current.rows - 1);
+      notifyResizeIfChanged();
+    });
   }, [fontSize, notifyResizeIfChanged]);
 
   // Apply font family changes
   useEffect(() => {
     if (!termRef.current || !fitRef.current) return;
     termRef.current.options.fontFamily = fontFamily || TERMINAL_FONTS[0].family;
-    fitRef.current.fit();
-    notifyResizeIfChanged();
+    requestAnimationFrame(() => {
+      if (!termRef.current || !fitRef.current) return;
+      fitRef.current.fit();
+      termRef.current.refresh(0, termRef.current.rows - 1);
+      notifyResizeIfChanged();
+    });
   }, [fontFamily, notifyResizeIfChanged]);
 
   const handleClick = useCallback(() => {
