@@ -194,8 +194,8 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
     return saved?.activeTabId ?? tabs[0].id;
   });
   const [fontSize, setFontSize] = useState(() => {
-    const saved = projectId ? projectTabStates.get(projectId) : null;
-    return saved?.fontSize ?? 14;
+    const saved = localStorage.getItem('pilot-console-font-size');
+    return saved ? Math.max(10, Math.min(24, parseInt(saved, 10) || 14)) : 14;
   });
   const [tabStatuses, setTabStatuses] = useState<Record<string, string>>({});
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
@@ -206,12 +206,17 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   const statusCallbacksRef = useRef<Record<string, (status: string) => void>>({});
   const sessionIdCallbacksRef = useRef<Record<string, (sid: string) => void>>({});
 
-  // Persist tab state whenever it changes
+  // Persist tab state whenever it changes (in-memory for cross-route survival)
   useEffect(() => {
     if (projectId) {
       projectTabStates.set(projectId, { tabs, activeTabId, fontSize });
     }
   }, [projectId, tabs, activeTabId, fontSize]);
+
+  // Persist font size to localStorage (survives page refresh)
+  useEffect(() => {
+    localStorage.setItem('pilot-console-font-size', String(fontSize));
+  }, [fontSize]);
 
   const [showNewMenu, setShowNewMenu] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
@@ -258,6 +263,9 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   }, []);
 
   const closeTab = useCallback((tabId: string) => {
+    // Prevent closing the last tab — always keep at least one open
+    if (tabs.length <= 1) return;
+
     const killCb = killCallbacksRef.current[tabId];
     if (killCb && projectId) {
       const getSessionId = (killCb as unknown as { _getSessionId?: () => string | null })._getSessionId;
@@ -385,7 +393,8 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
                 <span className="truncate max-w-[100px]">{tab.label}</span>
                 <button
                   onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
-                  className="h-4 w-4 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-muted"
+                  className={`h-4 w-4 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-muted ${tabs.length <= 1 ? 'invisible' : ''}`}
+                  disabled={tabs.length <= 1}
                 >
                   <XIcon className="h-3 w-3" />
                 </button>

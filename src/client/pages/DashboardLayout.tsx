@@ -101,6 +101,20 @@ function ProjectNav({
     new Set(projects.filter(p => p.pinned).map(p => p.id))
   );
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('pilot-console-expanded-projects');
+      if (raw) {
+        const ids: string[] = JSON.parse(raw);
+        if (Array.isArray(ids)) {
+          const projectIds = new Set(projects.map(p => p.id));
+          const valid = ids.filter(id => projectIds.has(id));
+          // Also include the currently active project
+          const active = projects.find(p => location.pathname.startsWith(`/projects/${p.id}`));
+          if (active) valid.push(active.id);
+          return new Set(valid);
+        }
+      }
+    } catch { /* fall through */ }
     const active = projects.find(p => location.pathname.startsWith(`/projects/${p.id}`));
     return active ? new Set([active.id]) : new Set();
   });
@@ -113,6 +127,11 @@ function ProjectNav({
   const [wtExistingPath, setWtExistingPath] = useState('');
   const [wtError, setWtError] = useState('');
   const [wtSaving, setWtSaving] = useState(false);
+
+  // Persist expanded project IDs to localStorage
+  useEffect(() => {
+    localStorage.setItem('pilot-console-expanded-projects', JSON.stringify([...expandedIds]));
+  }, [expandedIds]);
 
   useEffect(() => {
     let cancelled = false;
