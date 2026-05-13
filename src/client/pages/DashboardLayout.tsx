@@ -149,25 +149,48 @@ function ProjectNav({
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
+  // Determine the currently active project from the URL
+  const activeProjectId = projects.find(p => location.pathname.startsWith(`/projects/${p.id}`))?.id ?? null;
+
   useEffect(() => {
     let cancelled = false;
-    async function fetchBranches() {
-      const branches = new Map<string, string>();
-      await Promise.all(projects.map(async (p) => {
-        try {
-          const res = await fetch(`/api/projects/${p.id}/git-status`);
-          if (res.ok) {
-            const data = await res.json();
-            if (data.branch) branches.set(p.id, data.branch);
+    // Fetch branch for a single project and update the map incrementally
+    async function fetchBranch(projectId: string) {
+      try {
+        const res = await fetch(`/api/projects/${projectId}/git-status`);
+        if (res.ok && !cancelled) {
+          const data = await res.json();
+          if (data.branch) {
+            setProjectBranches(prev => {
+              const next = new Map(prev);
+              next.set(projectId, data.branch);
+              return next;
+            });
           }
-        } catch {}
-      }));
-      if (!cancelled) setProjectBranches(branches);
+        }
+      } catch {}
     }
-    fetchBranches();
-    const interval = setInterval(fetchBranches, 10000);
-    return () => { cancelled = true; clearInterval(interval); };
-  }, [projects]);
+    // Initial load: fetch all branches once
+    projects.forEach(p => fetchBranch(p.id));
+
+    // Slow poll: only refresh the active project's branch (60s)
+    const interval = setInterval(() => {
+      if (activeProjectId) fetchBranch(activeProjectId);
+    }, 60_000);
+
+    // Event-driven: refresh branch when git activity detected
+    const onGitChanged = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { projectId: string };
+      if (!cancelled) fetchBranch(detail.projectId);
+    };
+    window.addEventListener('git-changed', onGitChanged);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      window.removeEventListener('git-changed', onGitChanged);
+    };
+  }, [projects, activeProjectId]);
 
   const fetchWorktrees = useCallback(async (projectId: string) => {
     try {
@@ -626,7 +649,7 @@ export default function DashboardLayout() {
       }
     }
     check();
-    const interval = setInterval(check, 10_000);
+    const interval = setInterval(check, 30_000);
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
 

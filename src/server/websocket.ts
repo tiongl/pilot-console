@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { IncomingMessage } from 'http';
 import { getUserFromToken, SESSION_COOKIE } from './middleware/auth';
-import { createCliSession, writeToSession, endCliSession, findActiveSession, detachSession, getSession, flushOutputBuffer, type SessionMode } from '../shared/cli-bridge';
+import { createCliSession, writeToSession, endCliSession, findActiveSession, detachSession, getSession, flushOutputBuffer, cliBridgeEvents, type SessionMode } from '../shared/cli-bridge';
 import { getDaemonClient } from '../daemon/client';
 import type { WsClientMessage, WsServerMessage } from '../shared/types';
 import { getOrCreateSessionPerf, recordPerfPong, markPerfPingSent, recordOutputBatch, recordFlush, removeSessionPerf, traceStart } from './perf-monitor';
@@ -66,6 +66,22 @@ export function setupWebSocketServer(): WebSocketServer {
   }, 30_000);
 
   wss.on('close', () => clearInterval(heartbeat));
+
+  // Subscribe to git-activity events from cli-bridge and broadcast to the owning user
+  cliBridgeEvents.on('git-activity', (payload: { userId: string; projectId: string; worktreeId: string | null }) => {
+    if (!_wss) return;
+    const msg = JSON.stringify({
+      type: 'git-changed',
+      projectId: payload.projectId,
+      worktreeId: payload.worktreeId,
+    });
+    _wss.clients.forEach((ws) => {
+      const socket = ws as AuthedSocket;
+      if (socket.readyState === WebSocket.OPEN && socket.userId === payload.userId) {
+        socket.send(msg);
+      }
+    });
+  });
 
   wss.on('connection', async (ws: AuthedSocket, req: IncomingMessage) => {
     ws.isAlive = true;

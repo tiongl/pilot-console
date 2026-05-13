@@ -8,6 +8,11 @@ export interface ScheduleChangedDetail {
   scheduleId?: string;
 }
 
+export interface GitChangedDetail {
+  projectId: string;
+  worktreeId: string | null;
+}
+
 /**
  * Hook that listens for automation WebSocket notifications.
  */
@@ -46,6 +51,10 @@ export function useReportNotifications() {
             refreshSchedules();
             window.dispatchEvent(new CustomEvent<ScheduleChangedDetail>('schedule-changed', {
               detail: { action: msg.action, scheduleId: msg.scheduleId },
+            }));
+          } else if (msg.type === 'git-changed') {
+            window.dispatchEvent(new CustomEvent<GitChangedDetail>('git-changed', {
+              detail: { projectId: msg.projectId, worktreeId: msg.worktreeId ?? null },
             }));
           }
         } catch {}

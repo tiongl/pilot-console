@@ -57,8 +57,22 @@ export default function GitPanel({ projectId, worktreeId }: Props) {
 
   useEffect(() => {
     fetchStatus();
-    const interval = setInterval(fetchStatus, 10000);
-    return () => clearInterval(interval);
+    // Slow poll as fallback for changes made outside CLI sessions
+    const interval = setInterval(fetchStatus, 30_000);
+
+    // Event-driven refresh when CLI session output settles
+    const onGitChanged = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { projectId: string; worktreeId: string | null };
+      if (detail.projectId === projectId && (detail.worktreeId ?? null) === (worktreeId ?? null)) {
+        fetchStatus();
+      }
+    };
+    window.addEventListener('git-changed', onGitChanged);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('git-changed', onGitChanged);
+    };
   }, [fetchStatus]);
 
   const viewDiff = async (filePath: string) => {

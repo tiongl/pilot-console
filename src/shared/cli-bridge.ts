@@ -2,8 +2,13 @@ import { getDb } from './db';
 import { getProjectById, getWorktreeById } from './project-store';
 import { getDaemonClient } from '../daemon/client';
 import { traceStart } from '../server/perf-monitor';
+import { EventEmitter } from 'events';
 
 const MAX_SCROLLBACK = 100_000; // chars to buffer for reconnection replay
+
+// Event bus for git activity — decouples cli-bridge from websocket to avoid circular imports.
+// Emits 'git-activity' with { userId, projectId, worktreeId } after output settles.
+export const cliBridgeEvents = new EventEmitter();
 
 export type SessionMode = 'cli' | 'shell' | 'powershell';
 
@@ -40,6 +45,22 @@ const IDLE_AFTER_MS = 5_000;
 
 // Cached regex for idle detection — avoids re-compiling on every output chunk
 const VISIBLE_CONTENT_RE = /[^\x1b\x07\x08\r\n\t ]/;
+
+// Trailing debounce for git-activity events per project+worktree.
+// Fires after output quiets down for 3 seconds, so clients refresh after changes settle.
+const GIT_ACTIVITY_DEBOUNCE_MS = 3_000;
+const gitActivityTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function notifyGitActivity(userId: string, projectId: string | null, worktreeId: string | null) {
+  if (!projectId) return;
+  const key = `${projectId}:${worktreeId ?? ''}`;
+  const existing = gitActivityTimers.get(key);
+  if (existing) clearTimeout(existing);
+  gitActivityTimers.set(key, setTimeout(() => {
+    gitActivityTimers.delete(key);
+    cliBridgeEvents.emit('git-activity', { userId, projectId, worktreeId });
+  }, GIT_ACTIVITY_DEBOUNCE_MS));
+}
 
 /** Compact the output chunks into a single string and enforce MAX_SCROLLBACK */
 export function flushOutputBuffer(managed: ManagedProcess): string {
@@ -145,6 +166,7 @@ function wireDaemonListeners(managed: ManagedProcess) {
       const sinceResize = managed.lastResizeAt ? Date.now() - managed.lastResizeAt : Infinity;
       if (sinceResize > 2_000) {
         managed.lastOutputAt = Date.now();
+        notifyGitActivity(managed.userId, managed.projectId, managed.worktreeId);
       }
     }
     managed.onOutput?.(data);
