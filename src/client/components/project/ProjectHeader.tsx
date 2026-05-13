@@ -24,7 +24,7 @@ interface Props {
 export default function ProjectHeader({ projectId, projectName, repoPath, children, todoPanel, onSnippetInsert }: Props) {
   const { pathname } = useLocation();
   const basePath = `/projects/${projectId}`;
-  const isChat = pathname === `${basePath}/chat` || pathname === basePath;
+  const isChat = pathname.endsWith('/chat') || pathname === basePath;
   const [activePanel, setActivePanel] = useState<'none' | 'notes' | 'history' | 'snippets'>('none');
 
   const toggleNotes = useCallback(() => setActivePanel(p => p === 'notes' ? 'none' : 'notes'), []);

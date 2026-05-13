@@ -4,7 +4,7 @@ import { getUserFromToken, SESSION_COOKIE } from './middleware/auth';
 import { createCliSession, writeToSession, endCliSession, findActiveSession, detachSession, getSession, flushOutputBuffer, type SessionMode } from '../shared/cli-bridge';
 import { getDaemonClient } from '../daemon/client';
 import type { WsClientMessage, WsServerMessage } from '../shared/types';
-import { getOrCreateSessionPerf, recordPerfPong, markPerfPingSent, recordOutputBatch, recordFlush, removeSessionPerf } from './perf-monitor';
+import { getOrCreateSessionPerf, recordPerfPong, markPerfPingSent, recordOutputBatch, recordFlush, removeSessionPerf, traceStart } from './perf-monitor';
 
 interface AuthedSocket extends WebSocket {
   userId?: string;
@@ -175,12 +175,14 @@ export function setupWebSocketServer(): WebSocketServer {
       if (flushHandle) { clearImmediate(flushHandle); flushHandle = null; }
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
       if (outLen === 0) return;
+      const stop = traceStart('ws:flushOutput');
       const data = outChunks.length === 1 ? outChunks[0] : outChunks.join('');
       recordOutputBatch(managed!.sessionId, outLen);
       recordFlush(managed!.sessionId);
       outChunks = [];
       outLen = 0;
       send({ type: 'output', data });
+      stop();
     };
 
     managed.onOutput = (data) => {

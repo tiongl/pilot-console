@@ -20,6 +20,8 @@ interface Props {
 
 export interface TerminalPaneAPI {
   write: (data: string) => void;
+  /** Coalesces multiple writes into a single xterm render per animation frame */
+  writeBatched: (data: string) => void;
   fit: () => void;
   focus: () => void;
 }
@@ -110,6 +112,25 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
       write: (data: string) => {
         term.write(data);
       },
+      /** Batch multiple write calls into a single xterm render frame.
+       *  Prevents rapid WS messages from each triggering a separate
+       *  canvas repaint, which is the main source of typing lag during
+       *  heavy output. */
+      writeBatched: (() => {
+        let buf: string[] = [];
+        let raf = 0;
+        return (data: string) => {
+          buf.push(data);
+          if (!raf) {
+            raf = requestAnimationFrame(() => {
+              const chunk = buf.join('');
+              buf = [];
+              raf = 0;
+              term.write(chunk);
+            });
+          }
+        };
+      })(),
       fit: () => {
         fit.fit();
         notifyResizeIfChanged();
@@ -144,7 +165,7 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
       resizeTimeout = setTimeout(() => {
         fit.fit();
         notifyResizeIfChanged();
-      }, 50);
+      }, 100);
     });
     resizeObserver.observe(containerRef.current);
 
@@ -182,12 +203,10 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
   }, [fontFamily, notifyResizeIfChanged]);
 
   const handleClick = useCallback(() => {
-    if (termRef.current && fitRef.current) {
+    if (termRef.current) {
       termRef.current.focus();
-      fitRef.current.fit();
-      notifyResizeIfChanged();
     }
-  }, [notifyResizeIfChanged]);
+  }, []);
 
   // Refit and focus when this terminal becomes visible (e.g. project switch)
   useEffect(() => {
@@ -199,11 +218,47 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
     }
   }, [visible, notifyResizeIfChanged]);
 
+  // Refresh terminal when the browser tab or window regains visibility.
+  // xterm's canvas rendering can get corrupted when the compositor skips
+  // paint cycles (minimised window, background tab, sleep/wake, etc.).
+  useEffect(() => {
+    const term = termRef.current;
+    const fit = fitRef.current;
+    if (!term || !fit) return;
+
+    const refresh = () => {
+      if (!visibleRef.current) return;
+      fit.fit();
+      term.refresh(0, term.rows - 1);
+      notifyResizeIfChanged();
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        // Small delay to let the browser finish compositing
+        setTimeout(refresh, 100);
+      }
+    };
+
+    const onWindowFocus = () => {
+      setTimeout(refresh, 100);
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('focus', onWindowFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('focus', onWindowFocus);
+    };
+  }, [notifyResizeIfChanged]);
+
   // Auto-focus the terminal when user types and focus isn't in a form element.
   // This recovers from focus loss after clicking tab bar, dropdowns, etc.
+  // Only registered while the terminal is visible to avoid N hidden listeners.
   useEffect(() => {
+    if (!visible) return; // don't register for hidden terminals
+
     function handleKeyDown(e: KeyboardEvent) {
-      if (!visibleRef.current) return; // don't steal focus from hidden terminals
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       // Ignore modifier-only keys and browser shortcuts
@@ -219,7 +274,7 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
     }
     window.addEventListener('keydown', handleKeyDown, true);
     return () => window.removeEventListener('keydown', handleKeyDown, true);
-  }, []);
+  }, [visible]);
 
   const theme = getThemeByName(themeName ?? 'Catppuccin');
 

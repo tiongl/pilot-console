@@ -1,6 +1,7 @@
 import { getDb } from './db';
 import { getProjectById, getWorktreeById } from './project-store';
 import { getDaemonClient } from '../daemon/client';
+import { traceStart } from '../server/perf-monitor';
 
 const MAX_SCROLLBACK = 100_000; // chars to buffer for reconnection replay
 
@@ -13,6 +14,9 @@ export interface ManagedProcess {
   worktreeId: string | null;
   mode: SessionMode;
   outputBuffer: string;
+  /** Array-based buffer for incoming output — joined on read to avoid O(n) concat per chunk */
+  _outputChunks: string[];
+  _outputChunksLen: number;
   onOutput: ((data: string) => void) | null;
   onError: ((data: string) => void) | null;
   onExit: ((code: number, reason?: 'normal' | 'daemon-lost') => void) | null;
@@ -33,6 +37,22 @@ const EXITED_RETENTION_MS = 30_000;
 // Idle detection: session is "busy" only while it is actively producing output.
 // We use a simple time-since-last-output approach with a 5-second cooldown.
 const IDLE_AFTER_MS = 5_000;
+
+// Cached regex for idle detection — avoids re-compiling on every output chunk
+const VISIBLE_CONTENT_RE = /[^\x1b\x07\x08\r\n\t ]/;
+
+/** Compact the output chunks into a single string and enforce MAX_SCROLLBACK */
+export function flushOutputBuffer(managed: ManagedProcess): string {
+  if (managed._outputChunks.length > 0) {
+    managed.outputBuffer += managed._outputChunks.join('');
+    managed._outputChunks = [];
+    managed._outputChunksLen = 0;
+  }
+  if (managed.outputBuffer.length > MAX_SCROLLBACK) {
+    managed.outputBuffer = managed.outputBuffer.slice(-MAX_SCROLLBACK);
+  }
+  return managed.outputBuffer;
+}
 
 export type SessionStatus = 'idle' | 'busy' | 'exited';
 
@@ -87,6 +107,7 @@ export function detachSession(sessionId: string, wsId?: number): void {
  */
 function finalizeSessionExit(managed: ManagedProcess, code: number, reason: 'normal' | 'daemon-lost' = 'normal') {
   if (!managed.alive && managed.exitedAt) return; // already finalized
+  const stop = traceStart('cli-bridge:finalizeExit');
   managed.alive = false;
   managed.lastExitCode = code;
   managed.exitedAt = Date.now();
@@ -95,9 +116,13 @@ function finalizeSessionExit(managed: ManagedProcess, code: number, reason: 'nor
   recentlyExited.set(managed.sessionId, managed);
   setTimeout(() => recentlyExited.delete(managed.sessionId), EXITED_RETENTION_MS);
   getDaemonClient().removeListeners(managed.sessionId);
+  flushOutputBuffer(managed);
+  const stopDb = traceStart('cli-bridge:exitDbWrite');
   getDb()
     .prepare("UPDATE cli_sessions SET ended_at = datetime('now'), output_log = ? WHERE id = ?")
     .run(managed.outputBuffer || null, managed.sessionId);
+  stopDb();
+  stop();
 }
 
 /**
@@ -109,13 +134,14 @@ function wireDaemonListeners(managed: ManagedProcess) {
   const client = getDaemonClient();
 
   client.onOutput(managed.sessionId, (data: string) => {
-    managed.outputBuffer += data;
-    if (managed.outputBuffer.length > MAX_SCROLLBACK) {
-      managed.outputBuffer = managed.outputBuffer.slice(-MAX_SCROLLBACK);
+    const stop = traceStart('cli-bridge:onOutput');
+    managed._outputChunks.push(data);
+    managed._outputChunksLen += data.length;
+    // Only compact when total buffered length exceeds scrollback limit
+    if (managed._outputChunksLen > MAX_SCROLLBACK) {
+      flushOutputBuffer(managed);
     }
-    // Quick idle detection: only check for visible content if the chunk
-    // contains at least one non-escape, non-whitespace byte.
-    if (/[^\x1b\x07\x08\r\n\t ]/.test(data)) {
+    if (VISIBLE_CONTENT_RE.test(data)) {
       const sinceResize = managed.lastResizeAt ? Date.now() - managed.lastResizeAt : Infinity;
       if (sinceResize > 2_000) {
         managed.lastOutputAt = Date.now();
@@ -125,6 +151,7 @@ function wireDaemonListeners(managed: ManagedProcess) {
     if (managed.mode === 'cli') {
       extractAndStoreSessionId(managed.sessionId, data);
     }
+    stop();
   });
 
   client.onExit(managed.sessionId, (code: number) => {
@@ -195,6 +222,8 @@ export function createCliSession(userId: string, projectId?: string | null, mode
     worktreeId: worktreeId ?? null,
     mode,
     outputBuffer: '',
+    _outputChunks: [],
+    _outputChunksLen: 0,
     onOutput: null,
     onError: null,
     onExit: null,
@@ -247,6 +276,7 @@ export function writeToSession(sessionId: string, data: string): boolean {
 export function endCliSession(sessionId: string, opts?: { skipDaemonKill?: boolean }): void {
   const session = activeSessions.get(sessionId);
   if (!session) return;
+  flushOutputBuffer(session);
   getDb()
     .prepare("UPDATE cli_sessions SET ended_at = datetime('now'), output_log = ? WHERE id = ?")
     .run(session.outputBuffer || null, sessionId);
@@ -331,6 +361,8 @@ export async function initDaemonBridge(): Promise<void> {
       try {
         const attached = await client.attachSession(s.sessionId);
         s.outputBuffer = attached.buffer;
+        s._outputChunks = [];
+        s._outputChunksLen = 0;
         if (!attached.alive) {
           finalizeSessionExit(s, attached.exitCode ?? -1);
         }
@@ -368,6 +400,8 @@ async function reconcileDaemonSessions(client: ReturnType<typeof getDaemonClient
       worktreeId,
       mode: (info.meta?.mode as SessionMode) || 'cli',
       outputBuffer: '',
+      _outputChunks: [],
+      _outputChunksLen: 0,
       onOutput: null,
       onError: null,
       onExit: null,

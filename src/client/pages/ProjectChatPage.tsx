@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useParams } from 'react-router';
 import { useCliSocket } from '../hooks/useCliSocket';
@@ -29,11 +29,13 @@ interface ProjectTabState {
 }
 const projectTabStates = new Map<string, ProjectTabState>();
 
+const MAX_HIDDEN_BUFFER = 100_000; // chars to retain for hidden terminals
+
 /**
  * Each tab owns its own WS connection and TerminalPane.
  * Output is written directly to xterm (no React state accumulation).
  */
-function TerminalTab({
+const TerminalTab = React.memo(function TerminalTab({
   projectId, worktreeId, fontSize, fontFamily, themeName, active, forceNew, mode, sessionId: initialSessionId, onStatusChange, onKill, onSessionId, visible = true,
 }: {
   projectId?: string;
@@ -55,13 +57,45 @@ function TerminalTab({
   const termApiRef = useRef<TerminalPaneAPI | null>(null);
   const pendingOutput = useRef<string[]>([]);
 
+  const visibleAndActiveRef = useRef(visible && active);
+  visibleAndActiveRef.current = visible && active;
+
+  const pendingLen = useRef(0);
+
   const writeToTerm = useCallback((data: string) => {
     if (termApiRef.current) {
-      termApiRef.current.write(data);
+      // Buffer output for hidden/inactive terminals to avoid xterm rendering
+      // work on the main thread while the user is typing in another tab.
+      if (!visibleAndActiveRef.current) {
+        pendingOutput.current.push(data);
+        pendingLen.current += data.length;
+        // Cap hidden buffer to prevent unbounded memory growth.
+        // When over limit, compact to the tail (most recent output).
+        if (pendingLen.current > MAX_HIDDEN_BUFFER) {
+          const joined = pendingOutput.current.join('');
+          const trimmed = joined.slice(-MAX_HIDDEN_BUFFER);
+          pendingOutput.current = [trimmed];
+          pendingLen.current = trimmed.length;
+        }
+        return;
+      }
+      // Use batched writes so rapid WS messages coalesce into one render frame
+      termApiRef.current.writeBatched(data);
     } else {
       pendingOutput.current.push(data);
+      pendingLen.current += data.length;
     }
   }, []);
+
+  // Flush buffered output when this tab becomes visible & active
+  useEffect(() => {
+    if (visible && active && termApiRef.current && pendingOutput.current.length > 0) {
+      const flushed = pendingOutput.current.join('');
+      pendingOutput.current = [];
+      pendingLen.current = 0;
+      termApiRef.current.write(flushed);
+    }
+  }, [visible, active]);
 
   const { state, send } = useCliSocket({
     projectId,
@@ -139,7 +173,7 @@ function TerminalTab({
       />
     </div>
   );
-}
+});
 
 export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, visible = true }: { worktreeId?: string; projectId?: string; visible?: boolean }) {
   const { id: routeProjectId } = useParams<{ id: string }>();
@@ -170,6 +204,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   const firstTabId = useRef(tabs[0].id);
   const killCallbacksRef = useRef<Record<string, (sessionId: string | null) => void>>({});
   const statusCallbacksRef = useRef<Record<string, (status: string) => void>>({});
+  const sessionIdCallbacksRef = useRef<Record<string, (sid: string) => void>>({});
 
   // Persist tab state whenever it changes
   useEffect(() => {
@@ -260,6 +295,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   }, [activeTabId, projectId]);
 
   useEffect(() => {
+    if (!visible) return; // don't register shortcuts for hidden project pages
     function handler(e: KeyboardEvent) {
       const target = e.target as HTMLElement;
       const tag = target?.tagName;
@@ -276,7 +312,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
     }
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [handleKillActive, addTab]);
+  }, [handleKillActive, addTab, visible]);
 
   const activeTab = tabs.find(t => t.id === activeTabId);
   const activeThemeName = activeTab?.themeName ?? defaultTheme;
@@ -494,7 +530,11 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
             killCallbacksRef.current[tab.id] = (() => {}) as (sid: string | null) => void;
           }
           if (!statusCallbacksRef.current[tab.id]) {
-            statusCallbacksRef.current[tab.id] = (s: string) => setTabStatuses(prev => ({ ...prev, [tab.id]: s }));
+            statusCallbacksRef.current[tab.id] = (s: string) => setTabStatuses(prev => prev[tab.id] === s ? prev : { ...prev, [tab.id]: s });
+          }
+          if (!sessionIdCallbacksRef.current[tab.id]) {
+            const tabId = tab.id;
+            sessionIdCallbacksRef.current[tabId] = (sid: string) => setTabs(prev => prev.map(t => t.id === tabId ? { ...t, sessionId: sid } : t));
           }
           return (
             <TerminalTab
@@ -511,7 +551,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
               visible={visible}
               onStatusChange={statusCallbacksRef.current[tab.id]}
               onKill={killCallbacksRef.current[tab.id]}
-              onSessionId={(sid) => setTabs(prev => prev.map(t => t.id === tab.id ? { ...t, sessionId: sid } : t))}
+              onSessionId={sessionIdCallbacksRef.current[tab.id]}
             />
           );
         })}

@@ -25,6 +25,7 @@ import {
   type RunOnceCompleteResp,
   type SessionMeta,
 } from './protocol';
+import { traceStart } from '../server/perf-monitor';
 
 type ResponseHandler = (resp: DaemonResponse) => void;
 
@@ -136,17 +137,24 @@ export class DaemonClient {
   private setupSocket(socket: net.Socket) {
     socket.setNoDelay(true);
     socket.on('data', (chunk) => {
+      const stop = traceStart('daemon-client:data');
       this.buffer += chunk.toString();
+      let start = 0;
       let idx: number;
-      while ((idx = this.buffer.indexOf('\n')) !== -1) {
-        const line = this.buffer.slice(0, idx);
-        this.buffer = this.buffer.slice(idx + 1);
+      while ((idx = this.buffer.indexOf('\n', start)) !== -1) {
+        const line = this.buffer.slice(start, idx);
+        start = idx + 1;
         if (!line.trim()) continue;
         try {
           const resp = JSON.parse(line) as DaemonResponse;
           this.handleResponse(resp);
         } catch { /* ignore bad messages */ }
       }
+      // One slice at the end instead of per-line
+      if (start > 0) {
+        this.buffer = start < this.buffer.length ? this.buffer.slice(start) : '';
+      }
+      stop();
     });
 
     socket.on('close', () => {
