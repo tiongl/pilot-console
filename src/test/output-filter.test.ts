@@ -118,4 +118,55 @@ describe('OutputFilter', () => {
     filter.push('\x1b[2K\x1b[1G\x1b[31m✗\x1b[39m TypeError: Cannot read properties of undefined (reading \'forEach\')\n');
     expect(out).toHaveLength(0);
   });
+
+  describe('TUI cursor-positioned output', () => {
+    it('redacts TypeError in cursor-positioned TUI chunk', () => {
+      // Simulates Copilot CLI TUI redraw with cursor positioning
+      const chunk =
+        '\x1b[H\x1b[K\x1b[32m\r\n' +
+        '● \x1b[m\x1b[1mEdit \x1b[22mfile.tsx\x1b[K\r\n' +
+        '\x1b[31m\r\n' +
+        '\x1b[5;1H✗ \x1b[m\x1b[1mTypeError: Cannot read properties of undefined (reading \'forEach\') \x1b[22m\x1b[K\r\n' +
+        '\x1b[32m● \x1b[mDone\x1b[K\r\n';
+      filter.push(chunk);
+      const result = out.join('');
+      // Cursor positioning preserved
+      expect(result).toContain('\x1b[5;1H');
+      expect(result).toContain('\x1b[H');
+      // Error text redacted (replaced with spaces)
+      expect(result).not.toContain('TypeError');
+      expect(result).not.toContain('✗');
+      // Other content preserved
+      expect(result).toContain('Edit');
+      expect(result).toContain('Done');
+    });
+
+    it('preserves all ANSI escape sequences in TUI redaction', () => {
+      const chunk =
+        '\x1b[H\x1b[32m● \x1b[mOK\r\n' +
+        '\x1b[3;1H\x1b[31m✗ \x1b[m\x1b[1mTypeError: Cannot read properties of undefined (reading \'forEach\') \x1b[22m\x1b[K\r\n';
+      filter.push(chunk);
+      const result = out.join('');
+      // All ANSI sequences preserved
+      expect(result).toContain('\x1b[H');
+      expect(result).toContain('\x1b[32m');
+      expect(result).toContain('\x1b[3;1H');
+      expect(result).toContain('\x1b[31m');
+      expect(result).toContain('\x1b[m');
+      expect(result).toContain('\x1b[1m');
+      expect(result).toContain('\x1b[22m');
+      expect(result).toContain('\x1b[K');
+      // Error text gone
+      expect(result).not.toContain('TypeError');
+    });
+
+    it('does not redact non-matching TUI content', () => {
+      const chunk =
+        '\x1b[H\x1b[32m● \x1b[mAll good\r\n' +
+        '\x1b[3;1H\x1b[32m● \x1b[mStill good\r\n';
+      filter.push(chunk);
+      const result = out.join('');
+      expect(result).toBe(chunk);
+    });
+  });
 });
