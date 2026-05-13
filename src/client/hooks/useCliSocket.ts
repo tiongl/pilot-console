@@ -93,6 +93,10 @@ export function useCliSocket(options: UseCliSocketOptions = {}) {
         }
         opts.onReady?.(msg.sessionId);
       }
+      else if (msg.type === 'perf-ping') {
+        // Respond immediately so the server can measure round-trip latency
+        ws.send(JSON.stringify({ type: 'perf-pong', ts: msg.ts }));
+      }
     };
 
     ws.onerror = () => {

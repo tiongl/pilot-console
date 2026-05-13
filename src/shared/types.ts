@@ -51,7 +51,8 @@ export interface SessionWithProject extends CliSession {
 export type WsClientMessage =
   | { type: 'input'; data: string }
   | { type: 'resize'; cols: number; rows: number }
-  | { type: 'ping' };
+  | { type: 'ping' }
+  | { type: 'perf-pong'; ts: number };
 
 // WebSocket message types (Server → Client)
 export type WsServerMessage =
@@ -60,6 +61,7 @@ export type WsServerMessage =
   | { type: 'exit'; code: number }
   | { type: 'ready'; sessionId: string }
   | { type: 'pong' }
+  | { type: 'perf-ping'; ts: number }
   | { type: 'report-ready'; runId: string; scheduleId: string; scheduleName: string; status: string }
   | { type: 'schedule-changed'; action: 'created' | 'updated' | 'deleted' | 'imported'; scheduleId?: string };
 

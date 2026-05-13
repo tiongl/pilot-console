@@ -17,6 +17,7 @@ import { getAllSessions, getAllSessionsWithExited, getSessionStatus, endCliSessi
 import { getDb } from '../shared/db';
 import scheduleRoutes from './routes/schedules';
 import { startScheduler } from './scheduler';
+import { startLagMonitor, getPerfSnapshot } from './perf-monitor';
 import './renderers'; // register built-in renderers
 
 const app = express();
@@ -880,6 +881,11 @@ app.delete('/api/admin/sessions/:id', requireAuth, (req, res) => {
 // --- Scheduled Reports ---
 app.use('/api/admin', scheduleRoutes);
 
+// --- Performance monitoring ---
+app.get('/api/perf', requireAuth, (_req, res) => {
+  res.json(getPerfSnapshot());
+});
+
 // --- Daemon management ---
 app.get('/api/daemon/status', requireAuth, async (req, res) => {
   const { getDaemonClient } = await import('../daemon/client');
@@ -1050,6 +1056,8 @@ httpServer.listen(port, hostname, async () => {
     console.log('[server] Daemon bridge initialized successfully');
     // Start the report scheduler after daemon is ready
     startScheduler();
+    // Start event-loop lag monitoring for perf diagnostics
+    startLagMonitor();
   } catch (err) {
     console.error('Failed to initialize daemon bridge:', err);
   }

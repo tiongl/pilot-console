@@ -1,9 +1,10 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { IncomingMessage } from 'http';
 import { getUserFromToken, SESSION_COOKIE } from './middleware/auth';
-import { createCliSession, writeToSession, endCliSession, findActiveSession, detachSession, getSession, type SessionMode } from '../shared/cli-bridge';
+import { createCliSession, writeToSession, endCliSession, findActiveSession, detachSession, getSession, flushOutputBuffer, type SessionMode } from '../shared/cli-bridge';
 import { getDaemonClient } from '../daemon/client';
 import type { WsClientMessage, WsServerMessage } from '../shared/types';
+import { getOrCreateSessionPerf, recordPerfPong, markPerfPingSent, recordOutputBatch, recordFlush, removeSessionPerf } from './perf-monitor';
 
 interface AuthedSocket extends WebSocket {
   userId?: string;
@@ -157,9 +158,45 @@ export function setupWebSocketServer(): WebSocketServer {
     };
 
     managed.activeWsId = ws.wsId!;
-    managed.onOutput = (data) => send({ type: 'output', data });
-    managed.onError = (data) => send({ type: 'error', data });
+
+    // --- Batched output sender ---
+    // During burst output the daemon can fire dozens of output events in a
+    // single event-loop tick (the TCP data handler parses all lines
+    // synchronously).  Sending each as a separate WS message floods the
+    // browser with onmessage/JSON.parse calls, freezing the UI.
+    // We coalesce chunks and flush once per tick via setImmediate, falling
+    // back to a 16ms timer for sustained cross-tick output.
+    let outChunks: string[] = [];
+    let outLen = 0;
+    let flushHandle: ReturnType<typeof setImmediate> | null = null;
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flushOutput = () => {
+      if (flushHandle) { clearImmediate(flushHandle); flushHandle = null; }
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      if (outLen === 0) return;
+      const data = outChunks.length === 1 ? outChunks[0] : outChunks.join('');
+      recordOutputBatch(managed!.sessionId, outLen);
+      recordFlush(managed!.sessionId);
+      outChunks = [];
+      outLen = 0;
+      send({ type: 'output', data });
+    };
+
+    managed.onOutput = (data) => {
+      outChunks.push(data);
+      outLen += data.length;
+      // Flush large buffers immediately to bound memory
+      if (outLen > 32_768) { flushOutput(); return; }
+      if (!flushHandle) {
+        flushHandle = setImmediate(flushOutput);
+        // Safety cap: if output keeps arriving across ticks, flush at 16ms
+        if (!flushTimer) flushTimer = setTimeout(flushOutput, 16);
+      }
+    };
+    managed.onError = (data) => { flushOutput(); send({ type: 'error', data }); };
     managed.onExit = (code, reason) => {
+      flushOutput();
       console.log(`[ws] session ${managed!.sessionId} exited: code=${code} reason=${reason ?? 'normal'}`);
       send({ type: 'exit', code });
       if (reason === 'daemon-lost') {
@@ -167,10 +204,20 @@ export function setupWebSocketServer(): WebSocketServer {
       }
     };
 
+    // --- Perf-ping interval: measure WS round-trip latency every 5s ---
+    getOrCreateSessionPerf(managed.sessionId);
+    const perfPingInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        markPerfPingSent(managed!.sessionId);
+        send({ type: 'perf-ping', ts: Date.now() });
+      }
+    }, 5_000);
+
     console.log(`[ws] WS ${ws.wsId} session ready: ${managed.sessionId}, isReconnect=${isReconnect}, alive=${managed.alive}, bufferLen=${managed.outputBuffer?.length ?? 0}`);
     send({ type: 'ready', sessionId: managed.sessionId });
 
     if (isReconnect && managed.outputBuffer) {
+      flushOutputBuffer(managed);
       send({ type: 'output', data: managed.outputBuffer });
     }
 
@@ -187,17 +234,29 @@ export function setupWebSocketServer(): WebSocketServer {
         }
       } else if (msg.type === 'ping') {
         send({ type: 'pong' });
+      } else if (msg.type === 'perf-pong') {
+        recordPerfPong(ws.sessionId!);
       }
     });
 
     ws.on('close', () => {
+      flushOutput();
+      clearInterval(perfPingInterval);
       console.log(`[ws] WS ${ws.wsId} closed for session ${ws.sessionId}`);
-      if (ws.sessionId) detachSession(ws.sessionId, ws.wsId);
+      if (ws.sessionId) {
+        removeSessionPerf(ws.sessionId);
+        detachSession(ws.sessionId, ws.wsId);
+      }
     });
 
     ws.on('error', (err) => {
+      flushOutput();
+      clearInterval(perfPingInterval);
       console.error(`[ws] WS ${ws.wsId} error for session ${ws.sessionId}:`, err.message);
-      if (ws.sessionId) detachSession(ws.sessionId, ws.wsId);
+      if (ws.sessionId) {
+        removeSessionPerf(ws.sessionId);
+        detachSession(ws.sessionId, ws.wsId);
+      }
     });
   });
 
