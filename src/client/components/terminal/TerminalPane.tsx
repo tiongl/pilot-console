@@ -308,5 +308,5 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
 
   const theme = getThemeByName(themeName ?? 'Catppuccin');
 
-  return <div ref={containerRef} className="h-full w-full" style={{ backgroundColor: theme.theme.background }} onClick={handleClick} />;
+  return <div ref={containerRef} className="h-full w-full pb-2" style={{ backgroundColor: theme.theme.background }} onClick={handleClick} />;
 }
