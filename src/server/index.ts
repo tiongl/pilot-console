@@ -179,6 +179,7 @@ app.get('/api/sessions/active', (req, res) => {
       projectId: s.projectId!,
       worktreeId: s.worktreeId ?? null,
       sessionId: s.sessionId,
+      mode: s.mode,
       status: getSessionStatus(s),
       exitCode: s.lastExitCode,
     }));

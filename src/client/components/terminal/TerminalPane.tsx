@@ -129,19 +129,35 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
       /** Batch multiple write calls into a single xterm render frame.
        *  Prevents rapid WS messages from each triggering a separate
        *  canvas repaint, which is the main source of typing lag during
-       *  heavy output. */
+       *  heavy output.  Caps each frame's write to MAX_BATCH_CHARS to
+       *  avoid overwhelming the renderer with a single huge chunk
+       *  (which causes canvas corruption during fast scrolling). */
       writeBatched: (() => {
+        const MAX_BATCH_CHARS = 16_384;
         let buf: string[] = [];
+        let bufLen = 0;
         let raf = 0;
+        const flush = () => {
+          const chunk = buf.join('');
+          buf = [];
+          bufLen = 0;
+          raf = 0;
+          if (chunk.length <= MAX_BATCH_CHARS) {
+            term.write(chunk);
+          } else {
+            // Write in capped slices, scheduling remaining data for
+            // subsequent frames so the renderer can keep up.
+            term.write(chunk.slice(0, MAX_BATCH_CHARS));
+            buf.push(chunk.slice(MAX_BATCH_CHARS));
+            bufLen = buf[0].length;
+            raf = requestAnimationFrame(flush);
+          }
+        };
         return (data: string) => {
           buf.push(data);
+          bufLen += data.length;
           if (!raf) {
-            raf = requestAnimationFrame(() => {
-              const chunk = buf.join('');
-              buf = [];
-              raf = 0;
-              term.write(chunk);
-            });
+            raf = requestAnimationFrame(flush);
           }
         };
       })(),
@@ -184,7 +200,21 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
     });
     resizeObserver.observe(containerRef.current);
 
+    // Fix scrollback corruption: xterm's DOM renderer can leave garbled
+    // rows when scrolling through the buffer.  After scrolling settles,
+    // repaint the visible viewport.
+    let scrollRaf = 0;
+    const onScroll = term.onScroll(() => {
+      if (scrollRaf) cancelAnimationFrame(scrollRaf);
+      scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = 0;
+        term.refresh(0, term.rows - 1);
+      });
+    });
+
     return () => {
+      if (scrollRaf) cancelAnimationFrame(scrollRaf);
+      onScroll.dispose();
       if (resizeTimeout) clearTimeout(resizeTimeout);
       clearTimeout(safetyRefit);
       resizeObserver.disconnect();
@@ -244,7 +274,20 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
         term.focus();
         notifyResizeIfChanged();
       });
-      return () => cancelAnimationFrame(raf);
+      // Safety second refresh: the first rAF can fire before the browser
+      // finishes layout after a display:none→block transition, leaving the
+      // canvas with stale dimensions. A short delay guarantees a
+      // fully-settled layout, matching the initial-mount safetyRefit pattern.
+      const safetyTimer = setTimeout(() => {
+        if (!termRef.current || !fitRef.current) return;
+        fitRef.current.fit();
+        termRef.current.refresh(0, termRef.current.rows - 1);
+        notifyResizeIfChanged();
+      }, 150);
+      return () => {
+        cancelAnimationFrame(raf);
+        clearTimeout(safetyTimer);
+      };
     }
   }, [visible, notifyResizeIfChanged]);
 
@@ -265,13 +308,14 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
 
     const onVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        // Small delay to let the browser finish compositing
-        setTimeout(refresh, 100);
+        // Delay must be long enough for the browser to finish compositing
+        // after returning from a minimised/background state.
+        setTimeout(refresh, 200);
       }
     };
 
     const onWindowFocus = () => {
-      setTimeout(refresh, 100);
+      setTimeout(refresh, 200);
     };
 
     document.addEventListener('visibilitychange', onVisibilityChange);

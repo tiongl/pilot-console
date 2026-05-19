@@ -30,7 +30,65 @@ interface ProjectTabState {
 }
 const projectTabStates = new Map<string, ProjectTabState>();
 
+// --- localStorage persistence helpers ---
+const TAB_STATE_VERSION = 1;
+interface PersistedTabState {
+  version: number;
+  tabs: TabMeta[];
+  activeTabId: string;
+  fontSize: number;
+}
+
+function lsTabKey(stateKey: string) {
+  return `pilot-console-tabs:${stateKey}`;
+}
+
+function loadTabState(stateKey: string): PersistedTabState | null {
+  try {
+    const raw = localStorage.getItem(lsTabKey(stateKey));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed?.version !== TAB_STATE_VERSION || !Array.isArray(parsed.tabs)) return null;
+    return parsed as PersistedTabState;
+  } catch {
+    return null;
+  }
+}
+
+function saveTabState(stateKey: string, state: ProjectTabState) {
+  try {
+    const data: PersistedTabState = { version: TAB_STATE_VERSION, ...state };
+    localStorage.setItem(lsTabKey(stateKey), JSON.stringify(data));
+  } catch { /* quota exceeded — ignore */ }
+}
+
+/** Reassign fresh IDs to restored tabs to avoid collisions with tabCounter */
+function rehydrateTabs(tabs: TabMeta[]): TabMeta[] {
+  return tabs.map(t => {
+    tabCounter++;
+    return { ...t, id: `tab-${tabCounter}` };
+  });
+}
+
 const MAX_HIDDEN_BUFFER = 100_000; // chars to retain for hidden terminals
+
+/**
+ * Find a safe cut point that doesn't split an ANSI escape sequence.
+ * Scans backwards from `pos` to avoid slicing mid-escape, which would
+ * inject garbage bytes into the terminal stream and cause corruption.
+ */
+function findSafeSlicePoint(str: string, pos: number): number {
+  // Scan backwards up to 32 chars (longest plausible ANSI sequence)
+  const limit = Math.max(0, pos - 32);
+  for (let i = pos; i >= limit; i--) {
+    if (str.charCodeAt(i) === 0x1b) {
+      // Found an ESC — the sequence starting here may extend past `pos`,
+      // so cut just before it to avoid splitting it.
+      return i;
+    }
+  }
+  return pos;
+}
 
 /**
  * Each tab owns its own WS connection and TerminalPane.
@@ -76,7 +134,8 @@ const TerminalTab = React.memo(function TerminalTab({
         pendingLen.current += data.length;
         if (pendingLen.current > MAX_HIDDEN_BUFFER) {
           const joined = pendingOutput.current.join('');
-          const trimmed = joined.slice(-MAX_HIDDEN_BUFFER);
+          const cutPos = findSafeSlicePoint(joined, joined.length - MAX_HIDDEN_BUFFER);
+          const trimmed = joined.slice(cutPos);
           pendingOutput.current = [trimmed];
           pendingLen.current = trimmed.length;
         }
@@ -106,6 +165,14 @@ const TerminalTab = React.memo(function TerminalTab({
       pendingOutput.current = [];
       pendingLen.current = 0;
       termApiRef.current.write(flushed);
+      // Force a full redraw after flushing — the bulk write can leave
+      // the canvas in a dirty state, especially after long background buffering.
+      // Use a short delay instead of a single rAF so this runs AFTER
+      // TerminalPane's visibility fit+refresh cycle has settled the layout.
+      const timer = setTimeout(() => {
+        termApiRef.current?.refresh();
+      }, 200);
+      return () => clearTimeout(timer);
     }
   }, [visible, active]);
 
@@ -189,48 +256,150 @@ const TerminalTab = React.memo(function TerminalTab({
   );
 });
 
-export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, visible = true }: { worktreeId?: string; projectId?: string; visible?: boolean }) {
+export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, cwd, visible = true }: { worktreeId?: string; projectId?: string; cwd?: string; visible?: boolean }) {
   const { id: routeProjectId } = useParams<{ id: string }>();
   const projectId = projectIdProp || routeProjectId;
+
+  // Use cwd as the tab state key for clean directory-based separation;
+  // falls back to projectId if cwd is not available
+  const tabStateKey = cwd || projectId || '';
 
   const defaultTheme = localStorage.getItem('pilot-console-theme') || 'Catppuccin';
   const defaultFont = localStorage.getItem('pilot-console-font') || TERMINAL_FONTS[0].family;
 
-  // Restore persisted tab state for this project, or create fresh
+  // Restore persisted tab state for this context, or create fresh
   const [tabs, setTabs] = useState<TabMeta[]>(() => {
-    const saved = projectId ? projectTabStates.get(projectId) : null;
-    if (saved && saved.tabs.length > 0) return saved.tabs;
-    tabCounter++;
-    return [{ id: `tab-${tabCounter}`, label: 'Copilot 1', mode: 'cli' as const, themeName: defaultTheme, fontFamily: defaultFont }];
+    // 1. In-memory cache (fastest — survives route changes)
+    const mem = tabStateKey ? projectTabStates.get(tabStateKey) : null;
+    if (mem && mem.tabs.length > 0) return mem.tabs;
+    // 2. localStorage (survives page refresh)
+    if (tabStateKey) {
+      const ls = loadTabState(tabStateKey);
+      if (ls && ls.tabs.length > 0) {
+        const hydrated = rehydrateTabs(ls.tabs);
+        return hydrated;
+      }
+    }
+    // 3. Worktree nodes auto-start with a Copilot CLI tab; project nodes start empty
+    if (worktreeId) {
+      tabCounter++;
+      return [{ id: `tab-${tabCounter}`, label: 'Copilot 1', mode: 'cli' as const, themeName: defaultTheme, fontFamily: defaultFont }];
+    }
+    return [];
   });
   const [activeTabId, setActiveTabId] = useState(() => {
-    const saved = projectId ? projectTabStates.get(projectId) : null;
-    return saved?.activeTabId ?? tabs[0].id;
+    const mem = tabStateKey ? projectTabStates.get(tabStateKey) : null;
+    if (mem?.activeTabId) return mem.activeTabId;
+    if (tabStateKey) {
+      const ls = loadTabState(tabStateKey);
+      // Map persisted activeTabId to a rehydrated tab — since IDs are reassigned,
+      // use the index of the original active tab
+      if (ls && ls.tabs.length > 0) {
+        const origIdx = ls.tabs.findIndex(t => t.id === ls.activeTabId);
+        const idx = origIdx >= 0 ? Math.min(origIdx, tabs.length - 1) : 0;
+        return tabs[idx]?.id ?? '';
+      }
+    }
+    return tabs[0]?.id ?? '';
   });
   const [fontSize, setFontSize] = useState(() => {
+    // Per-project font size, fallback to global, fallback to default
+    if (tabStateKey) {
+      const ls = loadTabState(tabStateKey);
+      if (ls?.fontSize) return Math.max(8, Math.min(24, ls.fontSize));
+    }
     const saved = localStorage.getItem('pilot-console-font-size');
-    return saved ? Math.max(10, Math.min(24, parseInt(saved, 10) || 14)) : 14;
+    return saved ? Math.max(8, Math.min(24, parseInt(saved, 10) || 14)) : 14;
   });
   const [tabStatuses, setTabStatuses] = useState<Record<string, string>>({});
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
 
-  const firstTabId = useRef(tabs[0].id);
+  const firstTabId = useRef(tabs[0]?.id ?? '');
   const killCallbacksRef = useRef<Record<string, (sessionId: string | null) => void>>({});
   const statusCallbacksRef = useRef<Record<string, (status: string) => void>>({});
   const sessionIdCallbacksRef = useRef<Record<string, (sid: string) => void>>({});
 
-  // Persist tab state whenever it changes (in-memory for cross-route survival)
+  // Persist tab state whenever it changes (in-memory + localStorage)
   useEffect(() => {
-    if (projectId) {
-      projectTabStates.set(projectId, { tabs, activeTabId, fontSize });
+    if (tabStateKey) {
+      const state = { tabs, activeTabId, fontSize };
+      projectTabStates.set(tabStateKey, state);
+      saveTabState(tabStateKey, state);
     }
-  }, [projectId, tabs, activeTabId, fontSize]);
+  }, [tabStateKey, tabs, activeTabId, fontSize]);
 
-  // Persist font size to localStorage (survives page refresh)
+  // Also persist global font size for migration/fallback
   useEffect(() => {
     localStorage.setItem('pilot-console-font-size', String(fontSize));
   }, [fontSize]);
+
+  // On mount, reconcile tabs with active daemon sessions.
+  // When tabs are restored from localStorage, validate their sessionIds
+  // against the server. When no tabs exist, create tabs from active sessions.
+  const resumeCheckedRef = useRef(false);
+  useEffect(() => {
+    if (resumeCheckedRef.current) return;
+    if (!projectId) return;
+    // Skip if tabs came from in-memory cache (sessions are already live)
+    const mem = tabStateKey ? projectTabStates.get(tabStateKey) : null;
+    if (mem && mem.tabs.length > 0 && mem.tabs.some(t => t.sessionId)) return;
+
+    resumeCheckedRef.current = true;
+    fetch('/api/sessions/active')
+      .then(r => r.ok ? r.json() : { sessions: [] })
+      .then((data: { sessions: Array<{ projectId: string; worktreeId: string | null; sessionId: string; mode: string; status: string }> }) => {
+        const matching = data.sessions.filter(s =>
+          s.projectId === projectId &&
+          (worktreeId ? s.worktreeId === worktreeId : !s.worktreeId) &&
+          s.status !== 'exited'
+        );
+
+        setTabs(prev => {
+          if (prev.length > 0) {
+            // Tabs restored from localStorage — reconcile sessionIds
+            const usedSessionIds = new Set<string>();
+            const reconciled = prev.map(tab => {
+              if (tab.sessionId) {
+                // Validate: is this sessionId still active?
+                const stillActive = matching.find(s => s.sessionId === tab.sessionId);
+                if (stillActive) {
+                  usedSessionIds.add(tab.sessionId);
+                  return tab;
+                }
+                // Session gone — clear the stale ID so a new one is created
+                return { ...tab, sessionId: undefined };
+              }
+              // No sessionId — try to match by mode
+              const match = matching.find(s => {
+                const sMode = (s.mode === 'shell' || s.mode === 'powershell') ? s.mode : 'cli';
+                return sMode === tab.mode && !usedSessionIds.has(s.sessionId);
+              });
+              if (match) {
+                usedSessionIds.add(match.sessionId);
+                return { ...tab, sessionId: match.sessionId };
+              }
+              return tab;
+            });
+            return reconciled;
+          }
+          // No tabs at all — create from active sessions
+          if (matching.length === 0) return prev;
+          const newTabs: TabMeta[] = matching.map(s => {
+            tabCounter++;
+            const mode = (s.mode === 'shell' || s.mode === 'powershell') ? s.mode : 'cli';
+            const label = mode === 'shell' ? `Shell ${tabCounter}` : mode === 'powershell' ? `PS ${tabCounter}` : `Copilot ${tabCounter}`;
+            return { id: `tab-${tabCounter}`, label, mode, themeName: defaultTheme, fontFamily: defaultFont, sessionId: s.sessionId };
+          });
+          return newTabs;
+        });
+        setActiveTabId(prev => {
+          if (prev) return prev;
+          return '';
+        });
+      })
+      .catch(() => {});
+  }, [projectId, worktreeId, tabStateKey, defaultTheme, defaultFont]);
 
   const [showNewMenu, setShowNewMenu] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
@@ -277,9 +446,6 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   }, []);
 
   const closeTab = useCallback((tabId: string) => {
-    // Prevent closing the last tab — always keep at least one open
-    if (tabs.length <= 1) return;
-
     const killCb = killCallbacksRef.current[tabId];
     if (killCb && projectId) {
       const getSessionId = (killCb as unknown as { _getSessionId?: () => string | null })._getSessionId;
@@ -325,7 +491,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
       if ((tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') && !isXterm) return;
       if (e.ctrlKey && !e.shiftKey) {
         if (e.key === '=' || e.key === '+') { e.preventDefault(); setFontSize(s => Math.min(24, s + 1)); }
-        if (e.key === '-') { e.preventDefault(); setFontSize(s => Math.max(10, s - 1)); }
+        if (e.key === '-') { e.preventDefault(); setFontSize(s => Math.max(8, s - 1)); }
       }
       if (e.ctrlKey && e.shiftKey) {
         if (e.key === 'K') { e.preventDefault(); handleKillActive(); }
@@ -354,7 +520,8 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
 
   return (
     <div className="flex h-full flex-col">
-      {/* Tab bar + controls */}
+      {/* Tab bar + controls — hidden when no tabs (landing page shown instead) */}
+      {tabs.length > 0 && (
       <div className="flex items-center border-b bg-muted/30">
         <div className="flex items-center flex-1 overflow-x-auto min-w-0">
           {tabs.map(tab => {
@@ -407,8 +574,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
                 <span className="truncate max-w-[100px]">{tab.label}</span>
                 <button
                   onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
-                  className={`h-4 w-4 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-muted ${tabs.length <= 1 ? 'invisible' : ''}`}
-                  disabled={tabs.length <= 1}
+                  className={`h-4 w-4 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-muted`}
                 >
                   <XIcon className="h-3 w-3" />
                 </button>
@@ -449,7 +615,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
               </select>
             </div>
             <div className="flex items-center gap-0.5 border rounded px-1">
-              <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => setFontSize(s => Math.max(10, s - 1))} disabled={fontSize <= 10}>
+              <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => setFontSize(s => Math.max(8, s - 1))} disabled={fontSize <= 8}>
                 <Minus className="h-3 w-3" />
               </Button>
               <span className="text-xs w-5 text-center tabular-nums">{fontSize}</span>
@@ -504,12 +670,77 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
           document.body
         )}
       </div>
+      )}
 
       {/* Terminal content — all tabs stay mounted, hidden via CSS */}
       <div className="flex-1 overflow-hidden relative">
         {tabs.length === 0 && (
-          <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
-            Click <Plus className="h-4 w-4 mx-1 inline" /> to open a terminal
+          <div className="flex items-center justify-center h-full">
+            <div className="text-center space-y-6 max-w-md">
+              <div className="space-y-2">
+                <h2 className="text-lg font-semibold text-foreground">No active sessions</h2>
+                <p className="text-sm text-muted-foreground">
+                  Start a new session to begin working with this project.
+                  {cwd && <span className="block mt-1 font-mono text-xs opacity-70">{cwd}</span>}
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  onClick={() => addTab('cli')}
+                  className="flex flex-col items-center gap-2 rounded-lg border p-4 hover:bg-accent hover:text-accent-foreground transition-colors"
+                >
+                  <Bot className="h-6 w-6" />
+                  <div>
+                    <div className="text-sm font-medium">Copilot CLI</div>
+                    <div className="text-[10px] text-muted-foreground">AI-powered terminal</div>
+                  </div>
+                </button>
+                <button
+                  onClick={() => addTab('shell')}
+                  className="flex flex-col items-center gap-2 rounded-lg border p-4 hover:bg-accent hover:text-accent-foreground transition-colors"
+                >
+                  <Terminal className="h-6 w-6" />
+                  <div>
+                    <div className="text-sm font-medium">Terminal</div>
+                    <div className="text-[10px] text-muted-foreground">Plain shell</div>
+                  </div>
+                </button>
+                <button
+                  onClick={() => addTab('powershell')}
+                  className="flex flex-col items-center gap-2 rounded-lg border p-4 hover:bg-accent hover:text-accent-foreground transition-colors"
+                >
+                  <span className="text-lg font-bold leading-6">PS</span>
+                  <div>
+                    <div className="text-sm font-medium">PowerShell</div>
+                    <div className="text-[10px] text-muted-foreground">PowerShell session</div>
+                  </div>
+                </button>
+                <button
+                  onClick={() => addTab('files')}
+                  className="flex flex-col items-center gap-2 rounded-lg border p-4 hover:bg-accent hover:text-accent-foreground transition-colors"
+                >
+                  <FolderOpen className="h-6 w-6" />
+                  <div>
+                    <div className="text-sm font-medium">Files</div>
+                    <div className="text-[10px] text-muted-foreground">Browse project files</div>
+                  </div>
+                </button>
+              </div>
+              <div className="flex items-center justify-center gap-2 pt-2">
+                <button
+                  onClick={() => addTab('git')}
+                  className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground transition-colors"
+                >
+                  <GitCommitHorizontal className="h-3.5 w-3.5" /> Git Log
+                </button>
+                <button
+                  onClick={() => addTab('git-status')}
+                  className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground transition-colors"
+                >
+                  <GitBranch className="h-3.5 w-3.5" /> Git Status
+                </button>
+              </div>
+            </div>
           </div>
         )}
         {tabs.map(tab => {

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect, ReactNode } from 'react';
 
 export type SplitContent =
   | { type: 'project'; projectId: string }
@@ -17,10 +17,54 @@ interface SplitContextType {
 
 const SplitContext = createContext<SplitContextType | undefined>(undefined);
 
+const SPLIT_LS_KEY = 'pilot-console-split';
+const SPLIT_VERSION = 1;
+
+interface PersistedSplit {
+  version: number;
+  paneCount: number;
+  panes: SplitContent[];
+  activePaneIndex: number;
+}
+
+function loadSplitState(): PersistedSplit | null {
+  try {
+    const raw = localStorage.getItem(SPLIT_LS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed?.version !== SPLIT_VERSION) return null;
+    const pc = Math.max(1, Math.min(4, parsed.paneCount ?? 1));
+    const panes = Array.isArray(parsed.panes) ? parsed.panes.slice(0, pc - 1) : [];
+    while (panes.length < pc - 1) panes.push(null);
+    const api = Math.max(0, Math.min(pc - 1, parsed.activePaneIndex ?? 0));
+    return { version: SPLIT_VERSION, paneCount: pc, panes, activePaneIndex: api };
+  } catch {
+    return null;
+  }
+}
+
+function saveSplitState(paneCount: number, panes: SplitContent[], activePaneIndex: number) {
+  try {
+    const data: PersistedSplit = { version: SPLIT_VERSION, paneCount, panes, activePaneIndex };
+    localStorage.setItem(SPLIT_LS_KEY, JSON.stringify(data));
+  } catch { /* ignore */ }
+}
+
 export function SplitProvider({ children }: { children: ReactNode }) {
-  const [paneCount, setPaneCountRaw] = useState(1);
-  const [panes, setPanes] = useState<SplitContent[]>([]);
-  const [activePaneIndex, setActivePaneIndex] = useState(0);
+  const [paneCount, setPaneCountRaw] = useState(() => {
+    return loadSplitState()?.paneCount ?? 1;
+  });
+  const [panes, setPanes] = useState<SplitContent[]>(() => {
+    return loadSplitState()?.panes ?? [];
+  });
+  const [activePaneIndex, setActivePaneIndex] = useState(() => {
+    return loadSplitState()?.activePaneIndex ?? 0;
+  });
+
+  // Persist whenever split state changes
+  useEffect(() => {
+    saveSplitState(paneCount, panes, activePaneIndex);
+  }, [paneCount, panes, activePaneIndex]);
 
   const setPaneCount = useCallback((n: number) => {
     const clamped = Math.max(1, Math.min(4, n));

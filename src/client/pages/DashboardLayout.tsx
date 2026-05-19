@@ -50,7 +50,14 @@ interface ProjectSessionInfo {
 }
 
 function StatusDot({ info }: { info: ProjectSessionInfo | undefined }) {
-  if (!info) return null;
+  if (!info) {
+    return (
+      <span
+        className="h-2 w-2 shrink-0 rounded-full bg-muted-foreground/30"
+        title="No active session"
+      />
+    );
+  }
 
   if (info.status === 'busy') {
     return (
@@ -80,8 +87,13 @@ function StatusDot({ info }: { info: ProjectSessionInfo | undefined }) {
     );
   }
 
-  // exited cleanly — no indicator
-  return null;
+  // exited cleanly — grey
+  return (
+    <span
+      className="h-2 w-2 shrink-0 rounded-full bg-muted-foreground/30"
+      title="Session exited"
+    />
+  );
 }
 
 function ProjectNav({

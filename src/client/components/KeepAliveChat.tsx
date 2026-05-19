@@ -1,13 +1,15 @@
 import { useState, useEffect, useRef } from 'react';
 import ProjectChatPage from '../pages/ProjectChatPage';
+import { useProjectContextOptional } from '../lib/project-context';
 
 const MAX_CACHED = 3;
 
 interface CacheEntry {
-  /** Stable key: "projectId:main" or "projectId:worktree:worktreeId" */
+  /** Stable key: uses cwd when available, otherwise "projectId:main" or "projectId:worktree:worktreeId" */
   cacheKey: string;
   projectId: string;
   worktreeId?: string;
+  cwd?: string;
 }
 
 /**
@@ -19,13 +21,21 @@ interface CacheEntry {
 export default function KeepAliveChat({
   projectId,
   worktreeId,
+  cwd: cwdProp,
 }: {
   projectId?: string;
   worktreeId?: string;
+  cwd?: string;
 }) {
-  const cacheKey = worktreeId
-    ? `${projectId}:worktree:${worktreeId}`
-    : `${projectId}:main`;
+  // Use explicit cwd prop, or fall back to ProjectProvider context
+  const ctx = useProjectContextOptional();
+  const cwd = cwdProp ?? ctx?.cwd;
+  // Use cwd as cache key when available for clean directory-based separation
+  const cacheKey = cwd
+    ? `cwd:${cwd}`
+    : worktreeId
+      ? `${projectId}:worktree:${worktreeId}`
+      : `${projectId}:main`;
 
   const [entries, setEntries] = useState<CacheEntry[]>([]);
   // Track the previous active key so we know when it changes
@@ -44,7 +54,7 @@ export default function KeepAliveChat({
         return next;
       }
       // Add new entry, evict oldest if over limit
-      const entry: CacheEntry = { cacheKey, projectId, worktreeId };
+      const entry: CacheEntry = { cacheKey, projectId, worktreeId, cwd };
       const next = [...prev, entry];
       if (next.length > MAX_CACHED) {
         next.shift(); // evict LRU
@@ -52,7 +62,7 @@ export default function KeepAliveChat({
       return next;
     });
     prevKeyRef.current = cacheKey;
-  }, [cacheKey, projectId, worktreeId]);
+  }, [cacheKey, projectId, worktreeId, cwd]);
 
   if (!projectId) return null;
 
@@ -72,6 +82,7 @@ export default function KeepAliveChat({
             <ProjectChatPage
               projectId={entry.projectId}
               worktreeId={entry.worktreeId}
+              cwd={entry.cwd}
               visible={isActive}
             />
           </div>

@@ -2,6 +2,7 @@ import { Routes, Route, Navigate, useParams } from 'react-router';
 import { AuthProvider, useAuth } from './lib/auth-context';
 import { AutomationProvider } from './lib/automation-context';
 import { SplitProvider } from './lib/split-context';
+import { useProjectContextOptional } from './lib/project-context';
 import LoginPage from './pages/LoginPage';
 import DashboardLayout from './pages/DashboardLayout';
 import HomePage from './pages/HomePage';
@@ -28,7 +29,8 @@ import { useReportNotifications } from './hooks/useReportNotifications';
 /** Uses KeepAliveChat to keep recently-used project terminals alive across switches */
 function ProjectChatKeepAlive() {
   const { id } = useParams<{ id: string }>();
-  return <KeepAliveChat projectId={id} />;
+  const ctx = useProjectContextOptional();
+  return <KeepAliveChat projectId={id} cwd={ctx?.cwd} />;
 }
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {

@@ -237,11 +237,17 @@ export default function SessionHistory({ projectId }: Props) {
                 detail.turns.map((turn) => (
                   <div key={turn.turn_index} className="space-y-2">
                     <div className="flex items-start gap-2">
-                      <User className="h-4 w-4 text-blue-400 mt-1 shrink-0" />
+                      <div className="flex items-center gap-1 mt-1 shrink-0">
+                        <User className="h-4 w-4 text-blue-400" />
+                        <span className="text-xs font-medium text-blue-400">tiongl@</span>
+                      </div>
                       <pre className="text-sm whitespace-pre-wrap break-words flex-1 bg-accent/30 rounded p-3">{turn.user_message}</pre>
                     </div>
                     <div className="flex items-start gap-2">
-                      <Bot className="h-4 w-4 text-green-400 mt-1 shrink-0" />
+                      <div className="flex items-center gap-1 mt-1 shrink-0">
+                        <Bot className="h-4 w-4 text-green-400" />
+                        <span className="text-xs font-medium text-green-400">copilot</span>
+                      </div>
                       <pre className="text-sm whitespace-pre-wrap break-words flex-1 text-muted-foreground p-3">{turn.assistant_response}</pre>
                     </div>
                   </div>
