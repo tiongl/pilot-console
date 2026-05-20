@@ -161,40 +161,38 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
                   {gridHover ? `${gridHover.rows}×${gridHover.cols}` : `${layout.rows}×${layout.cols}`}
                 </div>
                 <div className="grid grid-cols-4 gap-1">
-                  {Array.from({ length: 4 }, (_, r) =>
-                    Array.from({ length: 4 }, (_, c) => {
-                      const rows = r + 1;
-                      const cols = c + 1;
-                      const valid = isValidSplitLayout(rows, cols);
-                      const isSelected = layout.rows === rows && layout.cols === cols;
-                      const isHovered = gridHover && rows <= gridHover.rows && cols <= gridHover.cols;
-                      const hoverValid = gridHover ? isValidSplitLayout(gridHover.rows, gridHover.cols) : false;
-                      return (
-                        <button
-                          key={`${r}-${c}`}
-                          className={`w-5 h-5 rounded-sm border text-[0px] transition-colors ${
-                            isSelected
-                              ? 'bg-primary border-primary'
-                              : !valid
-                                ? 'bg-muted/30 border-muted cursor-not-allowed opacity-30'
-                                : isHovered && hoverValid
-                                  ? 'bg-primary/40 border-primary/60'
-                                  : 'bg-muted/50 border-border hover:border-primary/40'
-                          }`}
-                          disabled={!valid}
-                          onMouseEnter={() => valid && setGridHover({ rows, cols })}
-                          onMouseLeave={() => setGridHover(null)}
-                          onClick={() => {
-                            if (valid) {
-                              setLayout({ rows, cols });
-                              setShowGridPicker(false);
-                              setGridHover(null);
-                            }
-                          }}
-                        />
-                      );
-                    })
-                  )}
+                  {Array.from({ length: 16 }, (_, idx) => {
+                    const rows = Math.floor(idx / 4) + 1;
+                    const cols = (idx % 4) + 1;
+                    const valid = isValidSplitLayout(rows, cols);
+                    const isSelected = layout.rows === rows && layout.cols === cols;
+                    const isHovered = gridHover && rows <= gridHover.rows && cols <= gridHover.cols;
+                    const hoverValid = gridHover ? isValidSplitLayout(gridHover.rows, gridHover.cols) : false;
+                    return (
+                      <button
+                        key={idx}
+                        className={`w-5 h-5 rounded-sm border text-[0px] transition-colors ${
+                          isSelected
+                            ? 'bg-primary border-primary'
+                            : !valid
+                              ? 'bg-muted/30 border-muted cursor-not-allowed opacity-30'
+                              : isHovered && hoverValid
+                                ? 'bg-primary/40 border-primary/60'
+                                : 'bg-muted/50 border-border hover:border-primary/40'
+                        }`}
+                        disabled={!valid}
+                        onMouseEnter={() => valid && setGridHover({ rows, cols })}
+                        onMouseLeave={() => setGridHover(null)}
+                        onClick={() => {
+                          if (valid) {
+                            setLayout({ rows, cols });
+                            setShowGridPicker(false);
+                            setGridHover(null);
+                          }
+                        }}
+                      />
+                    );
+                  })}
                 </div>
               </div>
             )}

@@ -3,6 +3,7 @@ import { Outlet, Link, useNavigate, useLocation } from 'react-router';
 import { useAuth } from '../lib/auth-context';
 import { useTheme, THEMES, type ThemeId } from '../lib/theme-context';
 import { useSplit, type SplitContent } from '../lib/split-context';
+import { isValidSplitLayout } from '../lib/project-split-context';
 import { Button } from '../components/ui/button';
 import { Plus, LogOut, FolderOpen, Pin, Palette, Settings, ChevronRight, ChevronDown, GitBranch, Trash2, Clock, Zap, Wrench, Columns2 } from 'lucide-react';
 import { SkillCatalog, InstalledSkillsPanel } from '../pages/ProjectSkillsPage';
@@ -539,11 +540,12 @@ export default function DashboardLayout() {
   const { theme, setTheme } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
-  const { paneCount, panes, activePaneIndex, setPaneCount, setPaneContent, setActivePaneIndex } = useSplit();
+  const { paneCount, panes, activePaneIndex, layout: dashLayout, setPaneCount, setPaneContent, setActivePaneIndex, setLayout: setDashLayout } = useSplit();
   const [projects, setProjects] = useState<Project[]>([]);
   const [daemonConnected, setDaemonConnected] = useState<boolean | null>(null);
   const [showSkillsDialog, setShowSkillsDialog] = useState(false);
   const [showLayoutMenu, setShowLayoutMenu] = useState(false);
+  const [dashGridHover, setDashGridHover] = useState<{ rows: number; cols: number } | null>(null);
   const [settingsTab, setSettingsTab] = useState<'skills' | 'marketplace'>('skills');
   const { badgeCount, schedules } = useAutomation();
   const [splitRatio, setSplitRatio] = useState(0.5);
@@ -708,18 +710,44 @@ export default function DashboardLayout() {
               {showLayoutMenu && (
                 <>
                   <div className="fixed inset-0 z-[70]" onClick={() => setShowLayoutMenu(false)} />
-                  <div className="absolute right-0 top-full mt-1 z-[80] bg-popover border rounded-md shadow-md p-1 flex gap-0.5">
-                    {[1, 2, 3, 4].map(n => (
-                      <button
-                        key={n}
-                        onClick={() => { setPaneCount(n); setShowLayoutMenu(false); }}
-                        className={`p-1.5 rounded flex items-center hover:bg-accent ${paneCount === n ? 'text-primary bg-accent' : 'text-foreground'}`}
-                        aria-label={`${n} ${n === 1 ? 'column' : 'columns'}`}
-                        title={`${n} ${n === 1 ? 'column' : 'columns'}`}
-                      >
-                        <span className="flex gap-0.5">{Array.from({ length: n }, (_, i) => <span key={i} className="w-2 h-3 border rounded-[1px]" />)}</span>
-                      </button>
-                    ))}
+                  <div className="absolute right-0 top-full mt-1 z-[80] bg-popover border rounded-md shadow-md p-2">
+                    <div className="text-[10px] text-muted-foreground mb-1.5 text-center">
+                      {dashGridHover ? `${dashGridHover.rows}×${dashGridHover.cols}` : `${dashLayout.rows}×${dashLayout.cols}`}
+                    </div>
+                    <div className="grid grid-cols-4 gap-1">
+                      {Array.from({ length: 16 }, (_, idx) => {
+                        const rows = Math.floor(idx / 4) + 1;
+                        const cols = (idx % 4) + 1;
+                        const valid = isValidSplitLayout(rows, cols);
+                        const isSelected = dashLayout.rows === rows && dashLayout.cols === cols;
+                        const isHovered = dashGridHover && rows <= dashGridHover.rows && cols <= dashGridHover.cols;
+                        const hoverValid = dashGridHover ? isValidSplitLayout(dashGridHover.rows, dashGridHover.cols) : false;
+                        return (
+                          <button
+                            key={idx}
+                            className={`w-5 h-5 rounded-sm border text-[0px] transition-colors ${
+                              isSelected
+                                ? 'bg-primary border-primary'
+                                : !valid
+                                  ? 'bg-muted/30 border-muted cursor-not-allowed opacity-30'
+                                  : isHovered && hoverValid
+                                    ? 'bg-primary/40 border-primary/60'
+                                    : 'bg-muted/50 border-border hover:border-primary/40'
+                            }`}
+                            disabled={!valid}
+                            onMouseEnter={() => valid && setDashGridHover({ rows, cols })}
+                            onMouseLeave={() => setDashGridHover(null)}
+                            onClick={() => {
+                              if (valid) {
+                                setDashLayout({ rows, cols });
+                                setShowLayoutMenu(false);
+                                setDashGridHover(null);
+                              }
+                            }}
+                          />
+                        );
+                      })}
+                    </div>
                   </div>
                 </>
               )}
@@ -856,30 +884,33 @@ export default function DashboardLayout() {
       />
 
       {paneCount > 1 ? (
-        <div className="flex flex-1 overflow-hidden">
+        <div
+          className="flex-1 overflow-hidden"
+          style={{
+            display: 'grid',
+            gridTemplateRows: `repeat(${dashLayout.rows}, 1fr)`,
+            gridTemplateColumns: `repeat(${dashLayout.cols}, 1fr)`,
+            gap: '2px',
+          }}
+        >
           {/* Pane 0: router outlet */}
           <main
             className={`flex flex-col overflow-hidden ${activePaneIndex === 0 ? 'ring-2 ring-primary/50 ring-inset' : ''}`}
-            style={{ flex: '1 1 0', minWidth: 0 }}
+            style={{ minWidth: 0, minHeight: 0 }}
             onClick={() => setActivePaneIndex(0)}
           >
             <Outlet />
           </main>
-          {/* Extra panes 1..N-1 with dividers */}
+          {/* Extra panes 1..N-1 */}
           {panes.slice(0, paneCount - 1).map((content, i) => (
-            <React.Fragment key={i}>
-              <div
-                className="w-1 bg-border hover:bg-primary/50 cursor-col-resize shrink-0 transition-colors"
-                title="Drag to resize"
-              />
-              <div
-                className={`flex flex-col overflow-hidden ${activePaneIndex === i + 1 ? 'ring-2 ring-primary/50 ring-inset' : ''}`}
-                style={{ flex: '1 1 0', minWidth: 0 }}
-                onClick={() => setActivePaneIndex(i + 1)}
-              >
-                {renderPaneContent(content)}
-              </div>
-            </React.Fragment>
+            <div
+              key={i}
+              className={`flex flex-col overflow-hidden ${activePaneIndex === i + 1 ? 'ring-2 ring-primary/50 ring-inset' : ''}`}
+              style={{ minWidth: 0, minHeight: 0 }}
+              onClick={() => setActivePaneIndex(i + 1)}
+            >
+              {renderPaneContent(content)}
+            </div>
           ))}
         </div>
       ) : (
