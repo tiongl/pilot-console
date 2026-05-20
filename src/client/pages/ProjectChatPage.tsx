@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { useParams } from 'react-router';
 import { useCliSocket } from '../hooks/useCliSocket';
 import TerminalPane, { type TerminalPaneAPI, TERMINAL_FONTS } from '../components/terminal/TerminalPane';
@@ -10,6 +9,7 @@ import GitLogTab from '../components/project/GitLogTab';
 import GitPanel from '../components/project/GitPanel';
 import { OutputFilter, DEFAULT_FILTER_PATTERNS } from '../lib/output-filter';
 import FileExplorer from '../components/project/FileExplorer';
+import { useProjectSplit, splitGroupCount } from '../lib/project-split-context';
 
 interface TabMeta {
   id: string;
@@ -18,6 +18,7 @@ interface TabMeta {
   themeName: string;
   fontFamily: string;
   sessionId?: string;
+  group: number;
 }
 
 let tabCounter = 0;
@@ -66,7 +67,7 @@ function saveTabState(stateKey: string, state: ProjectTabState) {
 function rehydrateTabs(tabs: TabMeta[]): TabMeta[] {
   return tabs.map(t => {
     tabCounter++;
-    return { ...t, id: `tab-${tabCounter}` };
+    return { ...t, id: `tab-${tabCounter}`, group: typeof t.group === 'number' && t.group >= 1 ? t.group : 1 };
   });
 }
 
@@ -283,24 +284,9 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
     // 3. Worktree nodes auto-start with a Copilot CLI tab; project nodes start empty
     if (worktreeId) {
       tabCounter++;
-      return [{ id: `tab-${tabCounter}`, label: 'Copilot 1', mode: 'cli' as const, themeName: defaultTheme, fontFamily: defaultFont }];
+      return [{ id: `tab-${tabCounter}`, label: 'Copilot 1', mode: 'cli' as const, themeName: defaultTheme, fontFamily: defaultFont, group: 1 as const }];
     }
     return [];
-  });
-  const [activeTabId, setActiveTabId] = useState(() => {
-    const mem = tabStateKey ? projectTabStates.get(tabStateKey) : null;
-    if (mem?.activeTabId) return mem.activeTabId;
-    if (tabStateKey) {
-      const ls = loadTabState(tabStateKey);
-      // Map persisted activeTabId to a rehydrated tab — since IDs are reassigned,
-      // use the index of the original active tab
-      if (ls && ls.tabs.length > 0) {
-        const origIdx = ls.tabs.findIndex(t => t.id === ls.activeTabId);
-        const idx = origIdx >= 0 ? Math.min(origIdx, tabs.length - 1) : 0;
-        return tabs[idx]?.id ?? '';
-      }
-    }
-    return tabs[0]?.id ?? '';
   });
   const [fontSize, setFontSize] = useState(() => {
     // Per-project font size, fallback to global, fallback to default
@@ -314,6 +300,29 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   const [tabStatuses, setTabStatuses] = useState<Record<string, string>>({});
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
+  const { layout, isSplit, groupCount } = useProjectSplit();
+  // Active tab per group: Record<groupNumber, tabId>
+  const [activeTabIds, setActiveTabIds] = useState<Record<number, string>>(() => {
+    const result: Record<number, string> = {};
+    // Try to restore active tab from persistence for group 1
+    const mem = tabStateKey ? projectTabStates.get(tabStateKey) : null;
+    if (mem?.activeTabId) {
+      result[1] = mem.activeTabId;
+    } else if (tabStateKey) {
+      const ls = loadTabState(tabStateKey);
+      if (ls && ls.tabs.length > 0) {
+        const origIdx = ls.tabs.findIndex(t => t.id === ls.activeTabId);
+        const idx = origIdx >= 0 ? Math.min(origIdx, tabs.length - 1) : 0;
+        result[1] = tabs[idx]?.id ?? '';
+      } else {
+        result[1] = tabs[0]?.id ?? '';
+      }
+    } else {
+      result[1] = tabs[0]?.id ?? '';
+    }
+    return result;
+  });
+  const [focusedGroup, setFocusedGroup] = useState(1);
 
   const firstTabId = useRef(tabs[0]?.id ?? '');
   const killCallbacksRef = useRef<Record<string, (sessionId: string | null) => void>>({});
@@ -323,16 +332,48 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   // Persist tab state whenever it changes (in-memory + localStorage)
   useEffect(() => {
     if (tabStateKey) {
-      const state = { tabs, activeTabId, fontSize };
+      const state = { tabs, activeTabId: activeTabIds[1] || '', fontSize };
       projectTabStates.set(tabStateKey, state);
       saveTabState(tabStateKey, state);
     }
-  }, [tabStateKey, tabs, activeTabId, fontSize]);
+  }, [tabStateKey, tabs, activeTabIds, fontSize]);
 
   // Also persist global font size for migration/fallback
   useEffect(() => {
     localStorage.setItem('pilot-console-font-size', String(fontSize));
   }, [fontSize]);
+
+  // When layout changes (group count shrinks), remap tabs from removed groups
+  const prevGroupCount = useRef(groupCount);
+  const prevLayout = useRef(layout);
+  useEffect(() => {
+    if (prevGroupCount.current > groupCount) {
+      const oldLayout = prevLayout.current;
+      setTabs(prev => {
+        return prev.map(t => {
+          if (t.group <= groupCount) return t;
+          // Remap: project old group's (row,col) into new grid
+          const oldRow = Math.ceil(t.group / oldLayout.cols);
+          const oldCol = ((t.group - 1) % oldLayout.cols) + 1;
+          const newRow = Math.min(oldRow, layout.rows);
+          const newCol = Math.min(oldCol, layout.cols);
+          const newGroup = (newRow - 1) * layout.cols + newCol;
+          return { ...t, group: newGroup };
+        });
+      });
+      // Clean up active tab IDs for removed groups
+      setActiveTabIds(prev => {
+        const next: Record<number, string> = {};
+        for (let g = 1; g <= groupCount; g++) {
+          next[g] = prev[g] || '';
+        }
+        return next;
+      });
+      if (focusedGroup > groupCount) setFocusedGroup(1);
+    }
+    prevGroupCount.current = groupCount;
+    prevLayout.current = layout;
+  }, [groupCount, layout, focusedGroup]);
 
   // On mount, reconcile tabs with active daemon sessions.
   // When tabs are restored from localStorage, validate their sessionIds
@@ -389,47 +430,24 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
             tabCounter++;
             const mode = (s.mode === 'shell' || s.mode === 'powershell') ? s.mode : 'cli';
             const label = mode === 'shell' ? `Shell ${tabCounter}` : mode === 'powershell' ? `PS ${tabCounter}` : `Copilot ${tabCounter}`;
-            return { id: `tab-${tabCounter}`, label, mode, themeName: defaultTheme, fontFamily: defaultFont, sessionId: s.sessionId };
+            return { id: `tab-${tabCounter}`, label, mode, themeName: defaultTheme, fontFamily: defaultFont, sessionId: s.sessionId, group: 1 as const };
           });
           return newTabs;
         });
-        setActiveTabId(prev => {
-          if (prev) return prev;
-          return '';
+        setActiveTabIds(prev => {
+          if (prev[1]) return prev;
+          return { ...prev, [1]: '' };
         });
       })
       .catch(() => {});
   }, [projectId, worktreeId, tabStateKey, defaultTheme, defaultFont]);
 
-  const [showNewMenu, setShowNewMenu] = useState(false);
-  const [menuPos, setMenuPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
-  const plusBtnRef = useRef<HTMLDivElement>(null);
-
-  // Position the portal menu relative to the + button
-  useEffect(() => {
-    if (showNewMenu && plusBtnRef.current) {
-      const rect = plusBtnRef.current.getBoundingClientRect();
-      setMenuPos({ top: rect.bottom + 2, left: rect.left });
-    }
-  }, [showNewMenu]);
-
-  // Close new-tab menu on outside click
-  useEffect(() => {
-    if (!showNewMenu) return;
-    const handler = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest('[data-new-tab-menu]')) setShowNewMenu(false);
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [showNewMenu]);
-
-  const addTab = useCallback((mode: 'cli' | 'shell' | 'powershell' | 'git' | 'git-status' | 'files' = 'cli') => {
+  const addTab = useCallback((mode: 'cli' | 'shell' | 'powershell' | 'git' | 'git-status' | 'files' = 'cli', targetGroup: number = 1) => {
     tabCounter++;
     const label = mode === 'shell' ? `Shell ${tabCounter}` : mode === 'powershell' ? `PS ${tabCounter}` : mode === 'git' ? `Git Log ${tabCounter}` : mode === 'git-status' ? `Git Status ${tabCounter}` : mode === 'files' ? `Files ${tabCounter}` : `Copilot ${tabCounter}`;
-    const newTab: TabMeta = { id: `tab-${tabCounter}`, label, mode, themeName: defaultTheme, fontFamily: defaultFont };
+    const newTab: TabMeta = { id: `tab-${tabCounter}`, label, mode, themeName: defaultTheme, fontFamily: defaultFont, group: targetGroup };
     setTabs(prev => [...prev, newTab]);
-    setActiveTabId(newTab.id);
+    setActiveTabIds(prev => ({ ...prev, [targetGroup]: newTab.id }));
   }, [defaultTheme, defaultFont]);
 
   const moveTab = useCallback((sourceId: string, targetId: string) => {
@@ -440,8 +458,32 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
       if (sourceIndex < 0 || targetIndex < 0) return prev;
       const next = [...prev];
       const [moved] = next.splice(sourceIndex, 1);
+      // Inherit the target tab's group
+      moved.group = prev[targetIndex].group;
       next.splice(targetIndex, 0, moved);
       return next;
+    });
+  }, []);
+
+  const moveTabToGroup = useCallback((tabId: string, targetGroup: number) => {
+    setTabs(prev => {
+      const tab = prev.find(t => t.id === tabId);
+      if (!tab || tab.group === targetGroup) return prev;
+      const sourceGroup = tab.group;
+      const updated = prev.map(t => t.id === tabId ? { ...t, group: targetGroup } : t);
+      // Update active tabs for both groups
+      setTimeout(() => {
+        setActiveTabIds(prevActive => {
+          const next = { ...prevActive, [targetGroup]: tabId };
+          // If this was the active tab in source group, select next there
+          if (prevActive[sourceGroup] === tabId) {
+            const remaining = updated.filter(t => t.group === sourceGroup && t.id !== tabId);
+            next[sourceGroup] = remaining[0]?.id ?? '';
+          }
+          return next;
+        });
+      }, 0);
+      return updated;
     });
   }, []);
 
@@ -457,21 +499,22 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
     delete killCallbacksRef.current[tabId];
     delete statusCallbacksRef.current[tabId];
 
-    setTabs(prev => {
-      const next = prev.filter(t => t.id !== tabId);
-      return next;
-    });
-    setActiveTabId(prev => {
-      if (prev !== tabId) return prev;
-      const idx = tabs.findIndex(t => t.id === tabId);
-      const remaining = tabs.filter(t => t.id !== tabId);
-      if (remaining.length === 0) return '';
-      return remaining[Math.min(idx, remaining.length - 1)].id;
+    const closedTab = tabs.find(t => t.id === tabId);
+    const closedGroup = closedTab?.group ?? 1;
+    setTabs(prev => prev.filter(t => t.id !== tabId));
+
+    setActiveTabIds(prev => {
+      if (prev[closedGroup] !== tabId) return prev;
+      const remaining = tabs.filter(t => t.group === closedGroup && t.id !== tabId);
+      if (remaining.length === 0) return { ...prev, [closedGroup]: '' };
+      const idx = tabs.filter(t => t.group === closedGroup).findIndex(t => t.id === tabId);
+      return { ...prev, [closedGroup]: remaining[Math.min(idx, remaining.length - 1)].id };
     });
   }, [projectId, tabs]);
 
   const handleKillActive = useCallback(async () => {
-    const killCb = killCallbacksRef.current[activeTabId];
+    const focusedActiveTabId = activeTabIds[focusedGroup] || '';
+    const killCb = killCallbacksRef.current[focusedActiveTabId];
     if (!killCb || !projectId) return;
     const getSessionId = (killCb as unknown as { _getSessionId?: () => string | null })._getSessionId;
     const sid = getSessionId?.();
@@ -480,7 +523,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
         await fetch(`/api/projects/${encodeURIComponent(projectId)}/session?sessionId=${sid}`, { method: 'DELETE' });
       } catch { /* WS close handles reconnect */ }
     }
-  }, [activeTabId, projectId]);
+  }, [activeTabIds, focusedGroup, projectId]);
 
   useEffect(() => {
     if (!visible) return; // don't register shortcuts for hidden project pages
@@ -502,29 +545,39 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
     return () => window.removeEventListener('keydown', handler);
   }, [handleKillActive, addTab, visible]);
 
-  const activeTab = tabs.find(t => t.id === activeTabId);
-  const activeThemeName = activeTab?.themeName ?? defaultTheme;
-  const activeFontFamily = activeTab?.fontFamily ?? defaultFont;
-
-  const setActiveTheme = useCallback((name: string) => {
-    setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, themeName: name } : t));
-    localStorage.setItem('pilot-console-theme', name);
-  }, [activeTabId]);
-
-  const setActiveFont = useCallback((family: string) => {
-    setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, fontFamily: family } : t));
-    localStorage.setItem('pilot-console-font', family);
-  }, [activeTabId]);
-
   if (!projectId) return <div className="p-6 text-muted-foreground">Project not found</div>;
 
-  return (
-    <div className="flex h-full flex-col">
-      {/* Tab bar + controls — hidden when no tabs (landing page shown instead) */}
-      {tabs.length > 0 && (
-      <div className="flex items-center border-b bg-muted/30">
-        <div className="flex items-center flex-1 overflow-x-auto min-w-0">
-          {tabs.map(tab => {
+  const renderTabBar = (groupTabs: TabMeta[], groupId: number) => {
+    const groupActiveTabId = activeTabIds[groupId] || '';
+    const groupActiveTab = groupTabs.find(t => t.id === groupActiveTabId);
+    const groupActiveFontFamily = groupActiveTab?.fontFamily ?? defaultFont;
+    const groupActiveThemeName = groupActiveTab?.themeName ?? defaultTheme;
+    const isFocused = focusedGroup === groupId;
+
+    return (
+      <div className={`flex items-center border-b bg-muted/30 ${isFocused ? '' : 'opacity-70'}`} onClick={() => setFocusedGroup(groupId)}>
+        <div className="flex items-center flex-1 overflow-x-auto min-w-0"
+          onDragOver={(e) => {
+            // Allow dropping on the empty tab bar area
+            if (groupTabs.length === 0) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'move';
+            }
+          }}
+          onDrop={(e) => {
+            if (groupTabs.length === 0) {
+              e.preventDefault();
+              const sourceId = e.dataTransfer.getData('text/plain') || draggingTabId;
+              if (sourceId) moveTabToGroup(sourceId, groupId);
+              setDraggingTabId(null);
+              setDragOverTabId(null);
+            }
+          }}
+        >
+          {groupTabs.length === 0 && (
+            <div className="px-3 py-1.5 text-xs text-muted-foreground italic">Drop tab here</div>
+          )}
+          {groupTabs.map(tab => {
             const isUtilTab = tab.mode === 'git' || tab.mode === 'git-status' || tab.mode === 'files';
             const st = tabStatuses[tab.id] || 'closed';
             const stColor = { open: 'bg-green-500', connecting: 'bg-yellow-500', closed: 'bg-gray-400', error: 'bg-red-500', exited: 'bg-red-500' }[st] ?? 'bg-gray-400';
@@ -540,15 +593,19 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
                 key={tab.id}
                 draggable
                 className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs cursor-pointer border-r shrink-0 transition-opacity ${
-                  tab.id === activeTabId
+                  tab.id === groupActiveTabId
                     ? 'bg-accent text-foreground font-semibold border-b-2 border-b-primary'
                     : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
                 } ${draggingTabId === tab.id ? 'opacity-50' : ''} ${dragOverTabId === tab.id && draggingTabId !== tab.id ? 'ring-1 ring-primary ring-inset' : ''}`}
-                onClick={() => setActiveTabId(tab.id)}
+                onClick={() => {
+                  setFocusedGroup(groupId);
+                  setActiveTabIds(prev => ({ ...prev, [groupId]: tab.id }));
+                }}
                 onDragStart={(e) => {
                   setDraggingTabId(tab.id);
                   e.dataTransfer.effectAllowed = 'move';
                   e.dataTransfer.setData('text/plain', tab.id);
+                  e.dataTransfer.setData('application/x-tab-group', String(groupId));
                 }}
                 onDragOver={(e) => {
                   e.preventDefault();
@@ -559,7 +616,17 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
                 onDrop={(e) => {
                   e.preventDefault();
                   const sourceId = e.dataTransfer.getData('text/plain') || draggingTabId;
-                  if (sourceId) moveTab(sourceId, tab.id);
+                  const sourceGroup = e.dataTransfer.getData('application/x-tab-group');
+                  if (sourceId) {
+                    const srcGroup = sourceGroup ? parseInt(sourceGroup) : tab.group;
+                    if (srcGroup !== groupId) {
+                      // Cross-group: move tab to this group
+                      moveTabToGroup(sourceId, groupId);
+                    } else {
+                      // Same group: reorder
+                      moveTab(sourceId, tab.id);
+                    }
+                  }
                   setDraggingTabId(null);
                   setDragOverTabId(null);
                 }}
@@ -567,7 +634,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
                   setDraggingTabId(null);
                   setDragOverTabId(null);
                 }}
-                title="Drag to rearrange tab"
+                title="Drag to rearrange or move to other pane"
               >
                 {!isUtilTab && <div className={`h-1.5 w-1.5 rounded-full ${stColor}`} />}
                 {tabIcon}
@@ -581,9 +648,9 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
               </div>
             );
           })}
-          <div className="shrink-0" data-new-tab-menu ref={plusBtnRef}>
+          <div className="shrink-0">
             <button
-              onClick={(e) => { e.stopPropagation(); setShowNewMenu(v => !v); }}
+              onClick={() => addTab('cli', groupId)}
               className="px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-background/50"
               title="New tab"
             >
@@ -592,13 +659,17 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
           </div>
         </div>
         {/* Terminal controls — only shown when a terminal tab is active */}
-        {activeTab && activeTab.mode !== 'git' && activeTab.mode !== 'git-status' && activeTab.mode !== 'files' && (
+        {groupActiveTab && groupActiveTab.mode !== 'git' && groupActiveTab.mode !== 'git-status' && groupActiveTab.mode !== 'files' && (
           <div className="flex items-center shrink-0 border-l gap-1 px-1.5">
             <div className="flex items-center gap-0.5 border rounded px-1">
               <Type className="h-3 w-3 text-muted-foreground" />
               <select
-                value={activeFontFamily}
-                onChange={(e) => setActiveFont(e.target.value)}
+                value={groupActiveFontFamily}
+                onChange={(e) => {
+                  const family = e.target.value;
+                  setTabs(prev => prev.map(t => t.id === groupActiveTabId ? { ...t, fontFamily: family } : t));
+                  localStorage.setItem('pilot-console-font', family);
+                }}
                 className="h-6 text-xs bg-transparent border-none outline-none px-0.5 text-foreground"
               >
                 {TERMINAL_FONTS.map(f => <option key={f.id} value={f.family}>{f.label}</option>)}
@@ -607,8 +678,12 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
             <div className="flex items-center gap-0.5 border rounded px-1">
               <Palette className="h-3 w-3 text-muted-foreground" />
               <select
-                value={activeThemeName}
-                onChange={(e) => setActiveTheme(e.target.value)}
+                value={groupActiveThemeName}
+                onChange={(e) => {
+                  const name = e.target.value;
+                  setTabs(prev => prev.map(t => t.id === groupActiveTabId ? { ...t, themeName: name } : t));
+                  localStorage.setItem('pilot-console-theme', name);
+                }}
                 className="h-6 text-xs bg-transparent border-none outline-none px-0.5 text-foreground"
               >
                 {THEMES.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
@@ -634,7 +709,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
           ]).map(({ mode, icon: Icon, title }) => (
               <button
                 key={mode}
-                onClick={() => addTab(mode)}
+                onClick={() => addTab(mode, groupId)}
                 className="p-1.5 rounded transition-colors text-muted-foreground hover:text-foreground hover:bg-background/50"
                 title={title}
               >
@@ -642,139 +717,43 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
               </button>
           ))}
         </div>
-        {showNewMenu && createPortal(
-          <div
-            className="fixed z-50 rounded-md border bg-popover p-1 shadow-md text-xs min-w-[140px]"
-            style={menuPos}
-            data-new-tab-menu
-          >
-            <button
-              onClick={() => { addTab('cli'); setShowNewMenu(false); }}
-              className="flex items-center gap-2 w-full rounded px-2 py-1.5 hover:bg-accent text-left"
-            >
-              <Bot className="h-3.5 w-3.5" /> Copilot CLI
-            </button>
-            <button
-              onClick={() => { addTab('shell'); setShowNewMenu(false); }}
-              className="flex items-center gap-2 w-full rounded px-2 py-1.5 hover:bg-accent text-left"
-            >
-              <Terminal className="h-3.5 w-3.5" /> Terminal
-            </button>
-            <button
-              onClick={() => { addTab('powershell'); setShowNewMenu(false); }}
-              className="flex items-center gap-2 w-full rounded px-2 py-1.5 hover:bg-accent text-left"
-            >
-              <span className="h-3.5 w-3.5 text-[10px] font-bold leading-[14px] text-center">PS</span> PowerShell
-            </button>
-          </div>,
-          document.body
-        )}
       </div>
-      )}
+    );
+  };
 
-      {/* Terminal content — all tabs stay mounted, hidden via CSS */}
+  const renderPaneContent = (groupId: number) => {
+    const groupActiveTabId = activeTabIds[groupId] || '';
+    const groupTabs = tabs.filter(t => t.group === groupId);
+
+    return (
       <div className="flex-1 overflow-hidden relative">
-        {tabs.length === 0 && (
+        {groupTabs.length === 0 && (
           <div className="flex items-center justify-center h-full">
-            <div className="text-center space-y-6 max-w-md">
-              <div className="space-y-2">
-                <h2 className="text-lg font-semibold text-foreground">No active sessions</h2>
-                <p className="text-sm text-muted-foreground">
-                  Start a new session to begin working with this project.
-                  {cwd && <span className="block mt-1 font-mono text-xs opacity-70">{cwd}</span>}
-                </p>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  onClick={() => addTab('cli')}
-                  className="flex flex-col items-center gap-2 rounded-lg border p-4 hover:bg-accent hover:text-accent-foreground transition-colors"
-                >
-                  <Bot className="h-6 w-6" />
-                  <div>
-                    <div className="text-sm font-medium">Copilot CLI</div>
-                    <div className="text-[10px] text-muted-foreground">AI-powered terminal</div>
-                  </div>
-                </button>
-                <button
-                  onClick={() => addTab('shell')}
-                  className="flex flex-col items-center gap-2 rounded-lg border p-4 hover:bg-accent hover:text-accent-foreground transition-colors"
-                >
-                  <Terminal className="h-6 w-6" />
-                  <div>
-                    <div className="text-sm font-medium">Terminal</div>
-                    <div className="text-[10px] text-muted-foreground">Plain shell</div>
-                  </div>
-                </button>
-                <button
-                  onClick={() => addTab('powershell')}
-                  className="flex flex-col items-center gap-2 rounded-lg border p-4 hover:bg-accent hover:text-accent-foreground transition-colors"
-                >
-                  <span className="text-lg font-bold leading-6">PS</span>
-                  <div>
-                    <div className="text-sm font-medium">PowerShell</div>
-                    <div className="text-[10px] text-muted-foreground">PowerShell session</div>
-                  </div>
-                </button>
-                <button
-                  onClick={() => addTab('files')}
-                  className="flex flex-col items-center gap-2 rounded-lg border p-4 hover:bg-accent hover:text-accent-foreground transition-colors"
-                >
-                  <FolderOpen className="h-6 w-6" />
-                  <div>
-                    <div className="text-sm font-medium">Files</div>
-                    <div className="text-[10px] text-muted-foreground">Browse project files</div>
-                  </div>
-                </button>
-              </div>
-              <div className="flex items-center justify-center gap-2 pt-2">
-                <button
-                  onClick={() => addTab('git')}
-                  className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground transition-colors"
-                >
-                  <GitCommitHorizontal className="h-3.5 w-3.5" /> Git Log
-                </button>
-                <button
-                  onClick={() => addTab('git-status')}
-                  className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground transition-colors"
-                >
-                  <GitBranch className="h-3.5 w-3.5" /> Git Status
-                </button>
-              </div>
+            <div className="text-center space-y-4">
+              <p className="text-sm text-muted-foreground">Drop a tab here or click + to create one</p>
             </div>
           </div>
         )}
-        {tabs.map(tab => {
-          // Git tab renders GitLogTab instead of a terminal
+        {groupTabs.map(tab => {
+          const isActive = tab.id === groupActiveTabId;
+
           if (tab.mode === 'git') {
             return (
-              <div key={tab.id} className="absolute inset-0" style={{
-                zIndex: tab.id === activeTabId ? 2 : 0,
-                display: tab.id === activeTabId ? 'block' : 'none',
-              }}>
+              <div key={tab.id} className="absolute inset-0" style={{ zIndex: isActive ? 2 : 0, display: isActive ? 'block' : 'none' }}>
                 <GitLogTab projectId={projectId} worktreeId={worktreeId} />
               </div>
             );
           }
-
-          // Git Status tab renders GitPanel
           if (tab.mode === 'git-status') {
             return (
-              <div key={tab.id} className="absolute inset-0" style={{
-                zIndex: tab.id === activeTabId ? 2 : 0,
-                display: tab.id === activeTabId ? 'block' : 'none',
-              }}>
+              <div key={tab.id} className="absolute inset-0" style={{ zIndex: isActive ? 2 : 0, display: isActive ? 'block' : 'none' }}>
                 <GitPanel projectId={projectId} worktreeId={worktreeId} />
               </div>
             );
           }
-
-          // Files tab renders FileExplorer embedded
           if (tab.mode === 'files') {
             return (
-              <div key={tab.id} className="absolute inset-0" style={{
-                zIndex: tab.id === activeTabId ? 2 : 0,
-                display: tab.id === activeTabId ? 'block' : 'none',
-              }}>
+              <div key={tab.id} className="absolute inset-0" style={{ zIndex: isActive ? 2 : 0, display: isActive ? 'block' : 'none' }}>
                 <FileExplorer projectId={projectId} worktreeId={worktreeId} embedded />
               </div>
             );
@@ -798,7 +777,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
               fontSize={fontSize}
               fontFamily={tab.fontFamily || defaultFont}
               themeName={tab.themeName || defaultTheme}
-              active={tab.id === activeTabId}
+              active={isActive}
               forceNew={tab.mode !== 'cli' || tab.id !== firstTabId.current}
               mode={tab.mode || 'cli'}
               sessionId={tab.sessionId}
@@ -810,6 +789,121 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
           );
         })}
       </div>
+    );
+  };
+
+  // Landing page when no tabs exist at all
+  const renderLanding = () => (
+    <div className="flex-1 flex items-center justify-center">
+      <div className="text-center space-y-6 max-w-md">
+        <div className="space-y-2">
+          <h2 className="text-lg font-semibold text-foreground">No active sessions</h2>
+          <p className="text-sm text-muted-foreground">
+            Start a new session to begin working with this project.
+            {cwd && <span className="block mt-1 font-mono text-xs opacity-70">{cwd}</span>}
+          </p>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            onClick={() => addTab('cli')}
+            className="flex flex-col items-center gap-2 rounded-lg border p-4 hover:bg-accent hover:text-accent-foreground transition-colors"
+          >
+            <Bot className="h-6 w-6" />
+            <div>
+              <div className="text-sm font-medium">Copilot CLI</div>
+              <div className="text-[10px] text-muted-foreground">AI-powered terminal</div>
+            </div>
+          </button>
+          <button
+            onClick={() => addTab('shell')}
+            className="flex flex-col items-center gap-2 rounded-lg border p-4 hover:bg-accent hover:text-accent-foreground transition-colors"
+          >
+            <Terminal className="h-6 w-6" />
+            <div>
+              <div className="text-sm font-medium">Terminal</div>
+              <div className="text-[10px] text-muted-foreground">Plain shell</div>
+            </div>
+          </button>
+          <button
+            onClick={() => addTab('powershell')}
+            className="flex flex-col items-center gap-2 rounded-lg border p-4 hover:bg-accent hover:text-accent-foreground transition-colors"
+          >
+            <span className="text-lg font-bold leading-6">PS</span>
+            <div>
+              <div className="text-sm font-medium">PowerShell</div>
+              <div className="text-[10px] text-muted-foreground">PowerShell session</div>
+            </div>
+          </button>
+          <button
+            onClick={() => addTab('files')}
+            className="flex flex-col items-center gap-2 rounded-lg border p-4 hover:bg-accent hover:text-accent-foreground transition-colors"
+          >
+            <FolderOpen className="h-6 w-6" />
+            <div>
+              <div className="text-sm font-medium">Files</div>
+              <div className="text-[10px] text-muted-foreground">Browse project files</div>
+            </div>
+          </button>
+        </div>
+        <div className="flex items-center justify-center gap-2 pt-2">
+          <button
+            onClick={() => addTab('git')}
+            className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground transition-colors"
+          >
+            <GitCommitHorizontal className="h-3.5 w-3.5" /> Git Log
+          </button>
+          <button
+            onClick={() => addTab('git-status')}
+            className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground transition-colors"
+          >
+            <GitBranch className="h-3.5 w-3.5" /> Git Status
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // Ensure every visible group has an active tab set
+  for (let g = 1; g <= groupCount; g++) {
+    if (!activeTabIds[g]) {
+      const groupTabs = tabs.filter(t => t.group === g);
+      if (groupTabs.length > 0 && activeTabIds[g] !== groupTabs[0].id) {
+        // Defer to avoid setting state during render
+        const firstId = groupTabs[0].id;
+        setTimeout(() => setActiveTabIds(prev => prev[g] ? prev : { ...prev, [g]: firstId }), 0);
+      }
+    }
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      {tabs.length === 0 ? renderLanding() : isSplit ? (
+        <div
+          className="flex-1 overflow-hidden"
+          style={{
+            display: 'grid',
+            gridTemplateRows: `repeat(${layout.rows}, 1fr)`,
+            gridTemplateColumns: `repeat(${layout.cols}, 1fr)`,
+            gap: '2px',
+          }}
+        >
+          {Array.from({ length: groupCount }, (_, i) => {
+            const groupId = i + 1;
+            const groupTabs = tabs.filter(t => t.group === groupId);
+            return (
+              <div key={groupId} className="flex flex-col overflow-hidden bg-background" style={{ minWidth: 0, minHeight: 0 }}>
+                {renderTabBar(groupTabs, groupId)}
+                {renderPaneContent(groupId)}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <>
+          {renderTabBar(tabs.filter(t => t.group === 1 || !isSplit), 1)}
+          {renderPaneContent(1)}
+        </>
+      )}
     </div>
   );
 }

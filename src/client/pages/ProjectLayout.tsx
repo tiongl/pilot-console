@@ -3,6 +3,7 @@ import { Outlet, useParams } from 'react-router';
 import ProjectHeader from '../components/project/ProjectHeader';
 import ProjectTodoPanel from '../components/project/ProjectTodoPanel';
 import { ProjectProvider } from '../lib/project-context';
+import { ProjectSplitProvider } from '../lib/project-split-context';
 
 interface Project {
   id: string;
@@ -27,14 +28,16 @@ export default function ProjectLayout({ projectId: projectIdProp, children }: { 
 
   return (
     <ProjectProvider projectId={project.id} cwd={project.repoPath}>
-      <ProjectHeader
-        projectId={project.id}
-        projectName={project.name}
-        repoPath={project.repoPath}
-        todoPanel={<ProjectTodoPanel projectId={project.id} projectName={project.name} />}
-      >
-        {children || <Outlet />}
-      </ProjectHeader>
+      <ProjectSplitProvider stateKey={project.repoPath || project.id}>
+        <ProjectHeader
+          projectId={project.id}
+          projectName={project.name}
+          repoPath={project.repoPath}
+          todoPanel={<ProjectTodoPanel projectId={project.id} projectName={project.name} />}
+        >
+          {children || <Outlet />}
+        </ProjectHeader>
+      </ProjectSplitProvider>
     </ProjectProvider>
   );
 }

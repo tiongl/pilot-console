@@ -3,6 +3,7 @@ import { Outlet, useParams } from 'react-router';
 import ProjectHeader from '../components/project/ProjectHeader';
 import ProjectTodoPanel from '../components/project/ProjectTodoPanel';
 import { ProjectProvider } from '../lib/project-context';
+import { ProjectSplitProvider } from '../lib/project-split-context';
 
 interface Worktree {
   id: string;
@@ -44,14 +45,16 @@ export default function WorktreeLayout({
 
   return (
     <ProjectProvider projectId={project.id} cwd={worktree.worktreePath} worktreeId={worktree.id}>
-      <ProjectHeader
-        projectId={project.id}
-        projectName={`${project.name} › ${worktree.name}`}
-        repoPath={worktree.worktreePath}
-        todoPanel={<ProjectTodoPanel projectId={project.id} projectName={project.name} />}
-      >
-        {children || <Outlet />}
-      </ProjectHeader>
+      <ProjectSplitProvider stateKey={worktree.worktreePath || `${project.id}:wt:${worktree.id}`}>
+        <ProjectHeader
+          projectId={project.id}
+          projectName={`${project.name} › ${worktree.name}`}
+          repoPath={worktree.worktreePath}
+          todoPanel={<ProjectTodoPanel projectId={project.id} projectName={project.name} />}
+        >
+          {children || <Outlet />}
+        </ProjectHeader>
+      </ProjectSplitProvider>
     </ProjectProvider>
   );
 }

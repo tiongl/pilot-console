@@ -2,7 +2,7 @@
 
 import { useCallback, useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
-import { Wrench, ListTodo, History, Keyboard, Bookmark } from 'lucide-react';
+import { Wrench, ListTodo, History, Keyboard, Bookmark, Columns2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import SessionHistory from './SessionHistory';
 import SnippetPanel from './SnippetPanel';
 import { useKeyboardShortcuts, ShortcutsHelpOverlay } from './KeyboardShortcuts';
+import { useProjectSplit, isValidSplitLayout } from '../../lib/project-split-context';
 
 interface Props {
   projectId: string;
@@ -26,6 +27,17 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
   const basePath = `/projects/${projectId}`;
   const isChat = pathname.endsWith('/chat') || pathname === basePath;
   const [activePanel, setActivePanel] = useState<'none' | 'notes' | 'history' | 'snippets'>('none');
+  const { layout, isSplit, setLayout } = useProjectSplit();
+  const [showGridPicker, setShowGridPicker] = useState(false);
+  const [gridHover, setGridHover] = useState<{ rows: number; cols: number } | null>(null);
+  const gridPickerRef = useCallback((node: HTMLDivElement | null) => {
+    if (!node) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (!node.contains(e.target as Node)) setShowGridPicker(false);
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   const toggleNotes = useCallback(() => setActivePanel(p => p === 'notes' ? 'none' : 'notes'), []);
   const { showHelp, setShowHelp } = useKeyboardShortcuts({
@@ -130,6 +142,63 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
           >
             <Keyboard className="h-4 w-4" />
           </Button>
+          <div className="relative">
+            <Button
+              variant={isSplit ? 'secondary' : 'ghost'}
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setShowGridPicker(v => !v)}
+              title="Split layout"
+            >
+              <Columns2 className="h-4 w-4" />
+            </Button>
+            {showGridPicker && (
+              <div
+                ref={gridPickerRef}
+                className="absolute top-full right-0 mt-1 z-50 bg-popover border rounded-md shadow-md p-2"
+              >
+                <div className="text-[10px] text-muted-foreground mb-1.5 text-center">
+                  {gridHover ? `${gridHover.rows}×${gridHover.cols}` : `${layout.rows}×${layout.cols}`}
+                </div>
+                <div className="grid grid-cols-4 gap-1">
+                  {Array.from({ length: 4 }, (_, r) =>
+                    Array.from({ length: 4 }, (_, c) => {
+                      const rows = r + 1;
+                      const cols = c + 1;
+                      const valid = isValidSplitLayout(rows, cols);
+                      const isSelected = layout.rows === rows && layout.cols === cols;
+                      const isHovered = gridHover && rows <= gridHover.rows && cols <= gridHover.cols;
+                      const hoverValid = gridHover ? isValidSplitLayout(gridHover.rows, gridHover.cols) : false;
+                      return (
+                        <button
+                          key={`${r}-${c}`}
+                          className={`w-5 h-5 rounded-sm border text-[0px] transition-colors ${
+                            isSelected
+                              ? 'bg-primary border-primary'
+                              : !valid
+                                ? 'bg-muted/30 border-muted cursor-not-allowed opacity-30'
+                                : isHovered && hoverValid
+                                  ? 'bg-primary/40 border-primary/60'
+                                  : 'bg-muted/50 border-border hover:border-primary/40'
+                          }`}
+                          disabled={!valid}
+                          onMouseEnter={() => valid && setGridHover({ rows, cols })}
+                          onMouseLeave={() => setGridHover(null)}
+                          onClick={() => {
+                            if (valid) {
+                              setLayout({ rows, cols });
+                              setShowGridPicker(false);
+                              setGridHover(null);
+                            }
+                          }}
+                        />
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
           <Button
             variant={showSettings ? 'secondary' : 'ghost'}
             size="icon"
