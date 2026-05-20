@@ -128,9 +128,6 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
                     ref={gridPickerRef}
                     className="absolute top-full right-0 mt-1 z-50 bg-popover border rounded-md shadow-md p-2 min-w-0"
                   >
-                    <div className="text-[10px] text-muted-foreground mb-1.5 text-center whitespace-nowrap">
-                      {gridHover ? `${gridHover.rows}×${gridHover.cols}` : `${layout.rows}×${layout.cols}`}
-                    </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 20px)', gap: '4px' }}>
                       {Array.from({ length: 16 }, (_, idx) => {
                         const rows = Math.floor(idx / 4) + 1;

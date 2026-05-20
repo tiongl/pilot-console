@@ -726,9 +726,6 @@ export default function DashboardLayout() {
                 <>
                   <div className="fixed inset-0 z-[70]" onClick={() => setShowLayoutMenu(false)} />
                   <div className="absolute right-0 top-full mt-1 z-[80] bg-popover border rounded-md shadow-md p-2 min-w-0">
-                    <div className="text-[10px] text-muted-foreground mb-1.5 text-center whitespace-nowrap">
-                      {dashGridHover ? `${dashGridHover.rows}×${dashGridHover.cols}` : `${dashLayout.rows}×${dashLayout.cols}`}
-                    </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 20px)', gap: '4px' }}>
                       {Array.from({ length: 16 }, (_, idx) => {
                         const rows = Math.floor(idx / 4) + 1;
