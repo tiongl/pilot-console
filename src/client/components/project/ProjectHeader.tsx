@@ -113,6 +113,62 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
               >
                 <ListTodo className="h-4 w-4" />
               </Button>
+              <div className="relative">
+                <Button
+                  variant={isSplit ? 'secondary' : 'ghost'}
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={() => setShowGridPicker(v => !v)}
+                  title="Split layout"
+                >
+                  <Columns2 className="h-4 w-4" />
+                </Button>
+                {showGridPicker && (
+                  <div
+                    ref={gridPickerRef}
+                    className="absolute top-full right-0 mt-1 z-50 bg-popover border rounded-md shadow-md p-2 min-w-0"
+                  >
+                    <div className="text-[10px] text-muted-foreground mb-1.5 text-center whitespace-nowrap">
+                      {gridHover ? `${gridHover.rows}×${gridHover.cols}` : `${layout.rows}×${layout.cols}`}
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 20px)', gap: '4px' }}>
+                      {Array.from({ length: 16 }, (_, idx) => {
+                        const rows = Math.floor(idx / 4) + 1;
+                        const cols = (idx % 4) + 1;
+                        const valid = isValidSplitLayout(rows, cols);
+                        const isSelected = layout.rows === rows && layout.cols === cols;
+                        const isHovered = gridHover && rows <= gridHover.rows && cols <= gridHover.cols;
+                        const hoverValid = gridHover ? isValidSplitLayout(gridHover.rows, gridHover.cols) : false;
+                        return (
+                          <button
+                            key={idx}
+                            style={{ width: 20, height: 20 }}
+                            className={`rounded-sm border transition-colors ${
+                              isSelected
+                                ? 'bg-primary border-primary'
+                                : !valid
+                                  ? 'bg-muted/30 border-muted cursor-not-allowed opacity-30'
+                                  : isHovered && hoverValid
+                                    ? 'bg-primary/40 border-primary/60'
+                                    : 'bg-muted/50 border-border hover:border-primary/40'
+                            }`}
+                            disabled={!valid}
+                            onMouseEnter={() => valid && setGridHover({ rows, cols })}
+                            onMouseLeave={() => setGridHover(null)}
+                            onClick={() => {
+                              if (valid) {
+                                setLayout({ rows, cols });
+                                setShowGridPicker(false);
+                                setGridHover(null);
+                              }
+                            }}
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
               <Button
                 variant={activePanel === 'history' ? 'secondary' : 'ghost'}
                 size="icon"
@@ -142,61 +198,6 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
           >
             <Keyboard className="h-4 w-4" />
           </Button>
-          <div className="relative">
-            <Button
-              variant={isSplit ? 'secondary' : 'ghost'}
-              size="icon"
-              className="h-8 w-8"
-              onClick={() => setShowGridPicker(v => !v)}
-              title="Split layout"
-            >
-              <Columns2 className="h-4 w-4" />
-            </Button>
-            {showGridPicker && (
-              <div
-                ref={gridPickerRef}
-                className="absolute top-full right-0 mt-1 z-50 bg-popover border rounded-md shadow-md p-2"
-              >
-                <div className="text-[10px] text-muted-foreground mb-1.5 text-center">
-                  {gridHover ? `${gridHover.rows}×${gridHover.cols}` : `${layout.rows}×${layout.cols}`}
-                </div>
-                <div className="grid grid-cols-4 gap-1">
-                  {Array.from({ length: 16 }, (_, idx) => {
-                    const rows = Math.floor(idx / 4) + 1;
-                    const cols = (idx % 4) + 1;
-                    const valid = isValidSplitLayout(rows, cols);
-                    const isSelected = layout.rows === rows && layout.cols === cols;
-                    const isHovered = gridHover && rows <= gridHover.rows && cols <= gridHover.cols;
-                    const hoverValid = gridHover ? isValidSplitLayout(gridHover.rows, gridHover.cols) : false;
-                    return (
-                      <button
-                        key={idx}
-                        className={`w-5 h-5 rounded-sm border text-[0px] transition-colors ${
-                          isSelected
-                            ? 'bg-primary border-primary'
-                            : !valid
-                              ? 'bg-muted/30 border-muted cursor-not-allowed opacity-30'
-                              : isHovered && hoverValid
-                                ? 'bg-primary/40 border-primary/60'
-                                : 'bg-muted/50 border-border hover:border-primary/40'
-                        }`}
-                        disabled={!valid}
-                        onMouseEnter={() => valid && setGridHover({ rows, cols })}
-                        onMouseLeave={() => setGridHover(null)}
-                        onClick={() => {
-                          if (valid) {
-                            setLayout({ rows, cols });
-                            setShowGridPicker(false);
-                            setGridHover(null);
-                          }
-                        }}
-                      />
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
           <Button
             variant={showSettings ? 'secondary' : 'ghost'}
             size="icon"

@@ -698,23 +698,38 @@ export default function DashboardLayout() {
           <div className="flex items-center gap-2">
             <PilotConsoleLogo className="h-10 w-10" />
             <h1 className="text-lg font-bold flex-1 tracking-tight leading-tight">Pilot Console</h1>
+            <button
+              onClick={() => setShowSkillsDialog(v => !v)}
+              className={`relative z-[60] transition-colors shrink-0 ${showSkillsDialog ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+              title="Settings"
+            >
+              <Settings className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+        <div className="border-t mx-3 mb-2" />
+
+        {/* Projects section — top half */}
+        <div className="flex items-center justify-between px-3 mb-1">
+          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Projects</span>
+          <div className="flex items-center gap-1">
             <div className="relative shrink-0">
               <button
                 onClick={() => setShowLayoutMenu(v => !v)}
                 className={`transition-colors ${paneCount > 1 ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}`}
-                aria-label="Layout columns"
-                title="Layout columns"
+                aria-label="Split layout"
+                title="Split layout"
               >
                 <Columns2 className="h-3.5 w-3.5" />
               </button>
               {showLayoutMenu && (
                 <>
                   <div className="fixed inset-0 z-[70]" onClick={() => setShowLayoutMenu(false)} />
-                  <div className="absolute right-0 top-full mt-1 z-[80] bg-popover border rounded-md shadow-md p-2">
-                    <div className="text-[10px] text-muted-foreground mb-1.5 text-center">
+                  <div className="absolute right-0 top-full mt-1 z-[80] bg-popover border rounded-md shadow-md p-2 min-w-0">
+                    <div className="text-[10px] text-muted-foreground mb-1.5 text-center whitespace-nowrap">
                       {dashGridHover ? `${dashGridHover.rows}×${dashGridHover.cols}` : `${dashLayout.rows}×${dashLayout.cols}`}
                     </div>
-                    <div className="grid grid-cols-4 gap-1">
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 20px)', gap: '4px' }}>
                       {Array.from({ length: 16 }, (_, idx) => {
                         const rows = Math.floor(idx / 4) + 1;
                         const cols = (idx % 4) + 1;
@@ -725,7 +740,8 @@ export default function DashboardLayout() {
                         return (
                           <button
                             key={idx}
-                            className={`w-5 h-5 rounded-sm border text-[0px] transition-colors ${
+                            style={{ width: 20, height: 20 }}
+                            className={`rounded-sm border transition-colors ${
                               isSelected
                                 ? 'bg-primary border-primary'
                                 : !valid
@@ -752,21 +768,6 @@ export default function DashboardLayout() {
                 </>
               )}
             </div>
-            <button
-              onClick={() => setShowSkillsDialog(v => !v)}
-              className={`relative z-[60] transition-colors shrink-0 ${showSkillsDialog ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-              title="Settings"
-            >
-              <Settings className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        </div>
-        <div className="border-t mx-3 mb-2" />
-
-        {/* Projects section — top half */}
-        <div className="flex items-center justify-between px-3 mb-1">
-          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Projects</span>
-          <div className="flex items-center gap-1">
             <Link to="/projects/new" className="text-muted-foreground hover:text-foreground transition-colors">
               <Plus className="h-3.5 w-3.5" />
             </Link>
