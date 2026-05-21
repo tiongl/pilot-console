@@ -11,7 +11,7 @@ import { parse } from 'url';
 import { requireAuth, SESSION_COOKIE, createSession, destroySession, getUserFromToken } from './middleware/auth';
 import { getGitHubCliProfile } from '../shared/gh-cli-auth';
 import { upsertUser, listUsers, updateUserRole, deleteUser } from '../shared/user-store';
-import { createProject, listProjects, getProjectById, updateProject, deleteProject, addSkill, listSkills, updateSkill, deleteSkill, listWorktrees, createWorktree, attachExistingWorktree, getWorktreeById, deleteWorktree } from '../shared/project-store';
+import { createProject, listProjects, getProjectById, updateProject, deleteProject, addSkill, listSkills, updateSkill, deleteSkill, listWorktrees, createWorktree, attachExistingWorktree, attachSubnode, getWorktreeById, deleteWorktree } from '../shared/project-store';
 import { listSessionsForUser, listAllSessions, getCopilotSessionDetail, listCopilotSessionsForProject } from '../shared/session-store';
 import { setupWebSocketServer } from './websocket';
 import { getAllSessions, getAllSessionsWithExited, getSessionStatus, endCliSession, endSessionByProject, initDaemonBridge } from '../shared/cli-bridge';
@@ -131,7 +131,24 @@ app.get('/api/projects/:id/worktrees', (req, res) => {
 });
 
 app.post('/api/projects/:id/worktrees', (req, res) => {
-  const { name, branch, createNewBranch, worktreePath } = req.body as { name?: string; branch?: string; createNewBranch?: boolean; worktreePath?: string };
+  const { name, branch, createNewBranch, worktreePath, type } = req.body as { name?: string; branch?: string; createNewBranch?: boolean; worktreePath?: string; type?: string };
+
+  // Plain directory subnode (non-git)
+  if (type === 'directory') {
+    if (!worktreePath?.trim()) {
+      res.status(400).json({ error: 'worktreePath is required for directory subnodes' });
+      return;
+    }
+    try {
+      const wt = attachSubnode(req.params.id, name, worktreePath);
+      res.status(201).json(wt);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+    return;
+  }
+
+  // Attach existing git worktree
   if (worktreePath?.trim()) {
     try {
       const wt = attachExistingWorktree(req.params.id, name, worktreePath, branch);

@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
 import { getDb } from './db';
-import type { Project, ProjectSkill, SkillType, Worktree } from './types';
+import type { Project, ProjectSkill, SkillType, Worktree, WorktreeType } from './types';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -177,6 +177,7 @@ function rowToWorktree(row: Record<string, unknown>): Worktree {
     branch: row.branch as string,
     worktreePath: row.worktree_path as string,
     isManaged: (row.is_managed as number | undefined) !== 0,
+    type: (row.type as WorktreeType | undefined) ?? 'worktree',
     createdAt: row.created_at as string,
   };
 }
@@ -309,6 +310,36 @@ export function attachExistingWorktree(
   getDb()
     .prepare('INSERT INTO worktrees (id, project_id, name, branch, worktree_path, is_managed) VALUES (?, ?, ?, ?, ?, ?)')
     .run(id, projectId, displayName, detectedBranch, resolvedPath, 0);
+
+  return getWorktreeById(id)!;
+}
+
+export function attachSubnode(
+  projectId: string,
+  name: string | undefined,
+  dirPath: string,
+): Worktree {
+  const project = getProjectById(projectId);
+  if (!project) throw new Error('Project not found');
+
+  const resolvedPath = path.resolve(dirPath.trim());
+  if (!fs.existsSync(resolvedPath)) throw new Error('Directory does not exist');
+  if (!fs.statSync(resolvedPath).isDirectory()) throw new Error('Path is not a directory');
+
+  // Canonicalize to avoid duplicates from symlinks / case differences
+  const canonicalPath = fs.realpathSync(resolvedPath);
+
+  if (normalizePathForComparison(canonicalPath) === normalizePathForComparison(project.repoPath)) {
+    throw new Error('Project root is already registered');
+  }
+
+  const displayName = name?.trim() || path.basename(canonicalPath);
+  if (!displayName) throw new Error('Subnode name is required');
+
+  const id = crypto.randomUUID();
+  getDb()
+    .prepare('INSERT INTO worktrees (id, project_id, name, branch, worktree_path, is_managed, type) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(id, projectId, displayName, '', canonicalPath, 0, 'directory');
 
   return getWorktreeById(id)!;
 }

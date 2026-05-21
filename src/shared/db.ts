@@ -167,6 +167,11 @@ function initSchema(db: Database.Database) {
     db.exec('ALTER TABLE worktrees ADD COLUMN is_managed INTEGER NOT NULL DEFAULT 1');
   }
 
+  // Migration: add type column to worktrees ('worktree' for git worktrees, 'directory' for plain folders)
+  if (!worktreeColNames.has('type')) {
+    db.exec("ALTER TABLE worktrees ADD COLUMN type TEXT NOT NULL DEFAULT 'worktree'");
+  }
+
   // Migration: add daemon_session_id to report_runs
   const runCols = db.pragma('table_info(report_runs)') as Array<{ name: string }>;
   const runColNames = new Set(runCols.map((c) => c.name));

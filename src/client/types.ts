@@ -10,5 +10,6 @@ export type {
   WsClientMessage,
   WsServerMessage,
   Worktree,
+  WorktreeType,
   ChatMessage,
 } from '../shared/types';

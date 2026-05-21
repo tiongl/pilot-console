@@ -33,6 +33,7 @@ interface Worktree {
   branch: string;
   worktreePath: string;
   isManaged: boolean;
+  type?: 'worktree' | 'directory';
 }
 
 function statusPriority(status: SessionStatus): number {
@@ -133,6 +134,7 @@ function ProjectNav({
   });
   const [worktreeMap, setWorktreeMap] = useState<Record<string, Worktree[]>>({});
   const [showAddDialog, setShowAddDialog] = useState<string | null>(null);
+  const [addMode, setAddMode] = useState<'worktree' | 'directory'>('worktree');
   const [wtName, setWtName] = useState('');
   const [wtBranch, setWtBranch] = useState('');
   const [wtCreateNew, setWtCreateNew] = useState(false);
@@ -273,6 +275,7 @@ function ProjectNav({
   const openAddDialog = useCallback((e: React.MouseEvent, projectId: string) => {
     e.preventDefault();
     e.stopPropagation();
+    setAddMode('worktree');
     setWtName('');
     setWtBranch('');
     setWtCreateNew(false);
@@ -288,15 +291,18 @@ function ProjectNav({
     setWtError('');
     setWtSaving(true);
     try {
+      const body = addMode === 'directory'
+        ? { type: 'directory', name: wtName, worktreePath: wtExistingPath }
+        : {
+            name: wtName,
+            branch: wtBranch,
+            createNewBranch: wtUseExisting ? false : wtCreateNew,
+            worktreePath: wtUseExisting ? wtExistingPath : undefined,
+          };
       const res = await fetch(`/api/projects/${showAddDialog}/worktrees`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: wtName,
-          branch: wtBranch,
-          createNewBranch: wtUseExisting ? false : wtCreateNew,
-          worktreePath: wtUseExisting ? wtExistingPath : undefined,
-        }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -313,9 +319,13 @@ function ProjectNav({
   const handleDeleteWorktree = async (e: React.MouseEvent, projectId: string, worktreeId: string, isManaged: boolean) => {
     e.preventDefault();
     e.stopPropagation();
-    const message = isManaged
-      ? 'Remove this worktree? The worktree directory will be deleted.'
-      : 'Remove this worktree from Pilot Console? The existing directory will not be deleted.';
+    const wt = Object.values(worktreeMap).flat().find(w => w.id === worktreeId);
+    const isDir = wt?.type === 'directory';
+    const message = isDir
+      ? 'Remove this directory from Pilot Console? The directory will not be deleted.'
+      : isManaged
+        ? 'Remove this worktree? The worktree directory will be deleted.'
+        : 'Remove this worktree from Pilot Console? The existing directory will not be deleted.';
     if (!confirm(message)) return;
     try {
       await fetch(`/api/projects/${projectId}/worktrees/${worktreeId}`, { method: 'DELETE' });
@@ -360,7 +370,7 @@ function ProjectNav({
               <button
                 onClick={(e) => openAddDialog(e, project.id)}
                 className="h-4 w-4 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-foreground transition-opacity"
-                title="Add worktree"
+                title="Add worktree or directory"
               >
                 <Plus className="h-3.5 w-3.5" />
               </button>
@@ -410,6 +420,7 @@ function ProjectNav({
               <div className="mb-1">
                 {worktrees.map(wt => {
                   const wtActive = location.pathname.includes(`/worktrees/${wt.id}`);
+                  const isDir = wt.type === 'directory';
                   const className = `group/wt ml-7 w-[calc(100%-1.75rem)] pr-2 flex items-center gap-2 px-1 py-1 text-left text-sm transition-colors rounded-md ${
                     wtActive
                       ? 'bg-accent text-accent-foreground font-medium'
@@ -417,12 +428,12 @@ function ProjectNav({
                   }`;
                   const content = (
                     <>
-                      <GitBranch className="h-4 w-4 shrink-0" />
+                      {isDir ? <FolderOpen className="h-4 w-4 shrink-0" /> : <GitBranch className="h-4 w-4 shrink-0" />}
                       <span className="truncate flex-1 text-left">{wt.name}</span>
                       <button
                         onClick={(e) => handleDeleteWorktree(e, project.id, wt.id, wt.isManaged)}
                         className="ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 group-hover/wt:opacity-100 hover:text-destructive transition-opacity"
-                        title="Remove worktree"
+                        title={isDir ? 'Remove directory' : 'Remove worktree'}
                       >
                         <Trash2 className="h-3 w-3" />
                       </button>
@@ -456,68 +467,120 @@ function ProjectNav({
       <Dialog open={!!showAddDialog} onOpenChange={(open) => !open && setShowAddDialog(null)}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Add Worktree</DialogTitle>
+            <DialogTitle>{addMode === 'directory' ? 'Add Directory' : 'Add Worktree'}</DialogTitle>
           </DialogHeader>
+          <div className="flex gap-2 mb-2">
+            <Button
+              type="button"
+              size="sm"
+              variant={addMode === 'worktree' ? 'default' : 'outline'}
+              onClick={() => setAddMode('worktree')}
+            >
+              <GitBranch className="h-3.5 w-3.5 mr-1" />
+              Git Worktree
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={addMode === 'directory' ? 'default' : 'outline'}
+              onClick={() => setAddMode('directory')}
+            >
+              <FolderOpen className="h-3.5 w-3.5 mr-1" />
+              Directory
+            </Button>
+          </div>
           <form onSubmit={handleAddWorktree} className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="wt-name">Name</Label>
-              <Input
-                id="wt-name"
-                value={wtName}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWtName(e.target.value)}
-                placeholder={wtUseExisting ? 'Defaults to folder name' : 'e.g. feature-auth'}
-                required={!wtUseExisting}
-              />
-              <p className="text-[10px] text-muted-foreground">
-                {wtUseExisting ? 'Optional display name for the existing worktree' : 'Used as directory suffix and display name'}
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="wt-use-existing"
-                checked={wtUseExisting}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
-                  setWtUseExisting(e.target.checked);
-                  if (e.target.checked) setWtCreateNew(false);
-                }}
-                className="h-4 w-4 rounded border-gray-300"
-              />
-              <Label htmlFor="wt-use-existing" className="text-sm font-normal">Attach existing worktree</Label>
-            </div>
-            {wtUseExisting && (
-              <div className="space-y-2">
-                <Label htmlFor="wt-existing-path">Worktree path</Label>
-                <Input
-                  id="wt-existing-path"
-                  value={wtExistingPath}
-                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWtExistingPath(e.target.value)}
-                  placeholder="C:\path\to\existing-worktree"
-                  required
-                />
-              </div>
-            )}
-            <div className="space-y-2">
-              <Label htmlFor="wt-branch">Branch</Label>
-              <Input
-                id="wt-branch"
-                value={wtBranch}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWtBranch(e.target.value)}
-                placeholder={wtUseExisting ? 'Detected automatically if blank' : 'e.g. feature/auth or main'}
-                required={!wtUseExisting}
-              />
-            </div>
-            {!wtUseExisting && (
-              <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  id="wt-create-new"
-                  checked={wtCreateNew}
-                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWtCreateNew(e.target.checked)}
-                  className="h-4 w-4 rounded border-gray-300"
-                />
-                <Label htmlFor="wt-create-new" className="text-sm font-normal">Create new branch</Label>
-              </div>
+            {addMode === 'directory' ? (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="wt-existing-path">Directory path</Label>
+                  <Input
+                    id="wt-existing-path"
+                    value={wtExistingPath}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWtExistingPath(e.target.value)}
+                    placeholder="C:\path\to\directory"
+                    required
+                  />
+                  <p className="text-[10px] text-muted-foreground">
+                    Any directory — does not need to be a git repository
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="wt-name">Name</Label>
+                  <Input
+                    id="wt-name"
+                    value={wtName}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWtName(e.target.value)}
+                    placeholder="Defaults to folder name"
+                  />
+                  <p className="text-[10px] text-muted-foreground">
+                    Optional display name
+                  </p>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="wt-name">Name</Label>
+                  <Input
+                    id="wt-name"
+                    value={wtName}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWtName(e.target.value)}
+                    placeholder={wtUseExisting ? 'Defaults to folder name' : 'e.g. feature-auth'}
+                    required={!wtUseExisting}
+                  />
+                  <p className="text-[10px] text-muted-foreground">
+                    {wtUseExisting ? 'Optional display name for the existing worktree' : 'Used as directory suffix and display name'}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    id="wt-use-existing"
+                    checked={wtUseExisting}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                      setWtUseExisting(e.target.checked);
+                      if (e.target.checked) setWtCreateNew(false);
+                    }}
+                    className="h-4 w-4 rounded border-gray-300"
+                  />
+                  <Label htmlFor="wt-use-existing" className="text-sm font-normal">Attach existing worktree</Label>
+                </div>
+                {wtUseExisting && (
+                  <div className="space-y-2">
+                    <Label htmlFor="wt-existing-path">Worktree path</Label>
+                    <Input
+                      id="wt-existing-path"
+                      value={wtExistingPath}
+                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWtExistingPath(e.target.value)}
+                      placeholder="C:\path\to\existing-worktree"
+                      required
+                    />
+                  </div>
+                )}
+                <div className="space-y-2">
+                  <Label htmlFor="wt-branch">Branch</Label>
+                  <Input
+                    id="wt-branch"
+                    value={wtBranch}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWtBranch(e.target.value)}
+                    placeholder={wtUseExisting ? 'Detected automatically if blank' : 'e.g. feature/auth or main'}
+                    required={!wtUseExisting}
+                  />
+                </div>
+                {!wtUseExisting && (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="wt-create-new"
+                      checked={wtCreateNew}
+                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWtCreateNew(e.target.checked)}
+                      className="h-4 w-4 rounded border-gray-300"
+                    />
+                    <Label htmlFor="wt-create-new" className="text-sm font-normal">Create new branch</Label>
+                  </div>
+                )}
+              </>
             )}
             {wtError && <p className="text-sm text-destructive">{wtError}</p>}
             <div className="flex justify-end gap-2">
@@ -525,7 +588,7 @@ function ProjectNav({
                 Cancel
               </Button>
               <Button type="submit" disabled={wtSaving}>
-                {wtSaving ? 'Adding…' : 'Add Worktree'}
+                {wtSaving ? 'Adding…' : addMode === 'directory' ? 'Add Directory' : 'Add Worktree'}
               </Button>
             </div>
           </form>

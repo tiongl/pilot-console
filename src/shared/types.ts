@@ -67,6 +67,8 @@ export type WsServerMessage =
   | { type: 'report-ready'; runId: string; scheduleId: string; scheduleName: string; status: string }
   | { type: 'schedule-changed'; action: 'created' | 'updated' | 'deleted' | 'imported'; scheduleId?: string };
 
+export type WorktreeType = 'worktree' | 'directory';
+
 export interface Worktree {
   id: string;
   projectId: string;
@@ -74,6 +76,7 @@ export interface Worktree {
   branch: string;
   worktreePath: string;
   isManaged: boolean;
+  type: WorktreeType;
   createdAt: string;
 }
 
