@@ -111,6 +111,7 @@ function ProjectNav({
   const [projectStatuses, setProjectStatuses] = useState<Map<string, ProjectSessionInfo>>(new Map());
   const [worktreeStatuses, setWorktreeStatuses] = useState<Map<string, ProjectSessionInfo>>(new Map());
   const [projectBranches, setProjectBranches] = useState<Map<string, string>>(new Map());
+  const [noGitProjects, setNoGitProjects] = useState<Set<string>>(new Set());
   const [pinnedIds, setPinnedIds] = useState<Set<string>>(
     new Set(projects.filter(p => p.pinned).map(p => p.id))
   );
@@ -194,10 +195,22 @@ function ProjectNav({
         const res = await fetch(`/api/projects/${projectId}/git-status`);
         if (res.ok && !cancelled) {
           const data = await res.json();
-          if (data.branch) {
+          if (data.noGit) {
+            setNoGitProjects(prev => {
+              const next = new Set(prev);
+              next.add(projectId);
+              return next;
+            });
+          } else if (data.branch) {
             setProjectBranches(prev => {
               const next = new Map(prev);
               next.set(projectId, data.branch);
+              return next;
+            });
+            setNoGitProjects(prev => {
+              if (!prev.has(projectId)) return prev;
+              const next = new Set(prev);
+              next.delete(projectId);
               return next;
             });
           }
@@ -386,36 +399,39 @@ function ProjectNav({
                 <Pin className="h-3.5 w-3.5" />
               </button>
             </div>
-            {/* Branch subpanel */}
-            {isExpanded && projectBranches.get(project.id) && (
-              onProjectClick ? (
+            {/* Branch / folder subpanel */}
+            {isExpanded && (projectBranches.get(project.id) || noGitProjects.has(project.id)) && (() => {
+              const branch = projectBranches.get(project.id);
+              const isNoGit = noGitProjects.has(project.id);
+              const icon = isNoGit
+                ? <FolderOpen className="h-4 w-4 shrink-0" />
+                : <GitBranch className="h-4 w-4 shrink-0" />;
+              const label = isNoGit ? project.name : branch;
+              const className = `ml-7 w-[calc(100%-1.75rem)] pr-2 flex items-center gap-2 px-1 py-1 text-left text-sm transition-colors rounded-md ${
+                isActive && !location.pathname.includes('/worktrees/')
+                  ? 'bg-accent text-accent-foreground font-medium'
+                  : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
+              }`;
+              return onProjectClick ? (
                 <button
                   onClick={() => onProjectClick(project.id)}
-                  className={`ml-7 w-[calc(100%-1.75rem)] pr-2 flex items-center gap-2 px-1 py-1 text-left text-sm transition-colors cursor-pointer rounded-md ${
-                    isActive && !location.pathname.includes('/worktrees/')
-                      ? 'bg-accent text-accent-foreground font-medium'
-                      : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-                  }`}
+                  className={`${className} cursor-pointer`}
                 >
-                  <GitBranch className="h-4 w-4 shrink-0" />
-                  <span className="truncate flex-1 text-left">{projectBranches.get(project.id)}</span>
+                  {icon}
+                  <span className="truncate flex-1 text-left">{label}</span>
                   <span className="ml-auto w-3 flex items-center justify-center shrink-0"><StatusDot info={projectStatuses.get(project.id)} /></span>
                 </button>
               ) : (
                 <Link
                   to={`/projects/${project.id}/chat`}
-                  className={`ml-7 w-[calc(100%-1.75rem)] pr-2 flex items-center gap-2 px-1 py-1 text-left text-sm transition-colors rounded-md ${
-                    isActive && !location.pathname.includes('/worktrees/')
-                      ? 'bg-accent text-accent-foreground font-medium'
-                      : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-                  }`}
+                  className={className}
                 >
-                  <GitBranch className="h-4 w-4 shrink-0" />
-                  <span className="truncate flex-1 text-left">{projectBranches.get(project.id)}</span>
+                  {icon}
+                  <span className="truncate flex-1 text-left">{label}</span>
                   <span className="ml-auto w-3 flex items-center justify-center shrink-0"><StatusDot info={projectStatuses.get(project.id)} /></span>
                 </Link>
-              )
-            )}
+              );
+            })()}
             {isExpanded && worktrees.length > 0 && (
               <div className="mb-1">
                 {worktrees.map(wt => {
