@@ -26,6 +26,8 @@ export interface TerminalPaneAPI {
   focus: () => void;
   /** Force a full canvas redraw (fixes corruption after re-mount/visibility change) */
   refresh: () => void;
+  /** Full terminal reset: clears screen, scrollback, and resets parser state (fixes corrupted terminal) */
+  reset: () => void;
 }
 
 export const TERMINAL_FONTS = [
@@ -167,6 +169,11 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
       },
       focus: () => term.focus(),
       refresh: () => term.refresh(0, term.rows - 1),
+      reset: () => {
+        term.reset();
+        term.clear();
+        term.focus();
+      },
     };
 
     // Defer initial fit to ensure the container has been laid out.

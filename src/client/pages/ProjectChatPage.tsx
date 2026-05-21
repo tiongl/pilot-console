@@ -3,7 +3,7 @@ import { useParams } from 'react-router';
 import { useCliSocket } from '../hooks/useCliSocket';
 import TerminalPane, { type TerminalPaneAPI, TERMINAL_FONTS } from '../components/terminal/TerminalPane';
 import { Button } from '../components/ui/button';
-import { Square, Minus, Plus, Palette, Type, X as XIcon, Terminal, Bot, GitCommitHorizontal, GitBranch, FolderOpen } from 'lucide-react';
+import { Square, Minus, Plus, Palette, Type, X as XIcon, Terminal, Bot, GitCommitHorizontal, GitBranch, FolderOpen, RotateCcw } from 'lucide-react';
 import { THEMES } from '../lib/terminal-themes';
 import GitLogTab from '../components/project/GitLogTab';
 import GitPanel from '../components/project/GitPanel';
@@ -96,7 +96,7 @@ function findSafeSlicePoint(str: string, pos: number): number {
  * Output is written directly to xterm (no React state accumulation).
  */
 const TerminalTab = React.memo(function TerminalTab({
-  projectId, worktreeId, fontSize, fontFamily, themeName, active, forceNew, mode, sessionId: initialSessionId, onStatusChange, onKill, onSessionId, visible = true,
+  projectId, worktreeId, fontSize, fontFamily, themeName, active, forceNew, mode, sessionId: initialSessionId, onStatusChange, onKill, onSessionId, onTermApi, visible = true,
 }: {
   projectId?: string;
   worktreeId?: string;
@@ -110,6 +110,7 @@ const TerminalTab = React.memo(function TerminalTab({
   onStatusChange: (status: string) => void;
   onKill: (sessionId: string | null) => void;
   onSessionId?: (sessionId: string) => void;
+  onTermApi?: (api: TerminalPaneAPI) => void;
   /** Whether this terminal's project is currently visible on screen */
   visible?: boolean;
 }) {
@@ -206,6 +207,7 @@ const TerminalTab = React.memo(function TerminalTab({
   const handleTermReady = useCallback((api: TerminalPaneAPI) => {
     console.log(`[TerminalTab] handleTermReady called, pending=${pendingOutput.current.length}`);
     termApiRef.current = api;
+    onTermApi?.(api);
     // Flush any output that arrived before the terminal was ready
     if (pendingOutput.current.length > 0) {
       for (const chunk of pendingOutput.current) {
@@ -214,7 +216,7 @@ const TerminalTab = React.memo(function TerminalTab({
       pendingOutput.current = [];
     }
     api.fit();
-  }, []);
+  }, [onTermApi]);
 
   // Log state transitions
   useEffect(() => {
@@ -326,6 +328,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
 
   const firstTabId = useRef(tabs[0]?.id ?? '');
   const killCallbacksRef = useRef<Record<string, (sessionId: string | null) => void>>({});
+  const termApiRefsMap = useRef<Record<string, TerminalPaneAPI>>({});
   const statusCallbacksRef = useRef<Record<string, (status: string) => void>>({});
   const sessionIdCallbacksRef = useRef<Record<string, (sid: string) => void>>({});
 
@@ -698,6 +701,18 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
                 <Plus className="h-3 w-3" />
               </Button>
             </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6"
+              title="Refresh terminal (fix corruption)"
+              onClick={() => {
+                const api = termApiRefsMap.current[groupActiveTabId];
+                if (api) api.reset();
+              }}
+            >
+              <RotateCcw className="h-3 w-3" />
+            </Button>
           </div>
         )}
         {/* Permanent icon buttons for Git Log, Git Status, Files */}
@@ -785,6 +800,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
               onStatusChange={statusCallbacksRef.current[tab.id]}
               onKill={killCallbacksRef.current[tab.id]}
               onSessionId={sessionIdCallbacksRef.current[tab.id]}
+              onTermApi={(api) => { termApiRefsMap.current[tab.id] = api; }}
             />
           );
         })}
