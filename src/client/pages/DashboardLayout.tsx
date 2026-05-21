@@ -972,7 +972,11 @@ export default function DashboardLayout() {
         >
           {/* Pane 0: router outlet */}
           <main
-            className={`flex flex-col overflow-hidden ${activePaneIndex === 0 ? 'ring-2 ring-primary/50 ring-inset' : ''}`}
+            className={`flex flex-col overflow-hidden transition-all duration-150 ${
+              activePaneIndex === 0
+                ? 'ring-2 ring-primary ring-inset bg-background'
+                : 'opacity-75 hover:opacity-90 bg-muted/30'
+            }`}
             style={{ minWidth: 0, minHeight: 0 }}
             onClick={() => setActivePaneIndex(0)}
           >
@@ -982,7 +986,11 @@ export default function DashboardLayout() {
           {panes.slice(0, paneCount - 1).map((content, i) => (
             <div
               key={i}
-              className={`flex flex-col overflow-hidden ${activePaneIndex === i + 1 ? 'ring-2 ring-primary/50 ring-inset' : ''}`}
+              className={`flex flex-col overflow-hidden transition-all duration-150 ${
+                activePaneIndex === i + 1
+                  ? 'ring-2 ring-primary ring-inset bg-background'
+                  : 'opacity-75 hover:opacity-90 bg-muted/30'
+              }`}
               style={{ minWidth: 0, minHeight: 0 }}
               onClick={() => setActivePaneIndex(i + 1)}
             >
