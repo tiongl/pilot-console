@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo, useRef, useId, lazy, Suspense } from 'react';
-import { Folder, File, ChevronRight, ChevronDown, ChevronLeft, X, Copy, Check, Image as ImageIcon, Eye, Code, Minus, Plus, WrapText, Hash, Search, Pencil, Save, Undo2, FilePlus, Maximize2 } from 'lucide-react';
+import { Folder, File, ChevronRight, ChevronDown, ChevronLeft, X, Copy, Check, Image as ImageIcon, Eye, Code, Minus, Plus, WrapText, Hash, Search, Pencil, Save, Undo2, FilePlus, Maximize2, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -123,6 +123,12 @@ function getLanguage(filename: string): string {
 
 function isImageFile(filename: string): boolean {
   return IMAGE_EXTS.has(getExt(filename));
+}
+
+const HTML_EXTS = new Set(['html', 'htm']);
+
+function isHtmlFile(filename: string): boolean {
+  return HTML_EXTS.has(getExt(filename));
 }
 
 function isExternalMarkdownHref(href: string): boolean {
@@ -279,6 +285,7 @@ export default function FileExplorer({ projectId, worktreeId, onClose, embedded 
   const [viewer, setViewer] = useState<FileViewerState | null>(null);
   const [copied, setCopied] = useState(false);
   const [renderMarkdown, setRenderMarkdown] = useState(true);
+  const [renderHtml, setRenderHtml] = useState(true);
   const [viewerFontSize, setViewerFontSize] = useState(() => parseInt(localStorage.getItem('pilot-console-viewer-fontsize') || '12'));
   const [viewerTheme, setViewerTheme] = useState<ViewerThemeName>(() => (localStorage.getItem('pilot-console-viewer-theme') as ViewerThemeName) || 'VS Dark');
   const [showLines, setShowLines] = useState(() => localStorage.getItem('pilot-console-viewer-lines') !== 'false');
@@ -311,6 +318,7 @@ export default function FileExplorer({ projectId, worktreeId, onClose, embedded 
   const viewerLanguage = useMemo(() => viewer ? getLanguage(viewer.path) : '', [viewer?.path]);
   const viewerIsImage = useMemo(() => viewer ? isImageFile(viewer.path) : false, [viewer?.path]);
   const viewerIsMarkdown = useMemo(() => viewerLanguage === 'markdown', [viewerLanguage]);
+  const viewerIsHtml = useMemo(() => viewer ? isHtmlFile(viewer.path) : false, [viewer?.path]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<{ path: string; type: 'file' | 'dir'; size?: number }[] | null>(null);
@@ -374,6 +382,24 @@ export default function FileExplorer({ projectId, worktreeId, onClose, embedded 
     }
     setExpandedDirs(newExpanded);
   }, [expandedDirs, dirContents, fetchDir]);
+
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshTree = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const rootItems = await fetchDir('');
+      setEntries(rootItems);
+      const expanded = Array.from(expandedDirs);
+      const results = await Promise.all(expanded.map(async p => [p, await fetchDir(p)] as const));
+      setDirContents(prev => {
+        const next = new Map(prev);
+        for (const [p, items] of results) next.set(p, items);
+        return next;
+      });
+    } finally {
+      setRefreshing(false);
+    }
+  }, [fetchDir, expandedDirs]);
 
   const isDirtyRef = useRef(false);
   isDirtyRef.current = isEditing && editContent !== originalContent;
@@ -642,6 +668,9 @@ export default function FileExplorer({ projectId, worktreeId, onClose, embedded 
           <div className="flex items-center justify-between px-3 py-2 border-b">
             <span className="text-sm font-semibold">Files</span>
             <div className="flex items-center gap-0.5">
+              <Button variant="ghost" size="icon" className="h-6 w-6" onClick={refreshTree} disabled={refreshing} title="Refresh">
+                <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+              </Button>
               <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => { setNewFilePrompt(true); setNewFilePath(''); setSaveError(''); }} title="New file">
                 <FilePlus className="h-3.5 w-3.5" />
               </Button>
@@ -795,13 +824,13 @@ export default function FileExplorer({ projectId, worktreeId, onClose, embedded 
                     </div>
                   )}
                   {/* Line numbers toggle */}
-                  {viewer.content && !viewerIsImage && !(viewerIsMarkdown && renderMarkdown) && (
+                  {viewer.content && !viewerIsImage && !(viewerIsMarkdown && renderMarkdown) && !(viewerIsHtml && renderHtml) && (
                     <Button variant={showLines ? 'secondary' : 'ghost'} size="icon" className="h-7 w-7" onClick={toggleLines} title="Line numbers">
                       <Hash className="h-3.5 w-3.5" />
                     </Button>
                   )}
                   {/* Wrap toggle */}
-                  {viewer.content && !viewerIsImage && !(viewerIsMarkdown && renderMarkdown) && (
+                  {viewer.content && !viewerIsImage && !(viewerIsMarkdown && renderMarkdown) && !(viewerIsHtml && renderHtml) && (
                     <Button variant={wrapLines ? 'secondary' : 'ghost'} size="icon" className="h-7 w-7" onClick={toggleWrap} title="Word wrap">
                       <WrapText className="h-3.5 w-3.5" />
                     </Button>
@@ -816,6 +845,18 @@ export default function FileExplorer({ projectId, worktreeId, onClose, embedded 
                       title={renderMarkdown ? 'Show source' : 'Render markdown'}
                     >
                       {renderMarkdown ? <Code className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </Button>
+                  )}
+                  {/* HTML toggle */}
+                  {viewerIsHtml && viewer.content && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => setRenderHtml(v => !v)}
+                      title={renderHtml ? 'Show source' : 'Render HTML'}
+                    >
+                      {renderHtml ? <Code className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                     </Button>
                   )}
                   {viewerIsMarkdown && viewer.content && renderMarkdown && !isEditing && (
@@ -984,6 +1025,13 @@ export default function FileExplorer({ projectId, worktreeId, onClose, embedded 
                       }}
                     >{viewer.content}</ReactMarkdown>
                   </div>
+                ) : viewer.content !== null && viewerIsHtml && renderHtml ? (
+                  <iframe
+                    title={viewer.path}
+                    srcDoc={viewer.content}
+                    sandbox=""
+                    className="h-full w-full border-0 bg-white"
+                  />
                 ) : viewer.content !== null ? (
                   <CodeViewer content={viewer.content} language={viewerLanguage} truncated={viewer.truncated} size={viewer.size} fontSize={viewerFontSize} showLineNumbers={showLines} wrapLines={wrapLines} themeName={viewerTheme} />
                 ) : (

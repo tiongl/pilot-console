@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router';
 import { useCliSocket } from '../hooks/useCliSocket';
 import TerminalPane, { type TerminalPaneAPI, TERMINAL_FONTS } from '../components/terminal/TerminalPane';
+import NewTabMenu from '../components/terminal/NewTabMenu';
 import { Button } from '../components/ui/button';
 import { Square, Minus, Plus, Palette, Type, X as XIcon, Terminal, Bot, GitCommitHorizontal, GitBranch, FolderOpen, RotateCcw } from 'lucide-react';
 import { THEMES } from '../lib/terminal-themes';
@@ -28,6 +29,8 @@ interface ProjectTabState {
   tabs: TabMeta[];
   activeTabId: string;
   fontSize: number;
+  themeName?: string;
+  fontFamily?: string;
 }
 const projectTabStates = new Map<string, ProjectTabState>();
 
@@ -38,6 +41,8 @@ interface PersistedTabState {
   tabs: TabMeta[];
   activeTabId: string;
   fontSize: number;
+  themeName?: string;
+  fontFamily?: string;
 }
 
 function lsTabKey(stateKey: string) {
@@ -299,6 +304,26 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
     const saved = localStorage.getItem('pilot-console-font-size');
     return saved ? Math.max(8, Math.min(24, parseInt(saved, 10) || 14)) : 14;
   });
+  // Per-project terminal theme (applies to all terminals in this project)
+  const [projectThemeName, setProjectThemeName] = useState<string>(() => {
+    if (tabStateKey) {
+      const mem = projectTabStates.get(tabStateKey);
+      if (mem?.themeName) return mem.themeName;
+      const ls = loadTabState(tabStateKey);
+      if (ls?.themeName) return ls.themeName;
+    }
+    return defaultTheme;
+  });
+  // Per-project terminal font family (applies to all terminals in this project)
+  const [projectFontFamily, setProjectFontFamily] = useState<string>(() => {
+    if (tabStateKey) {
+      const mem = projectTabStates.get(tabStateKey);
+      if (mem?.fontFamily) return mem.fontFamily;
+      const ls = loadTabState(tabStateKey);
+      if (ls?.fontFamily) return ls.fontFamily;
+    }
+    return defaultFont;
+  });
   const [tabStatuses, setTabStatuses] = useState<Record<string, string>>({});
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
@@ -335,11 +360,11 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   // Persist tab state whenever it changes (in-memory + localStorage)
   useEffect(() => {
     if (tabStateKey) {
-      const state = { tabs, activeTabId: activeTabIds[1] || '', fontSize };
+      const state = { tabs, activeTabId: activeTabIds[1] || '', fontSize, themeName: projectThemeName, fontFamily: projectFontFamily };
       projectTabStates.set(tabStateKey, state);
       saveTabState(tabStateKey, state);
     }
-  }, [tabStateKey, tabs, activeTabIds, fontSize]);
+  }, [tabStateKey, tabs, activeTabIds, fontSize, projectThemeName, projectFontFamily]);
 
   // Also persist global font size for migration/fallback
   useEffect(() => {
@@ -553,12 +578,13 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   const renderTabBar = (groupTabs: TabMeta[], groupId: number) => {
     const groupActiveTabId = activeTabIds[groupId] || '';
     const groupActiveTab = groupTabs.find(t => t.id === groupActiveTabId);
-    const groupActiveFontFamily = groupActiveTab?.fontFamily ?? defaultFont;
-    const groupActiveThemeName = groupActiveTab?.themeName ?? defaultTheme;
     const isFocused = focusedGroup === groupId;
 
+    const showTerminalControls = !!groupActiveTab && groupActiveTab.mode !== 'git' && groupActiveTab.mode !== 'git-status' && groupActiveTab.mode !== 'files';
+
     return (
-      <div className={`flex items-center border-b bg-muted/30 ${isFocused ? '' : 'opacity-70'}`} onClick={() => setFocusedGroup(groupId)}>
+      <div className={`border-b bg-muted/30 ${isFocused ? '' : 'opacity-70'}`} onClick={() => setFocusedGroup(groupId)}>
+      <div className="flex items-center">
         <div className="flex items-center flex-1 overflow-x-auto min-w-0"
           onDragOver={(e) => {
             // Allow dropping on the empty tab bar area
@@ -651,70 +677,9 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
               </div>
             );
           })}
-          <div className="shrink-0">
-            <button
-              onClick={() => addTab('cli', groupId)}
-              className="px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-background/50"
-              title="New tab"
-            >
-              +
-            </button>
-          </div>
+          <NewTabMenu onSelect={(mode) => addTab(mode, groupId)} />
         </div>
         {/* Terminal controls — only shown when a terminal tab is active */}
-        {groupActiveTab && groupActiveTab.mode !== 'git' && groupActiveTab.mode !== 'git-status' && groupActiveTab.mode !== 'files' && (
-          <div className="flex items-center shrink-0 border-l gap-1 px-1.5">
-            <div className="flex items-center gap-0.5 border rounded px-1">
-              <Type className="h-3 w-3 text-muted-foreground" />
-              <select
-                value={groupActiveFontFamily}
-                onChange={(e) => {
-                  const family = e.target.value;
-                  setTabs(prev => prev.map(t => t.id === groupActiveTabId ? { ...t, fontFamily: family } : t));
-                  localStorage.setItem('pilot-console-font', family);
-                }}
-                className="h-6 text-xs bg-transparent border-none outline-none px-0.5 text-foreground"
-              >
-                {TERMINAL_FONTS.map(f => <option key={f.id} value={f.family}>{f.label}</option>)}
-              </select>
-            </div>
-            <div className="flex items-center gap-0.5 border rounded px-1">
-              <Palette className="h-3 w-3 text-muted-foreground" />
-              <select
-                value={groupActiveThemeName}
-                onChange={(e) => {
-                  const name = e.target.value;
-                  setTabs(prev => prev.map(t => t.id === groupActiveTabId ? { ...t, themeName: name } : t));
-                  localStorage.setItem('pilot-console-theme', name);
-                }}
-                className="h-6 text-xs bg-transparent border-none outline-none px-0.5 text-foreground"
-              >
-                {THEMES.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
-              </select>
-            </div>
-            <div className="flex items-center gap-0.5 border rounded px-1">
-              <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => setFontSize(s => Math.max(8, s - 1))} disabled={fontSize <= 8}>
-                <Minus className="h-3 w-3" />
-              </Button>
-              <span className="text-xs w-5 text-center tabular-nums">{fontSize}</span>
-              <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => setFontSize(s => Math.min(24, s + 1))} disabled={fontSize >= 24}>
-                <Plus className="h-3 w-3" />
-              </Button>
-            </div>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-6 w-6"
-              title="Refresh terminal (fix corruption)"
-              onClick={() => {
-                const api = termApiRefsMap.current[groupActiveTabId];
-                if (api) api.reset();
-              }}
-            >
-              <RotateCcw className="h-3 w-3" />
-            </Button>
-          </div>
-        )}
         {/* Permanent icon buttons for Git Log, Git Status, Files */}
         <div className="flex items-center shrink-0 border-l gap-0.5 px-1">
           {([
@@ -732,6 +697,65 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
               </button>
           ))}
         </div>
+      </div>
+      {showTerminalControls && (
+        <div className="flex items-center gap-1 px-1.5 py-1 border-t bg-muted/20">
+          <div className="flex items-center gap-0.5 border rounded px-1">
+            <Type className="h-3 w-3 text-muted-foreground" />
+            <select
+                value={projectFontFamily}
+                onChange={(e) => {
+                  const family = e.target.value;
+                  setProjectFontFamily(family);
+                  localStorage.setItem('pilot-console-font', family);
+                }}
+                className="h-6 text-xs bg-transparent border-none outline-none px-0.5 text-foreground"
+            >
+                {TERMINAL_FONTS.map(f => <option key={f.id} value={f.family}>{f.label}</option>)}
+            </select>
+          </div>
+          <div className="flex items-center gap-0.5 border rounded px-1">
+            <Palette className="h-3 w-3 text-muted-foreground" />
+            <select
+                value={projectThemeName}
+                onChange={(e) => {
+                  const name = e.target.value;
+                  setProjectThemeName(name);
+                  localStorage.setItem('pilot-console-theme', name);
+                }}
+                className="h-6 text-xs bg-transparent border-none outline-none px-0.5 text-foreground"
+            >
+                {THEMES.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
+            </select>
+          </div>
+          <div className="flex items-center gap-0.5 border rounded px-1">
+            <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => setFontSize(s => Math.max(8, s - 1))} disabled={fontSize <= 8}>
+                <Minus className="h-3 w-3" />
+            </Button>
+            <span className="text-xs w-5 text-center tabular-nums">{fontSize}</span>
+            <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => setFontSize(s => Math.min(24, s + 1))} disabled={fontSize >= 24}>
+                <Plus className="h-3 w-3" />
+            </Button>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            title="Refresh terminal display (fix rendering corruption)"
+            onClick={() => {
+                const api = termApiRefsMap.current[groupActiveTabId];
+                if (!api) return;
+                // Mirror what the font-size change does: fit + redraw, which
+                // reliably recovers from canvas corruption without clearing
+                // the user's scrollback.
+                api.fit();
+                api.refresh();
+            }}
+          >
+            <RotateCcw className="h-3 w-3" />
+          </Button>
+        </div>
+      )}
       </div>
     );
   };
@@ -790,8 +814,8 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
               projectId={projectId}
               worktreeId={worktreeId}
               fontSize={fontSize}
-              fontFamily={tab.fontFamily || defaultFont}
-              themeName={tab.themeName || defaultTheme}
+              fontFamily={projectFontFamily}
+              themeName={projectThemeName}
               active={isActive}
               forceNew={tab.mode !== 'cli' || tab.id !== firstTabId.current}
               mode={tab.mode || 'cli'}

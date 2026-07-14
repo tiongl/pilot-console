@@ -1108,19 +1108,33 @@ httpServer.on('upgrade', (req, socket, head) => {
   }
 });
 
-httpServer.listen(port, hostname, async () => {
-  console.log(`> Ready on http://${hostname}:${port}`);
-  // Connect to daemon and recover surviving sessions
+// Initialize the daemon bridge BEFORE listening so that surviving
+// daemon-owned PTY sessions are reconciled into `activeSessions` before
+// the HTTP/WS server starts accepting requests. Otherwise a browser
+// reconnecting after a server restart can hit `/api/sessions/active`
+// (returning []) or open a WS with a stale sessionId (rejected with 4003)
+// before reconciliation completes — losing the resume opportunity.
+//
+// `initDaemonBridge()` already handles a missing/unreachable daemon
+// gracefully (it logs and returns), so awaiting it here cannot block
+// startup on daemon availability. We still wrap in try/catch so any
+// unexpected error during reconciliation does not prevent the server
+// from binding.
+console.log('[server] Initializing daemon bridge before accepting requests...');
+(async () => {
   try {
     await initDaemonBridge();
     console.log('[server] Daemon bridge initialized successfully');
-    // Start the report scheduler after daemon is ready
-    startScheduler();
-    // Start event-loop lag monitoring for perf diagnostics
-    startLagMonitor();
   } catch (err) {
     console.error('Failed to initialize daemon bridge:', err);
   }
-});
+
+  httpServer.listen(port, hostname, () => {
+    console.log(`> Ready on http://${hostname}:${port}`);
+    // Start the report scheduler and perf monitor once the server is live
+    startScheduler();
+    startLagMonitor();
+  });
+})();
 
 export { app, httpServer };
