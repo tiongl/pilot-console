@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Bot, Terminal } from 'lucide-react';
+import { Bot, Terminal, Sparkles } from 'lucide-react';
 
-export type TabMode = 'cli' | 'shell' | 'powershell';
+export type TabMode = 'cli' | 'shell' | 'powershell' | 'agent';
 
 interface NewTabMenuProps {
   onSelect: (mode: TabMode) => void;
@@ -49,6 +49,9 @@ export default function NewTabMenu({ onSelect }: NewTabMenuProps) {
         >
           <button onClick={() => { onSelect('cli'); setOpen(false); }} className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground flex items-center gap-2" data-testid="menu-cli">
             <Bot className="h-3 w-3" /> Copilot CLI
+          </button>
+          <button onClick={() => { onSelect('agent'); setOpen(false); }} className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground flex items-center gap-2" data-testid="menu-agent">
+            <Sparkles className="h-3 w-3" /> Copilot Agent
           </button>
           <button onClick={() => { onSelect('shell'); setOpen(false); }} className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground flex items-center gap-2" data-testid="menu-shell">
             <Terminal className="h-3 w-3" /> Terminal

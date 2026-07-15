@@ -14,6 +14,8 @@ import { upsertUser, listUsers, updateUserRole, deleteUser } from '../shared/use
 import { createProject, listProjects, getProjectById, updateProject, deleteProject, addSkill, listSkills, updateSkill, deleteSkill, listWorktrees, createWorktree, attachExistingWorktree, attachSubnode, getWorktreeById, deleteWorktree } from '../shared/project-store';
 import { listSessionsForUser, listAllSessions, getCopilotSessionDetail, listCopilotSessionsForProject } from '../shared/session-store';
 import { setupWebSocketServer } from './websocket';
+import { setupAgentWebSocketServer } from './agent-websocket';
+import { listAgentModels, shutdownAgentBridge } from '../shared/agent-bridge';
 import { getAllSessions, getAllSessionsWithExited, getSessionStatus, endCliSession, endSessionByProject, initDaemonBridge } from '../shared/cli-bridge';
 import { getDb } from '../shared/db';
 import scheduleRoutes from './routes/schedules';
@@ -235,6 +237,17 @@ app.get('/api/sessions/:id/transcript', (req, res) => {
     return;
   }
   res.json(detail);
+});
+
+// --- Agent (SDK) mode ---
+app.get('/api/agent/models', async (_req, res) => {
+  try {
+    const models = await listAgentModels();
+    res.json({ models });
+  } catch (err) {
+    console.error('[api] failed to list agent models:', err);
+    res.status(503).json({ error: 'Copilot SDK unavailable', models: [{ id: 'auto', name: 'Auto' }] });
+  }
 });
 
 // --- Skills ---
@@ -1097,11 +1110,16 @@ const httpServer = createServer(app);
 
 // WebSocket
 const wss = setupWebSocketServer();
+const agentWss = setupAgentWebSocketServer();
 httpServer.on('upgrade', (req, socket, head) => {
   const { pathname } = parse(req.url!, true);
   if (pathname === '/ws') {
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req);
+    });
+  } else if (pathname === '/ws/agent') {
+    agentWss.handleUpgrade(req, socket, head, (ws) => {
+      agentWss.emit('connection', ws, req);
     });
   } else {
     socket.destroy();
@@ -1136,5 +1154,21 @@ console.log('[server] Initializing daemon bridge before accepting requests...');
     startLagMonitor();
   });
 })();
+
+// Gracefully persist and disconnect SDK-backed agent sessions on shutdown.
+let shuttingDown = false;
+async function gracefulShutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[server] Received ${signal}, shutting down agent bridge...`);
+  try {
+    await shutdownAgentBridge();
+  } catch (err) {
+    console.error('[server] Error during agent bridge shutdown:', err);
+  }
+  process.exit(0);
+}
+process.on('SIGINT', () => void gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => void gracefulShutdown('SIGTERM'));
 
 export { app, httpServer };

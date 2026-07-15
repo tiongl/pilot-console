@@ -150,6 +150,15 @@ function initSchema(db: Database.Database) {
     db.exec('ALTER TABLE cli_sessions ADD COLUMN output_log TEXT');
   }
 
+  // Migration: add kind column to distinguish PTY ('cli') from SDK ('agent') sessions
+  if (!sessionColNames.has('kind')) {
+    db.exec("ALTER TABLE cli_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'cli'");
+  }
+  // Migration: add worktree_id column for agent-session context
+  if (!sessionColNames.has('worktree_id')) {
+    db.exec('ALTER TABLE cli_sessions ADD COLUMN worktree_id TEXT');
+  }
+
   // Migration: add pinned and sort_order columns to projects
   const projectCols = db.pragma('table_info(projects)') as Array<{ name: string }>;
   const projectColNames = new Set(projectCols.map((c) => c.name));

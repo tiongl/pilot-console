@@ -3,8 +3,9 @@ import { useParams } from 'react-router';
 import { useCliSocket } from '../hooks/useCliSocket';
 import TerminalPane, { type TerminalPaneAPI, TERMINAL_FONTS } from '../components/terminal/TerminalPane';
 import NewTabMenu from '../components/terminal/NewTabMenu';
+import AgentPane from '../components/terminal/AgentPane';
 import { Button } from '../components/ui/button';
-import { Square, Minus, Plus, Palette, Type, X as XIcon, Terminal, Bot, GitCommitHorizontal, GitBranch, FolderOpen, RotateCcw } from 'lucide-react';
+import { Square, Minus, Plus, Palette, Type, X as XIcon, Terminal, Bot, GitCommitHorizontal, GitBranch, FolderOpen, RotateCcw, Sparkles } from 'lucide-react';
 import { THEMES } from '../lib/terminal-themes';
 import GitLogTab from '../components/project/GitLogTab';
 import GitPanel from '../components/project/GitPanel';
@@ -15,7 +16,7 @@ import { useProjectSplit, splitGroupCount } from '../lib/project-split-context';
 interface TabMeta {
   id: string;
   label: string;
-  mode: 'cli' | 'shell' | 'powershell' | 'git' | 'git-status' | 'files';
+  mode: 'cli' | 'shell' | 'powershell' | 'agent' | 'git' | 'git-status' | 'files';
   themeName: string;
   fontFamily: string;
   sessionId?: string;
@@ -429,6 +430,10 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
             // Tabs restored from localStorage — reconcile sessionIds
             const usedSessionIds = new Set<string>();
             const reconciled = prev.map(tab => {
+              // Agent (SDK) sessions aren't tracked by /api/sessions/active
+              // (that only lists PTY sessions). The agent WS layer resumes them
+              // from disk on connect, so keep their id untouched here.
+              if (tab.mode === 'agent') return tab;
               if (tab.sessionId) {
                 // Validate: is this sessionId still active?
                 const stillActive = matching.find(s => s.sessionId === tab.sessionId);
@@ -470,9 +475,9 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
       .catch(() => {});
   }, [projectId, worktreeId, tabStateKey, defaultTheme, defaultFont]);
 
-  const addTab = useCallback((mode: 'cli' | 'shell' | 'powershell' | 'git' | 'git-status' | 'files' = 'cli', targetGroup: number = 1) => {
+  const addTab = useCallback((mode: 'cli' | 'shell' | 'powershell' | 'agent' | 'git' | 'git-status' | 'files' = 'cli', targetGroup: number = 1) => {
     tabCounter++;
-    const label = mode === 'shell' ? `Shell ${tabCounter}` : mode === 'powershell' ? `PS ${tabCounter}` : mode === 'git' ? `Git Log ${tabCounter}` : mode === 'git-status' ? `Git Status ${tabCounter}` : mode === 'files' ? `Files ${tabCounter}` : `Copilot ${tabCounter}`;
+    const label = mode === 'shell' ? `Shell ${tabCounter}` : mode === 'powershell' ? `PS ${tabCounter}` : mode === 'agent' ? `Agent ${tabCounter}` : mode === 'git' ? `Git Log ${tabCounter}` : mode === 'git-status' ? `Git Status ${tabCounter}` : mode === 'files' ? `Files ${tabCounter}` : `Copilot ${tabCounter}`;
     const newTab: TabMeta = { id: `tab-${tabCounter}`, label, mode, themeName: defaultTheme, fontFamily: defaultFont, group: targetGroup };
     setTabs(prev => [...prev, newTab]);
     setActiveTabIds(prev => ({ ...prev, [targetGroup]: newTab.id }));
@@ -581,6 +586,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
     const isFocused = focusedGroup === groupId;
 
     const showTerminalControls = !!groupActiveTab && groupActiveTab.mode !== 'git' && groupActiveTab.mode !== 'git-status' && groupActiveTab.mode !== 'files';
+    const isAgentTab = groupActiveTab?.mode === 'agent';
 
     return (
       <div className={`border-b bg-muted/30 ${isFocused ? '' : 'opacity-70'}`} onClick={() => setFocusedGroup(groupId)}>
@@ -616,6 +622,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
               : tab.mode === 'git' ? <GitCommitHorizontal className="h-3 w-3 shrink-0" />
               : tab.mode === 'git-status' ? <GitBranch className="h-3 w-3 shrink-0" />
               : tab.mode === 'files' ? <FolderOpen className="h-3 w-3 shrink-0" />
+              : tab.mode === 'agent' ? <Sparkles className="h-3 w-3 shrink-0" />
               : <Bot className="h-3 w-3 shrink-0" />;
             return (
               <div
@@ -742,6 +749,8 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
             size="icon"
             className="h-6 w-6"
             title="Refresh terminal display (fix rendering corruption)"
+            hidden={isAgentTab}
+            style={isAgentTab ? { display: 'none' } : undefined}
             onClick={() => {
                 const api = termApiRefsMap.current[groupActiveTabId];
                 if (!api) return;
@@ -794,6 +803,30 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
             return (
               <div key={tab.id} className="absolute inset-0" style={{ zIndex: isActive ? 2 : 0, display: isActive ? 'block' : 'none' }}>
                 <FileExplorer projectId={projectId} worktreeId={worktreeId} embedded />
+              </div>
+            );
+          }
+          if (tab.mode === 'agent') {
+            if (!statusCallbacksRef.current[tab.id]) {
+              statusCallbacksRef.current[tab.id] = (s: string) => setTabStatuses(prev => prev[tab.id] === s ? prev : { ...prev, [tab.id]: s });
+            }
+            if (!sessionIdCallbacksRef.current[tab.id]) {
+              const tabId = tab.id;
+              sessionIdCallbacksRef.current[tabId] = (sid: string) => setTabs(prev => prev.map(t => t.id === tabId ? { ...t, sessionId: sid } : t));
+            }
+            return (
+              <div key={tab.id} className="absolute inset-0" style={{ zIndex: isActive ? 2 : 0, display: isActive ? 'block' : 'none' }}>
+                <AgentPane
+                  projectId={projectId}
+                  worktreeId={worktreeId}
+                  sessionId={tab.sessionId}
+                  active={isActive}
+                  themeName={projectThemeName}
+                  fontFamily={projectFontFamily}
+                  fontSize={fontSize}
+                  onSessionId={sessionIdCallbacksRef.current[tab.id]}
+                  onStatusChange={statusCallbacksRef.current[tab.id]}
+                />
               </div>
             );
           }
@@ -852,6 +885,16 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
             <div>
               <div className="text-sm font-medium">Copilot CLI</div>
               <div className="text-[10px] text-muted-foreground">AI-powered terminal</div>
+            </div>
+          </button>
+          <button
+            onClick={() => addTab('agent')}
+            className="flex flex-col items-center gap-2 rounded-lg border p-4 hover:bg-accent hover:text-accent-foreground transition-colors"
+          >
+            <Sparkles className="h-6 w-6" />
+            <div>
+              <div className="text-sm font-medium">Copilot Agent</div>
+              <div className="text-[10px] text-muted-foreground">SDK chat session</div>
             </div>
           </button>
           <button

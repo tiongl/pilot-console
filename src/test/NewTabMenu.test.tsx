@@ -25,6 +25,14 @@ describe('NewTabMenu', () => {
     expect(onSelect).toHaveBeenCalledWith('cli');
   });
 
+  it('calls onSelect with "agent" when Copilot Agent is clicked', () => {
+    const onSelect = vi.fn();
+    render(<NewTabMenu onSelect={onSelect} />);
+    fireEvent.click(screen.getByTestId('new-tab-button'));
+    fireEvent.click(screen.getByTestId('menu-agent'));
+    expect(onSelect).toHaveBeenCalledWith('agent');
+  });
+
   it('calls onSelect with "shell" when Terminal is clicked', () => {
     const onSelect = vi.fn();
     render(<NewTabMenu onSelect={onSelect} />);
