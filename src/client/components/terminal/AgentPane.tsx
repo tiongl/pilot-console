@@ -20,6 +20,9 @@ import {
   SlidersHorizontal,
   Brain,
   Cog,
+  Share2,
+  Copy,
+  ExternalLink,
 } from 'lucide-react';
 import { useAgentSocket } from '@/hooks/useAgentSocket';
 import { getThemeByName } from '@/lib/terminal-themes';
@@ -30,6 +33,7 @@ import type {
   AgentSlashCommand,
   AgentCommandOption,
   AgentSessionSummary,
+  AgentShareStatus,
   AgentStatus,
   AgentTranscriptEvent,
 } from '@/types';
@@ -87,6 +91,7 @@ const CLIENT_COMMANDS: AgentSlashCommand[] = [
   { name: 'mode', kind: 'client', description: 'Switch agent mode', argHint: '<interactive|plan|autopilot>' },
   { name: 'resume', kind: 'client', description: 'Switch to another session' },
   { name: 'diff', kind: 'client', description: 'Review working-tree changes' },
+  { name: 'share', kind: 'client', description: 'Share this session on GitHub', argHint: '[export|on|off]' },
   { name: 'stop', kind: 'client', description: 'Stop the current turn' },
   { name: 'clear', kind: 'client', description: 'Start a new session' },
   { name: 'help', kind: 'client', description: 'List slash commands' },
@@ -174,6 +179,10 @@ export default function AgentPane({
   // Which "extra" output types (tool calls, reasoning, notices) are shown.
   const [visibility, setVisibility] = useState<Visibility>(loadVisibility);
   const [filterOpen, setFilterOpen] = useState(false);
+  // GitHub session-sharing status + popover.
+  const [shareStatus, setShareStatus] = useState<AgentShareStatus>({ mode: 'off', steerable: false });
+  const [shareOpen, setShareOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
@@ -247,6 +256,9 @@ export default function AgentPane({
           break;
         case 'diff':
           setDiffPanel({ content: msg.content, truncated: msg.truncated });
+          break;
+        case 'share_status':
+          setShareStatus(msg.status);
           break;
         case 'permission_request':
           setPermissions((prev) => [
@@ -335,6 +347,12 @@ export default function AgentPane({
     setVisibility((prev) => ({ ...prev, [kind]: !prev[kind] }));
   }, []);
 
+  const copyShareUrl = useCallback((url: string) => {
+    void navigator.clipboard?.writeText(url);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }, []);
+
   // Transcript filtered by the current visibility preferences.
   const visibleEvents = useMemo(
     () =>
@@ -388,6 +406,14 @@ export default function AgentPane({
     setEvents((prev) => [...prev, { kind: 'notice', id, ts: Date.now(), message }]);
     atBottomRef.current = true;
   }, []);
+
+  const setShareMode = useCallback(
+    (mode: AgentShareStatus['mode']) => {
+      send({ type: 'share_session', mode });
+      pushNotice(mode === 'off' ? 'Stopping session sharing…' : 'Sharing session to GitHub…');
+    },
+    [send, pushNotice],
+  );
 
   const clearSession = useCallback(() => {
     setEvents([]);
@@ -453,6 +479,13 @@ export default function AgentPane({
           setDiffPanel({ content: '', truncated: false });
           send({ type: 'get_diff' });
           return true;
+        case 'share': {
+          const a = arg.trim().toLowerCase();
+          const mode: 'export' | 'on' | 'off' = a === 'on' ? 'on' : a === 'off' ? 'off' : 'export';
+          send({ type: 'share_session', mode });
+          pushNotice(mode === 'off' ? 'Stopping session sharing…' : 'Sharing session to GitHub…');
+          return true;
+        }
         case 'clear':
           clearSession();
           return true;
@@ -745,6 +778,119 @@ export default function AgentPane({
           {statusLabel}
         </span>
         <div className="flex-1" />
+        {/* GitHub session sharing */}
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setShareOpen((o) => !o)}
+            title="Share this session on GitHub"
+            data-testid="agent-share-button"
+            className="flex items-center gap-1 h-6 px-1.5 rounded border text-[10px]"
+            style={{
+              borderColor: appearance.border,
+              color: shareStatus.mode !== 'off' ? '#3fb950' : appearance.muted,
+            }}
+          >
+            <Share2 className="h-3 w-3" />
+            <span>{shareStatus.mode === 'off' ? 'Share' : 'Shared'}</span>
+            {shareStatus.mode !== 'off' && (
+              <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: '#3fb950' }} />
+            )}
+          </button>
+          {shareOpen && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setShareOpen(false)} />
+              <div
+                data-testid="agent-share-panel"
+                className="absolute right-0 mt-1 z-20 w-64 rounded-md border shadow-xl p-2 space-y-2"
+                style={{ borderColor: appearance.border, backgroundColor: appearance.overlay, color: appearance.fg }}
+              >
+                <div className="text-[10px] uppercase tracking-wide" style={{ color: appearance.muted }}>
+                  Share with GitHub
+                </div>
+                <p className="text-[11px] leading-snug" style={{ color: appearance.muted }}>
+                  {shareStatus.mode === 'off'
+                    ? 'Publish this session so it appears in the GitHub agents tab.'
+                    : shareStatus.mode === 'on'
+                      ? 'Shared and steerable — GitHub can drive this session.'
+                      : 'Shared read-only — visible in the GitHub agents tab.'}
+                </p>
+
+                {shareStatus.url && (
+                  <div
+                    className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-mono"
+                    style={{ backgroundColor: appearance.surfaceStrong }}
+                  >
+                    <span className="truncate flex-1" title={shareStatus.url}>
+                      {shareStatus.url}
+                    </span>
+                    <button
+                      type="button"
+                      title="Copy link"
+                      data-testid="agent-share-copy"
+                      onClick={() => copyShareUrl(shareStatus.url!)}
+                      className="shrink-0"
+                    >
+                      {copied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+                    </button>
+                    <a href={shareStatus.url} target="_blank" rel="noreferrer" title="Open in GitHub" className="shrink-0">
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                  </div>
+                )}
+
+                {shareStatus.error && (
+                  <p className="text-[11px] text-destructive break-words">{shareStatus.error}</p>
+                )}
+
+                <div className="flex flex-col gap-1">
+                  {shareStatus.mode === 'off' ? (
+                    <>
+                      <button
+                        type="button"
+                        data-testid="agent-share-export"
+                        onClick={() => setShareMode('export')}
+                        className="w-full rounded px-2 py-1 text-xs border hover:bg-black/5 dark:hover:bg-white/5"
+                        style={{ borderColor: appearance.border }}
+                      >
+                        Share read-only
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="agent-share-on"
+                        onClick={() => setShareMode('on')}
+                        className="w-full rounded px-2 py-1 text-xs border hover:bg-black/5 dark:hover:bg-white/5"
+                        style={{ borderColor: appearance.border }}
+                      >
+                        Share &amp; allow steering
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        data-testid="agent-share-toggle-steer"
+                        onClick={() => setShareMode(shareStatus.mode === 'on' ? 'export' : 'on')}
+                        className="w-full rounded px-2 py-1 text-xs border hover:bg-black/5 dark:hover:bg-white/5"
+                        style={{ borderColor: appearance.border }}
+                      >
+                        {shareStatus.mode === 'on' ? 'Make read-only' : 'Allow steering'}
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="agent-share-off"
+                        onClick={() => setShareMode('off')}
+                        className="w-full rounded px-2 py-1 text-xs border border-destructive/40 text-destructive hover:bg-destructive/5"
+                      >
+                        Stop sharing
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
         <div className="relative">
           <button
             type="button"

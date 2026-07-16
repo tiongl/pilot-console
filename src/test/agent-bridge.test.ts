@@ -23,6 +23,7 @@ function makeSession(): { session: AgentSession; messages: AgentServerMessage[] 
     saveTimer: null,
     assistantByMessageId: new Map<string, string>(),
     toolByCallId: new Map<string, string>(),
+    share: { mode: 'off', steerable: false },
   } as unknown as AgentSession;
   return { session, messages };
 }
@@ -93,5 +94,17 @@ describe('agent-bridge handleSdkEvent', () => {
     drive(session, ev('session.error', 'e1', { message: 'boom' }));
     expect(session.transcript.some((e) => e.kind === 'error')).toBe(true);
     expect(session.status).toBe('idle');
+  });
+
+  it('updates share.steerable and broadcasts share_status on remote_steerable_changed', () => {
+    const { session, messages } = makeSession();
+    drive(session, ev('session.remote_steerable_changed', 'r1', { remoteSteerable: true }));
+    expect(session.share.steerable).toBe(true);
+    // Steering implies the session is at least shared.
+    expect(session.share.mode).toBe('on');
+    const shareMsg = messages.find((m) => m.type === 'share_status') as
+      | { type: 'share_status'; status: { steerable: boolean; mode: string } }
+      | undefined;
+    expect(shareMsg?.status).toMatchObject({ steerable: true, mode: 'on' });
   });
 });

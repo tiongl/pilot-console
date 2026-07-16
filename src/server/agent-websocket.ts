@@ -18,6 +18,8 @@ import {
   listAgentSessionSummaries,
   resumeAgentSession,
   getAgentDiff,
+  shareAgentSession,
+  getAgentShareStatus,
 } from '../shared/agent-bridge';
 import type { AgentClientMessage, AgentServerMessage } from '../shared/types';
 
@@ -127,6 +129,9 @@ export function setupAgentWebSocketServer(): WebSocketServer {
     });
     send({ type: 'replay', events: getReplay(sessionId) });
 
+    // Report the current GitHub share status on (re)connect.
+    send({ type: 'share_status', status: getAgentShareStatus(sessionId) });
+
     // Push the dynamic slash-command catalog (plugin/skill-aware).
     listAgentCommands(sessionId)
       .then((commands) => send({ type: 'commands', commands }))
@@ -172,6 +177,12 @@ export function setupAgentWebSocketServer(): WebSocketServer {
           send({ type: 'diff', content, truncated });
           break;
         }
+        case 'share_session':
+          send({ type: 'share_status', status: await shareAgentSession(sessionId, msg.mode) });
+          break;
+        case 'get_share_status':
+          send({ type: 'share_status', status: getAgentShareStatus(sessionId) });
+          break;
         case 'replay':
           send({ type: 'replay', events: getReplay(sessionId) });
           break;

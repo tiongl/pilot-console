@@ -142,6 +142,25 @@ export interface AgentSessionSummary {
   current: boolean;
 }
 
+/**
+ * GitHub session-sharing state, mirroring the SDK's remote-control mode.
+ * - `off`    — not shared.
+ * - `export` — session events published to GitHub (read-only, appears in the
+ *   GitHub agents tab).
+ * - `on`     — published *and* steerable from GitHub.
+ */
+export type AgentShareMode = 'off' | 'export' | 'on';
+
+export interface AgentShareStatus {
+  mode: AgentShareMode;
+  /** GitHub frontend URL for the shared session, when shared. */
+  url?: string;
+  /** Whether GitHub may steer (write to) this session. */
+  steerable: boolean;
+  /** Set when the last share attempt failed. */
+  error?: string;
+}
+
 /** Client → Server messages for the `/ws/agent` socket. */
 export type AgentClientMessage =
   | { type: 'send'; prompt: string }
@@ -158,6 +177,10 @@ export type AgentClientMessage =
   | { type: 'list_sessions' }
   // Fetch the working-tree diff (native `/diff` panel).
   | { type: 'get_diff' }
+  // Share this session to GitHub (mode: 'export' read-only, or 'on' steerable).
+  | { type: 'share_session'; mode: AgentShareMode }
+  // Report the current GitHub share status.
+  | { type: 'get_share_status' }
   | { type: 'replay' };
 
 /** Server → Client messages for the `/ws/agent` socket. */
@@ -192,6 +215,8 @@ export type AgentServerMessage =
   | { type: 'sessions'; sessions: AgentSessionSummary[] }
   // Working-tree diff for the `/diff` panel.
   | { type: 'diff'; content: string; truncated: boolean }
+  // Current GitHub share status for this session.
+  | { type: 'share_status'; status: AgentShareStatus }
   | { type: 'error'; message: string };
 
 export interface AgentModelOption {

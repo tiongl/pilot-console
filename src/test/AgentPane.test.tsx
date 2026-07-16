@@ -320,4 +320,55 @@ describe('AgentPane', () => {
     await waitFor(() => expect(screen.getByText('System message')).toBeTruthy());
     expect(screen.getByText('You are a helpful assistant.')).toBeTruthy();
   });
+
+  it('shares the session read-only from the Share panel', async () => {
+    renderPane();
+    fireEvent.click(screen.getByTestId('agent-share-button'));
+    fireEvent.click(await screen.findByTestId('agent-share-export'));
+    await waitFor(() =>
+      expect(hooked.send).toHaveBeenCalledWith({ type: 'share_session', mode: 'export' }),
+    );
+  });
+
+  it('shares the session with steering enabled', async () => {
+    renderPane();
+    fireEvent.click(screen.getByTestId('agent-share-button'));
+    fireEvent.click(await screen.findByTestId('agent-share-on'));
+    await waitFor(() =>
+      expect(hooked.send).toHaveBeenCalledWith({ type: 'share_session', mode: 'on' }),
+    );
+  });
+
+  it('reflects a share_status with a URL and stops sharing on demand', async () => {
+    renderPane();
+    emit({
+      type: 'share_status',
+      status: {
+        mode: 'export',
+        url: 'https://github.com/tiongl/pilot-console/tasks/abc-123',
+        steerable: false,
+      },
+    });
+    await waitFor(() => expect(screen.getByText('Shared')).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId('agent-share-button'));
+    expect(
+      await screen.findByText('https://github.com/tiongl/pilot-console/tasks/abc-123'),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId('agent-share-off'));
+    await waitFor(() =>
+      expect(hooked.send).toHaveBeenCalledWith({ type: 'share_session', mode: 'off' }),
+    );
+  });
+
+  it('shares the session via the /share slash command', async () => {
+    renderPane();
+    const textarea = screen.getByPlaceholderText(/Message Copilot/i);
+    fireEvent.change(textarea, { target: { value: '/share on' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    await waitFor(() =>
+      expect(hooked.send).toHaveBeenCalledWith({ type: 'share_session', mode: 'on' }),
+    );
+  });
 });

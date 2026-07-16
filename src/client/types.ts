@@ -19,6 +19,8 @@ export type {
   AgentSlashCommand,
   AgentCommandOption,
   AgentSessionSummary,
+  AgentShareMode,
+  AgentShareStatus,
   Worktree,
   WorktreeType,
   ChatMessage,

@@ -12,6 +12,8 @@ import type {
   AgentModelOption,
   AgentSlashCommand,
   AgentSessionSummary,
+  AgentShareMode,
+  AgentShareStatus,
 } from './types';
 import type {
   CopilotClient as CopilotClientType,
@@ -62,6 +64,8 @@ export interface AgentSession {
   assistantByMessageId: Map<string, string>;
   /** Maps SDK toolCallId → transcript entry id for tool activity */
   toolByCallId: Map<string, string>;
+  /** Current GitHub session-sharing state (remote-control mode). */
+  share: AgentShareStatus;
 }
 
 const agentSessions = new Map<string, AgentSession>();
@@ -303,6 +307,14 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
       setStatus(session, 'idle');
       break;
     }
+    case 'session.remote_steerable_changed': {
+      const steerable = Boolean((event.data as { remoteSteerable?: boolean }).remoteSteerable);
+      session.share.steerable = steerable;
+      // Steering implies the session is at least exported; reflect that.
+      if (steerable && session.share.mode === 'off') session.share.mode = 'on';
+      emit(session, { type: 'share_status', status: { ...session.share } });
+      break;
+    }
     default:
       break;
   }
@@ -528,6 +540,7 @@ export async function createAgentSession(
     saveTimer: null,
     assistantByMessageId: new Map(),
     toolByCallId: new Map(),
+    share: { mode: 'off', steerable: false },
   };
   sessionRef = session;
 
@@ -807,6 +820,7 @@ export async function resumeAgentSession(userId: string, sessionId: string): Pro
     saveTimer: null,
     assistantByMessageId: new Map(),
     toolByCallId: new Map(),
+    share: { mode: 'off', steerable: false },
   };
   sessionRef = session;
 
@@ -867,6 +881,82 @@ export async function getAgentDiff(sessionId: string): Promise<{ content: string
   const truncated = content.length > MAX_DIFF_CHARS;
   if (truncated) content = content.slice(0, MAX_DIFF_CHARS) + '\n… (truncated)';
   return { content, truncated };
+}
+
+// ---------------------------------------------------------------------------
+// GitHub session sharing (remote-control)
+//
+// Mirrors the CLI's `/share` and `/remote` behaviour. The SDK exposes a
+// session-level `rpc.remote` namespace: `enable({ mode })` publishes the
+// session to GitHub (returning the frontend URL) and `disable()` unshares it.
+// The runtime also emits `session.remote_steerable_changed` when steering is
+// toggled, which we track in `session.share` and push to subscribers.
+// ---------------------------------------------------------------------------
+
+interface SdkRemoteRpc {
+  enable?: (params: { mode?: AgentShareMode }) => Promise<{ url?: string; remoteSteerable: boolean }>;
+  disable?: () => Promise<void>;
+}
+
+function getRemoteRpc(session: AgentSession): SdkRemoteRpc | undefined {
+  return (session.sdk as unknown as { rpc?: { remote?: SdkRemoteRpc } }).rpc?.remote;
+}
+
+/** Current GitHub share status for a session. */
+export function getAgentShareStatus(sessionId: string): AgentShareStatus {
+  const session = agentSessions.get(sessionId);
+  return session ? { ...session.share } : { mode: 'off', steerable: false };
+}
+
+/** Broadcast the current share status to subscribers. */
+export function broadcastAgentShareStatus(sessionId: string): void {
+  const session = agentSessions.get(sessionId);
+  if (session) emit(session, { type: 'share_status', status: { ...session.share } });
+}
+
+/**
+ * Share (or unshare) a session with GitHub.
+ * - `export` → publish events read-only (appears in the GitHub agents tab).
+ * - `on`     → publish *and* allow GitHub to steer the session.
+ * - `off`    → stop sharing.
+ * Returns the resulting status; on failure the status carries an `error`.
+ */
+export async function shareAgentSession(sessionId: string, mode: AgentShareMode): Promise<AgentShareStatus> {
+  const session = agentSessions.get(sessionId);
+  if (!session || !session.alive) return { mode: 'off', steerable: false };
+
+  const remote = getRemoteRpc(session);
+  if (!remote?.enable || !remote?.disable) {
+    session.share = { mode: 'off', steerable: false, error: 'Session sharing is not available in this session.' };
+    broadcastAgentShareStatus(sessionId);
+    return { ...session.share };
+  }
+
+  try {
+    if (mode === 'off') {
+      await remote.disable();
+      session.share = { mode: 'off', steerable: false };
+    } else {
+      const result = await remote.enable({ mode });
+      session.share = {
+        mode,
+        url: result.url ?? session.share.url,
+        steerable: mode === 'on' ? true : Boolean(result.remoteSteerable),
+      };
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    session.share = { ...session.share, error: message };
+    upsertEvent(session, {
+      kind: 'error',
+      id: `error:${randomUUID()}`,
+      ts: Date.now(),
+      message: `Failed to ${mode === 'off' ? 'unshare' : 'share'} session: ${message}`,
+    });
+  }
+
+  broadcastAgentShareStatus(sessionId);
+  return { ...session.share };
 }
 
 export function subscribe(sessionId: string, subscriber: AgentSubscriber): () => void {
