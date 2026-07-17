@@ -78,6 +78,16 @@ describe('agent-bridge handleSdkEvent', () => {
     expect(tool).toMatchObject({ toolName: 'bash', status: 'success', output: 'done' });
   });
 
+  it('caps large tool output to bound transcript memory', () => {
+    const { session } = makeSession();
+    drive(session, ev('tool.execution_start', 't1', { toolCallId: 'c1', toolName: 'bash' }));
+    const big = 'x'.repeat(200_000);
+    drive(session, ev('tool.execution_complete', 't2', { toolCallId: 'c1', success: true, result: big }));
+    const tool = session.transcript.find((e) => e.kind === 'tool') as { output?: string };
+    expect(tool.output!.length).toBeLessThan(big.length);
+    expect(tool.output).toContain('[truncated');
+  });
+
   it('emits a status change to busy on turn start and idle on session.idle', () => {
     const { session, messages } = makeSession();
     drive(session, ev('assistant.turn_start', 's1', {}));

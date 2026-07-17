@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, memo, type KeyboardEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Button } from '@/components/ui/button';
@@ -98,6 +98,13 @@ const CLIENT_COMMANDS: AgentSlashCommand[] = [
 ];
 
 const CLIENT_COMMAND_NAMES = new Set(CLIENT_COMMANDS.map((c) => c.name));
+
+// Cap live-streamed tool output kept in browser memory (mirrors the server).
+const MAX_TOOL_OUTPUT_CHARS = 50_000;
+// How many transcript items to render at once; older items are collapsed
+// behind a "show earlier" button so a long session doesn't render thousands
+// of DOM nodes at once.
+const RENDER_WINDOW = 400;
 
 /** Whether a command should prompt for an argument before running. */
 const commandTakesArg = (c: AgentSlashCommand): boolean =>
@@ -209,7 +216,14 @@ export default function AgentPane({
       if (entry.kind === 'assistant' && kind === 'assistant') {
         next[idx] = { ...entry, content: entry.content + delta };
       } else if (entry.kind === 'tool' && kind === 'tool') {
-        next[idx] = { ...entry, output: (entry.output ?? '') + delta };
+        const combined = (entry.output ?? '') + delta;
+        // Bound live-streamed tool output so a chatty tool can't grow the
+        // browser's transcript memory without limit (matches the server cap).
+        const output =
+          combined.length > MAX_TOOL_OUTPUT_CHARS
+            ? combined.slice(0, MAX_TOOL_OUTPUT_CHARS) + `\n… [truncated ${combined.length - MAX_TOOL_OUTPUT_CHARS} chars]`
+            : combined;
+        next[idx] = { ...entry, output };
       }
       return next;
     });
@@ -353,18 +367,33 @@ export default function AgentPane({
     setTimeout(() => setCopied(false), 1500);
   }, []);
 
+  // Drop empty assistant bubbles: the SDK opens an assistant "message" for
+  // turns that end up containing only tool calls (or produce no text), which
+  // would otherwise render as a stray "…" bubble. Also covers such entries
+  // already persisted in older sessions on replay.
+  const nonEmptyEvents = useMemo(
+    () => events.filter((e) => !(e.kind === 'assistant' && !e.content.trim())),
+    [events],
+  );
   // Transcript filtered by the current visibility preferences.
   const visibleEvents = useMemo(
     () =>
-      events.filter((e) =>
+      nonEmptyEvents.filter((e) =>
         e.kind === 'tool' || e.kind === 'reasoning' || e.kind === 'system' || e.kind === 'notice'
           ? visibility[e.kind]
           : true,
       ),
-    [events, visibility],
+    [nonEmptyEvents, visibility],
   );
-  const hiddenCount = events.length - visibleEvents.length;
+  const hiddenCount = nonEmptyEvents.length - visibleEvents.length;
   const anyHidden = FILTERABLE_KINDS.some((f) => !visibility[f.kind]);
+
+  // Only render the most recent `renderLimit` items to bound DOM size; older
+  // items stay in state (and scroll history) but are revealed on demand.
+  const [renderLimit, setRenderLimit] = useState(RENDER_WINDOW);
+  const windowedEvents =
+    visibleEvents.length > renderLimit ? visibleEvents.slice(-renderLimit) : visibleEvents;
+  const earlierCount = visibleEvents.length - windowedEvents.length;
 
   const respond = (requestId: string, decision: 'approve-once' | 'approve-for-session' | 'reject') => {
     send({ type: 'permission_response', requestId, decision });
@@ -973,17 +1002,29 @@ export default function AgentPane({
         className="flex-1 overflow-y-auto px-3 py-3 space-y-3"
         style={{ fontSize }}
       >
-        {events.length === 0 && (
+        {nonEmptyEvents.length === 0 && (
           <div className="text-center pt-10" style={{ color: appearance.muted }}>
             Start a conversation with the Copilot agent.
           </div>
         )}
-        {events.length > 0 && visibleEvents.length === 0 && (
+        {nonEmptyEvents.length > 0 && visibleEvents.length === 0 && (
           <div className="text-center pt-10 text-xs" style={{ color: appearance.muted }}>
             All output is hidden by the current filters.
           </div>
         )}
-        {visibleEvents.map((e) => (
+        {earlierCount > 0 && (
+          <div className="text-center">
+            <button
+              type="button"
+              onClick={() => setRenderLimit((n) => n + RENDER_WINDOW)}
+              className="text-xs px-3 py-1 rounded-full border"
+              style={{ borderColor: appearance.border, color: appearance.muted }}
+            >
+              Show {Math.min(RENDER_WINDOW, earlierCount)} earlier of {earlierCount} hidden
+            </button>
+          </div>
+        )}
+        {windowedEvents.map((e) => (
           <TranscriptItem key={e.id} event={e} appearance={appearance} codeSize={codeSize} />
         ))}
 
@@ -1194,7 +1235,7 @@ interface Appearance {
   muted: string;
 }
 
-function TranscriptItem({
+const TranscriptItem = memo(function TranscriptItem({
   event,
   appearance,
   codeSize,
@@ -1289,9 +1330,9 @@ function TranscriptItem({
       {event.message}
     </div>
   );
-}
+});
 
-function ToolItem({
+const ToolItem = memo(function ToolItem({
   event,
   appearance,
   codeSize,
@@ -1356,4 +1397,4 @@ function ToolItem({
       )}
     </div>
   );
-}
+});

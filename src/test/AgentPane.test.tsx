@@ -371,4 +371,40 @@ describe('AgentPane', () => {
       expect(hooked.send).toHaveBeenCalledWith({ type: 'share_session', mode: 'on' }),
     );
   });
+
+  it('does not render empty assistant bubbles (tool-only turns)', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'user', id: 'u1', ts: 1, content: 'Run the tests' },
+        // Assistant message that ended up containing only tool calls → empty text.
+        { kind: 'assistant', id: 'a1', ts: 2, content: '' },
+        { kind: 'tool', id: 't1', ts: 3, toolCallId: 'c1', toolName: 'bash', status: 'success' },
+        { kind: 'assistant', id: 'a2', ts: 4, content: 'All tests passed.' },
+      ],
+    });
+    await waitFor(() => expect(screen.getByText('All tests passed.')).toBeTruthy());
+    // No stray "…" placeholder bubble from the empty assistant entry.
+    expect(screen.queryByText('…')).toBeNull();
+    // The non-empty assistant message and the tool card still render.
+    expect(screen.getByText('bash')).toBeTruthy();
+  });
+
+  it('windows a long transcript and reveals earlier items on demand', async () => {
+    renderPane();
+    const events = Array.from({ length: 900 }, (_, i) => ({
+      kind: 'user' as const,
+      id: `u${i}`,
+      ts: i,
+      content: `message ${i}`,
+    }));
+    emit({ type: 'replay', events });
+    // The most recent items render; the oldest are windowed out initially.
+    await waitFor(() => expect(screen.getByText('message 899')).toBeTruthy());
+    expect(screen.queryByText('message 0')).toBeNull();
+    // A "show earlier" control reveals the next window.
+    fireEvent.click(screen.getByText(/earlier of \d+ hidden/i));
+    await waitFor(() => expect(screen.getByText('message 100')).toBeTruthy());
+  });
 });
