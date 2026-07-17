@@ -19,6 +19,7 @@ import { listAgentModels, shutdownAgentBridge } from '../shared/agent-bridge';
 import { getAllSessions, getAllSessionsWithExited, getSessionStatus, endCliSession, endSessionByProject, initDaemonBridge } from '../shared/cli-bridge';
 import { getDb } from '../shared/db';
 import scheduleRoutes from './routes/schedules';
+import githubRoutes from './routes/github';
 import { startScheduler } from './scheduler';
 import { startLagMonitor, getPerfSnapshot, recordApiCall } from './perf-monitor';
 import './renderers'; // register built-in renderers
@@ -953,6 +954,7 @@ app.delete('/api/admin/sessions/:id', requireAuth, (req, res) => {
 
 // --- Scheduled Reports ---
 app.use('/api/admin', scheduleRoutes);
+app.use('/api/projects/:id/github', githubRoutes);
 
 // --- Performance monitoring ---
 app.get('/api/perf', requireAuth, (_req, res) => {

@@ -243,3 +243,116 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
 }
+
+// ---------------------------------------------------------------------------
+// GitHub project-oriented views (Projects V2, Milestones, Issues, PRs)
+// ---------------------------------------------------------------------------
+
+/** Owner/repo resolved from a console project's git remote, plus scope status. */
+export interface GitHubRepoInfo {
+  owner: string;
+  repo: string;
+  nameWithOwner: string;
+  /** True when the server `gh` token carries the `project` (Projects V2) scope. */
+  hasProjectScope: boolean;
+}
+
+/** A stored link between a console project and a GitHub Projects V2 board. */
+export interface GitHubProjectLink {
+  id: string;
+  projectId: string;
+  ghProjectId: string;
+  ghProjectNumber: number;
+  title: string;
+  isDefault: boolean;
+  createdAt: string;
+}
+
+/** A Projects V2 board discovered as linked to the repo (for the settings picker). */
+export interface GitHubProjectV2Summary {
+  id: string;
+  number: number;
+  title: string;
+  url: string;
+  closed: boolean;
+  ownerLogin: string;
+}
+
+export interface GitHubMilestone {
+  number: number;
+  title: string;
+  description: string | null;
+  state: 'open' | 'closed';
+  openIssues: number;
+  closedIssues: number;
+  dueOn: string | null;
+  url: string;
+}
+
+export interface GitHubUserRef {
+  login: string;
+  avatarUrl: string;
+}
+
+export interface GitHubLabel {
+  name: string;
+  color: string;
+}
+
+export interface GitHubIssue {
+  number: number;
+  title: string;
+  state: 'open' | 'closed';
+  url: string;
+  author: GitHubUserRef | null;
+  assignees: GitHubUserRef[];
+  labels: GitHubLabel[];
+  milestone: string | null;
+  comments: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GitHubPullRequest {
+  number: number;
+  title: string;
+  state: 'open' | 'closed' | 'merged';
+  isDraft: boolean;
+  url: string;
+  author: GitHubUserRef | null;
+  labels: GitHubLabel[];
+  milestone: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A single Projects V2 board item (card): its content plus its Status column. */
+export interface GitHubBoardItem {
+  itemId: string;
+  contentType: 'Issue' | 'PullRequest' | 'DraftIssue';
+  title: string;
+  number: number | null;
+  url: string | null;
+  state: string | null;
+  status: string | null;
+  assignees: GitHubUserRef[];
+  labels: GitHubLabel[];
+  /** PRs linked to this item (the item itself if a PR, or PRs closing its issue). */
+  linkedPullRequests: GitHubPullRequest[];
+}
+
+/** A Status field option = a board column. */
+export interface GitHubBoardColumn {
+  id: string;
+  name: string;
+}
+
+/** A Projects V2 board: its Status field id, columns, and items. */
+export interface GitHubBoard {
+  projectId: string;
+  projectNumber: number;
+  title: string;
+  statusFieldId: string | null;
+  columns: GitHubBoardColumn[];
+  items: GitHubBoardItem[];
+}
