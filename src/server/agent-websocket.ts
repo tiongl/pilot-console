@@ -7,19 +7,25 @@ import {
   findAgentSession,
   subscribe,
   getReplay,
+  getPendingAgentMessages,
+  reconcileAgentSession,
   sendAgentMessage,
   cancelAgent,
   setAgentModel,
   setAgentMode,
   respondToPermission,
   respondToExitPlan,
+  isAllowAllPermissions,
+  setAllowAllPermissions,
   listAgentCommands,
   runAgentCommand,
   listAgentSessionSummaries,
   resumeAgentSession,
+  resumeBestAgentSessionForWorkspace,
   getAgentDiff,
   shareAgentSession,
   getAgentShareStatus,
+  getAgentUsage,
 } from '../shared/agent-bridge';
 import type { AgentClientMessage, AgentServerMessage } from '../shared/types';
 
@@ -110,8 +116,11 @@ export function setupAgentWebSocketServer(): WebSocketServer {
     } else {
       session = findAgentSession(ws.userId, projectId ?? null, worktreeId ?? null);
       if (!session) {
-        session = await createSafe(ws, ws.userId, projectId, worktreeId, model);
-        if (!session) return;
+        session = await resumeBestAgentSessionForWorkspace(ws.userId, projectId ?? null, worktreeId ?? null);
+        if (!session) {
+          session = await createSafe(ws, ws.userId, projectId, worktreeId, model);
+          if (!session) return;
+        }
       }
     }
 
@@ -128,9 +137,13 @@ export function setupAgentWebSocketServer(): WebSocketServer {
       status: session.status,
     });
     send({ type: 'replay', events: getReplay(sessionId) });
+    for (const message of getPendingAgentMessages(sessionId)) send(message);
+    void reconcileAgentSession(sessionId);
 
     // Report the current GitHub share status on (re)connect.
     send({ type: 'share_status', status: getAgentShareStatus(sessionId) });
+    send({ type: 'allow_all', enabled: isAllowAllPermissions(sessionId) });
+    send({ type: 'usage', usage: getAgentUsage(sessionId) });
 
     // Push the dynamic slash-command catalog (plugin/skill-aware).
     listAgentCommands(sessionId)
@@ -153,6 +166,9 @@ export function setupAgentWebSocketServer(): WebSocketServer {
           break;
         case 'permission_response':
           respondToPermission(sessionId, msg.requestId, msg.decision);
+          break;
+        case 'set_allow_all':
+          setAllowAllPermissions(sessionId, msg.enabled);
           break;
         case 'exit_plan_response':
           respondToExitPlan(sessionId, msg.requestId, msg.action);

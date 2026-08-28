@@ -158,6 +158,11 @@ function initSchema(db: Database.Database) {
   if (!sessionColNames.has('worktree_id')) {
     db.exec('ALTER TABLE cli_sessions ADD COLUMN worktree_id TEXT');
   }
+  // Migration: add agent_state so a resumed agent session can be restored
+  // faithfully (model, mode, allow-all) instead of falling back to defaults.
+  if (!sessionColNames.has('agent_state')) {
+    db.exec('ALTER TABLE cli_sessions ADD COLUMN agent_state TEXT');
+  }
 
   // Migration: add pinned and sort_order columns to projects
   const projectCols = db.pragma('table_info(projects)') as Array<{ name: string }>;

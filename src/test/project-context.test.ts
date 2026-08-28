@@ -29,8 +29,12 @@ describe('ProjectProvider', () => {
     render(
       React.createElement(
         ProjectProvider,
-        { projectId: 'project-1', cwd: 'C:\\repo', worktreeId: 'wt-1' },
-        React.createElement(RequiredConsumer)
+        {
+          projectId: 'project-1',
+          cwd: 'C:\\repo',
+          worktreeId: 'wt-1',
+          children: React.createElement(RequiredConsumer),
+        }
       )
     );
 
@@ -43,8 +47,11 @@ describe('ProjectProvider', () => {
     render(
       React.createElement(
         ProjectProvider,
-        { projectId: 'project-2', cwd: 'C:\\repo' },
-        React.createElement(RequiredConsumer)
+        {
+          projectId: 'project-2',
+          cwd: 'C:\\repo',
+          children: React.createElement(RequiredConsumer),
+        }
       )
     );
 

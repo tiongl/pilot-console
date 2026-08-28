@@ -82,9 +82,13 @@ Opens Vite dev server at [http://localhost:5173](http://localhost:5173) with HMR
 src/
 ├── client/      # React SPA (Vite)
 ├── server/      # Express API + WebSocket server
-├── daemon/      # Session daemon (PTY lifecycle, survives server restarts)
+├── daemon/      # Session daemon (PTY + agent runtime, survives server restarts)
 ├── shared/      # Shared modules (cli-bridge, types)
 └── test/        # Vitest tests
 ```
 
 The **session daemon** is a standalone process that owns all PTY sessions. It communicates with the Express server over a named pipe (Windows) or Unix domain socket (Linux/macOS). This means terminal sessions survive server restarts.
+
+The daemon also hosts the **Copilot SDK runtime** for agent-mode sessions. It starts the runtime lazily on first use, listening on a loopback TCP port, and publishes the connection details to `~/.pilot-console/agent-runtime.json` (mode `0600`). The Express server attaches to that runtime with `RuntimeConnection.forUri`, which does not spawn a process — so stopping or restarting the server leaves the runtime itself untouched, and re-attaching is immediate. On restart the server resumes each session with `continuePendingWork`, which replays any permission prompt raised while nobody was listening (auto-approved if that session had "allow all" enabled). If the daemon is unavailable the server falls back to spawning an in-process runtime.
+
+Conversation state is persisted by the SDK itself, in `~/.copilot/session-store.db` (shared with the Copilot CLI), so session history survives even a full runtime restart. **In-flight work is not durable**, however: the runtime shuts a session down when its owning client disconnects, so a turn that is mid-flight when the server restarts is aborted rather than resumed. Closing that gap requires moving the sessions themselves into the daemon and reducing the server to a thin proxy — a planned follow-up.

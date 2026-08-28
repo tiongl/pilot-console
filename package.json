@@ -35,8 +35,8 @@
     "access": "public"
   },
   "scripts": {
-    "dev": "concurrently -n server,client \"npx tsx --watch src/server/index.ts\" \"npx vite\"",
-    "dev:server": "npx tsx --watch src/server/index.ts",
+    "dev": "concurrently -n server,client \"npm run dev:server\" \"npx vite\"",
+    "dev:server": "npx tsx watch --exclude \"src/client/**\" --exclude \"src/daemon/**\" --exclude \"src/test/**\" src/server/index.ts",
     "dev:client": "npx vite",
     "daemon": "npx tsx src/daemon/index.ts",
     "build": "npx vite build",
@@ -83,7 +83,7 @@
     "ws": "^8.20.0"
   },
   "optionalDependencies": {
-    "better-sqlite3": "^12.8.0",
+    "better-sqlite3": "^12.11.1",
     "node-pty": "^1.1.0"
   },
   "devDependencies": {

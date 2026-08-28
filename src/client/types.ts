@@ -21,6 +21,7 @@ export type {
   AgentSessionSummary,
   AgentShareMode,
   AgentShareStatus,
+  AgentUsage,
   Worktree,
   WorktreeType,
   ChatMessage,

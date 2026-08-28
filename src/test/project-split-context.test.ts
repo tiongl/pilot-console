@@ -47,7 +47,7 @@ describe('project split helpers', () => {
 
 describe('ProjectSplitProvider', () => {
   beforeEach(() => {
-    localStorage.clear();
+    window.localStorage.clear();
     vi.restoreAllMocks();
   });
 
@@ -55,8 +55,10 @@ describe('ProjectSplitProvider', () => {
     render(
       React.createElement(
         ProjectSplitProvider,
-        { stateKey: 'render-children' },
-        React.createElement('div', null, 'child content')
+        {
+          stateKey: 'render-children',
+          children: React.createElement('div', null, 'child content'),
+        }
       )
     );
 
@@ -67,8 +69,10 @@ describe('ProjectSplitProvider', () => {
     render(
       React.createElement(
         ProjectSplitProvider,
-        { stateKey: 'default-layout' },
-        React.createElement(SplitConsumer)
+        {
+          stateKey: 'default-layout',
+          children: React.createElement(SplitConsumer),
+        }
       )
     );
 
@@ -81,8 +85,10 @@ describe('ProjectSplitProvider', () => {
     render(
       React.createElement(
         ProjectSplitProvider,
-        { stateKey: 'update-layout' },
-        React.createElement(SplitConsumer)
+        {
+          stateKey: 'update-layout',
+          children: React.createElement(SplitConsumer),
+        }
       )
     );
 
@@ -97,8 +103,10 @@ describe('ProjectSplitProvider', () => {
     render(
       React.createElement(
         ProjectSplitProvider,
-        { stateKey: 'reject-invalid' },
-        React.createElement(SplitConsumer)
+        {
+          stateKey: 'reject-invalid',
+          children: React.createElement(SplitConsumer),
+        }
       )
     );
 

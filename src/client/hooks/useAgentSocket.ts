@@ -5,6 +5,9 @@ import type { AgentClientMessage, AgentServerMessage } from '@/types';
 
 export type AgentConnectionState = 'connecting' | 'open' | 'closed' | 'error';
 
+/** Upper bound for reconnect backoff; retries continue indefinitely. */
+const MAX_RECONNECT_DELAY_MS = 15_000;
+
 interface UseAgentSocketOptions {
   projectId?: string;
   worktreeId?: string;
@@ -32,6 +35,21 @@ export function useAgentSocket(options: UseAgentSocketOptions = {}) {
   const forceNewRef = useRef(false);
   const closedIntentionally = useRef(false);
   const pending = useRef<AgentClientMessage[]>([]);
+  const connectRef = useRef<() => void>(() => {});
+
+  /**
+   * Retry forever with exponential backoff (capped) plus jitter. The server can
+   * be down for a while — a dev reload, a restart, a laptop waking up — and the
+   * daemon keeps the agent session alive throughout, so giving up after a fixed
+   * number of attempts would strand a session that is still running.
+   */
+  const scheduleReconnect = useCallback(() => {
+    if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    const base = Math.min(1000 * 2 ** reconnectAttempts.current, MAX_RECONNECT_DELAY_MS);
+    const delay = base / 2 + Math.random() * (base / 2);
+    reconnectAttempts.current += 1;
+    reconnectTimer.current = setTimeout(() => connectRef.current(), delay);
+  }, []);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -97,13 +115,31 @@ export function useAgentSocket(options: UseAgentSocketOptions = {}) {
       }
       if (evt.code === 1000) return;
 
-      if (reconnectAttempts.current < 6) {
-        const delay = Math.min(1000 * 2 ** reconnectAttempts.current, 30_000);
-        reconnectAttempts.current += 1;
-        reconnectTimer.current = setTimeout(connect, delay);
-      }
+      scheduleReconnect();
     };
-  }, []);
+  }, [scheduleReconnect]);
+  connectRef.current = connect;
+
+  /** Retry the connection immediately (user-initiated). */
+  const reconnect = useCallback(() => {
+    if (reconnectTimer.current) {
+      clearTimeout(reconnectTimer.current);
+      reconnectTimer.current = null;
+    }
+    reconnectAttempts.current = 0;
+    closedIntentionally.current = false;
+    const ws = wsRef.current;
+    if (ws && ws.readyState !== WebSocket.OPEN) {
+      wsRef.current = null;
+      ws.onclose = null;
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+    }
+    connect();
+  }, [connect]);
 
   useEffect(() => {
     closedIntentionally.current = false;
@@ -168,5 +204,5 @@ export function useAgentSocket(options: UseAgentSocketOptions = {}) {
     [connect],
   );
 
-  return { state, send, reset, switchTo };
+  return { state, send, reset, switchTo, reconnect };
 }

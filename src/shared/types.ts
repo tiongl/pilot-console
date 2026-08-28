@@ -86,7 +86,7 @@ export type AgentToolStatus = 'running' | 'success' | 'error';
 /** A single, upsert-by-id entry in an agent session's transcript. */
 export type AgentTranscriptEvent =
   | { kind: 'user'; id: string; ts: number; content: string }
-  | { kind: 'assistant'; id: string; ts: number; content: string }
+  | { kind: 'assistant'; id: string; ts: number; content: string; durationMs?: number }
   | { kind: 'reasoning'; id: string; ts: number; content: string }
   | { kind: 'system'; id: string; ts: number; content: string }
   | {
@@ -97,7 +97,10 @@ export type AgentTranscriptEvent =
       toolName: string;
       args?: unknown;
       status: AgentToolStatus;
+      progress?: string;
       output?: string;
+      /** Wall-clock execution time, set once the tool completes. */
+      durationMs?: number;
     }
   | { kind: 'notice'; id: string; ts: number; message: string }
   | { kind: 'error'; id: string; ts: number; message: string };
@@ -129,6 +132,31 @@ export interface AgentCommandOption {
   name: string;
   description: string;
   group?: string;
+}
+
+/**
+ * Accumulated token and billing usage for one agent session.
+ *
+ * Everything here is summed from the SDK's `assistant.usage` events, which the
+ * runtime emits once per model call. `nanoAiu` is GitHub's own billing unit
+ * (nano-AI units) as reported by CAPI, and `premiumRequests` is the sum of the
+ * per-call model multipliers — the number a Copilot plan's premium-request
+ * allowance is drawn down by.
+ */
+export interface AgentUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  reasoningTokens: number;
+  /** Number of model calls counted. */
+  requests: number;
+  /** Sum of per-call model multipliers ("premium request" equivalents). */
+  premiumRequests: number;
+  /** Accumulated cost in nano-AI units (1e-9 AIU), when CAPI reports it. */
+  nanoAiu: number;
+  /** Context-window occupancy for the live session, when known. */
+  contextTokens?: number;
+  contextLimit?: number;
 }
 
 /** Summary of a resumable Copilot session (for the `/resume` switcher). */
@@ -165,7 +193,15 @@ export interface AgentShareStatus {
 export type AgentClientMessage =
   | { type: 'send'; prompt: string }
   | { type: 'cancel' }
-  | { type: 'permission_response'; requestId: string; decision: 'approve-once' | 'approve-for-session' | 'reject' }
+  // 'approve-all' additionally puts the session into "allow everything" mode so
+  // no further permission prompts are shown, whatever the agent mode.
+  | {
+      type: 'permission_response';
+      requestId: string;
+      decision: 'approve-once' | 'approve-for-session' | 'approve-all' | 'reject';
+    }
+  // Turn "allow everything" on/off without answering a specific prompt.
+  | { type: 'set_allow_all'; enabled: boolean }
   | { type: 'set_mode'; mode: AgentMode }
   | { type: 'exit_plan_response'; requestId: string; action: string }
   | { type: 'set_model'; model: string }
@@ -194,6 +230,8 @@ export type AgentServerMessage =
   | { type: 'tool_delta'; id: string; delta: string }
   | { type: 'permission_request'; requestId: string; title: string; detail: string; canSession: boolean }
   | { type: 'permission_resolved'; requestId: string }
+  // Whether the session auto-approves every permission request.
+  | { type: 'allow_all'; enabled: boolean }
   // Agent finished planning and is asking whether/how to exit plan mode.
   | {
       type: 'exit_plan_request';
@@ -217,6 +255,8 @@ export type AgentServerMessage =
   | { type: 'diff'; content: string; truncated: boolean }
   // Current GitHub share status for this session.
   | { type: 'share_status'; status: AgentShareStatus }
+  // Accumulated token/billing usage for this session.
+  | { type: 'usage'; usage: AgentUsage }
   | { type: 'error'; message: string };
 
 export interface AgentModelOption {

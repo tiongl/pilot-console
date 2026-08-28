@@ -15,9 +15,10 @@ import { createProject, listProjects, getProjectById, updateProject, deleteProje
 import { listSessionsForUser, listAllSessions, getCopilotSessionDetail, listCopilotSessionsForProject } from '../shared/session-store';
 import { setupWebSocketServer } from './websocket';
 import { setupAgentWebSocketServer } from './agent-websocket';
-import { listAgentModels, shutdownAgentBridge } from '../shared/agent-bridge';
+import { listAgentModels, detachAgentBridge } from '../shared/agent-bridge';
 import { getAllSessions, getAllSessionsWithExited, getSessionStatus, endCliSession, endSessionByProject, initDaemonBridge } from '../shared/cli-bridge';
 import { getDb } from '../shared/db';
+import { revealPathInFileSystem } from './file-system';
 import scheduleRoutes from './routes/schedules';
 import { startScheduler } from './scheduler';
 import { startLagMonitor, getPerfSnapshot, recordApiCall } from './perf-monitor';
@@ -246,7 +247,9 @@ app.get('/api/agent/models', async (_req, res) => {
     res.json({ models });
   } catch (err) {
     console.error('[api] failed to list agent models:', err);
-    res.status(503).json({ error: 'Copilot SDK unavailable', models: [{ id: 'auto', name: 'Auto' }] });
+    // `degraded` tells the client this is a placeholder, not the real catalog,
+    // so it can retry instead of leaving the picker stuck on "Auto".
+    res.status(503).json({ error: 'Copilot SDK unavailable', degraded: true, models: [{ id: 'auto', name: 'Auto' }] });
   }
 });
 
@@ -674,6 +677,27 @@ app.get('/api/projects/:id/file-raw', (req, res) => {
     fs.createReadStream(absPath).pipe(res);
   } catch {
     res.status(400).json({ error: 'Cannot read file' });
+  }
+});
+
+app.post('/api/projects/:id/file-reveal', (req, res) => {
+  const rootResult = getFileExplorerRoot(req.params.id, req.query.worktreeId);
+  if ('error' in rootResult) { res.status(rootResult.status).json({ error: rootResult.error }); return; }
+  const root = rootResult.root;
+  const filePath = req.body?.path as string | undefined;
+  if (!filePath) { res.status(400).json({ error: 'path required' }); return; }
+  const absPath = path.resolve(root, filePath);
+  if (!isPathInside(root, absPath)) {
+    res.status(403).json({ error: 'Access denied' }); return;
+  }
+  try {
+    if (!fs.existsSync(absPath)) {
+      res.status(404).json({ error: 'File not found' }); return;
+    }
+    revealPathInFileSystem(absPath);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to open file location', message: String(err) });
   }
 });
 
@@ -1155,16 +1179,18 @@ console.log('[server] Initializing daemon bridge before accepting requests...');
   });
 })();
 
-// Gracefully persist and disconnect SDK-backed agent sessions on shutdown.
+// Detach from agent sessions on shutdown. When the runtime is hosted by the
+// daemon the sessions keep running, so a restart (including a dev `--watch`
+// reload) no longer kills in-flight turns.
 let shuttingDown = false;
 async function gracefulShutdown(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`[server] Received ${signal}, shutting down agent bridge...`);
+  console.log(`[server] Received ${signal}, detaching agent bridge...`);
   try {
-    await shutdownAgentBridge();
+    await detachAgentBridge();
   } catch (err) {
-    console.error('[server] Error during agent bridge shutdown:', err);
+    console.error('[server] Error during agent bridge detach:', err);
   }
   process.exit(0);
 }
