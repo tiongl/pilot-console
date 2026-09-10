@@ -11,7 +11,7 @@ import { parse } from 'url';
 import { requireAuth, SESSION_COOKIE, createSession, destroySession, getUserFromToken } from './middleware/auth';
 import { getGitHubCliProfile } from '../shared/gh-cli-auth';
 import { upsertUser, listUsers, updateUserRole, deleteUser } from '../shared/user-store';
-import { createProject, listProjects, getProjectById, updateProject, deleteProject, addSkill, listSkills, updateSkill, deleteSkill, listWorktrees, createWorktree, attachExistingWorktree, attachSubnode, getWorktreeById, deleteWorktree } from '../shared/project-store';
+import { createProject, listProjects, getProjectById, updateProject, deleteProject, addSkill, listSkills, updateSkill, deleteSkill, listWorktrees, createWorktree, attachExistingWorktree, attachSubnode, getWorktreeById, deleteWorktree, consumeWorktreeSeed } from '../shared/project-store';
 import { listSessionsForUser, listAllSessions, getCopilotSessionDetail, listCopilotSessionsForProject } from '../shared/session-store';
 import { setupWebSocketServer } from './websocket';
 import { setupAgentWebSocketServer } from './agent-websocket';
@@ -489,6 +489,17 @@ app.post('/api/projects/:id/worktrees/:worktreeId/digest/spot-check', (req, res)
   } catch (err) {
     res.status(404).json({ error: (err as Error).message });
   }
+});
+
+// One-shot: return and clear a worktree's seed prompt (used to auto-start the
+// Copilot CLI session for the issue the worktree was created for).
+app.get('/api/projects/:id/worktrees/:worktreeId/seed', (req, res) => {
+  const wt = getWorktreeById(req.params.worktreeId);
+  if (!wt || wt.projectId !== req.params.id) {
+    res.status(404).json({ error: 'Not found' });
+    return;
+  }
+  res.json({ seed: consumeWorktreeSeed(req.params.worktreeId) });
 });
 
 app.delete('/api/projects/:id/worktrees/:worktreeId', (req, res) => {

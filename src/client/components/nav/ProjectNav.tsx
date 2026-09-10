@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router';
-import { FolderOpen, Pin, ChevronRight, ChevronDown, GitBranch, Plus, Trash2 } from 'lucide-react';
+import { FolderOpen, Pin, ChevronRight, ChevronDown, GitBranch, Plus, Trash2, LayoutDashboard } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -203,6 +203,14 @@ export default function ProjectNav({ projects }: Props) {
               >
                 <FolderOpen className="h-4 w-4 shrink-0" />
                 <span className="truncate flex-1">{project.name}</span>
+              </Link>
+              <Link
+                to={`/projects/${project.id}/view/board`}
+                onClick={(e) => e.stopPropagation()}
+                className="h-4 w-4 shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+                title="Open project view (board, issues, PRs)"
+              >
+                <LayoutDashboard className="h-3.5 w-3.5" />
               </Link>
               <button
                 onClick={(e) => openAddDialog(e, project.id)}

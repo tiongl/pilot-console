@@ -256,6 +256,20 @@ function ProjectNav({
     projects.forEach(p => fetchWorktrees(p.id));
   }, [projects, fetchWorktrees]);
 
+  // Event-driven: when a worktree is created elsewhere (e.g. "Work locally" on
+  // an issue), refresh that project's worktrees and expand it so the new subnode
+  // appears in the tree immediately.
+  useEffect(() => {
+    const onWorktreesChanged = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { projectId?: string };
+      if (!detail?.projectId) return;
+      fetchWorktrees(detail.projectId);
+      setExpandedIds(prev => (prev.has(detail.projectId!) ? prev : new Set(prev).add(detail.projectId!)));
+    };
+    window.addEventListener('worktrees-changed', onWorktreesChanged);
+    return () => window.removeEventListener('worktrees-changed', onWorktreesChanged);
+  }, [fetchWorktrees]);
+
   const toggleExpanded = useCallback((projectId: string) => {
     setExpandedIds(prev => {
       const next = new Set(prev);

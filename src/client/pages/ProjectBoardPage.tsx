@@ -1,358 +1,616 @@
-import { useEffect, useMemo, useState } from 'react';
-import { useParams } from 'react-router';
-import { KanbanSquare, Plus, X, Pencil, Check } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { useParams, useSearchParams } from 'react-router';
 import {
-  DndContext,
-  DragOverlay,
-  PointerSensor,
-  useDraggable,
-  useDroppable,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
-  type DragStartEvent,
-} from '@dnd-kit/core';
-import { useGitHubResource } from '../hooks/useGitHubResource';
-import { GitHubViewShell } from '../components/github/GitHubViewShell';
-import { LabelChip } from './ProjectIssuesPage';
+  KanbanSquare,
+  Table2,
+  CalendarRange,
+  ChevronDown,
+  Lock,
+  Globe,
+  Plus,
+  Settings2,
+  Link2,
+  Loader2,
+  RefreshCw,
+  Pencil,
+} from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuGroup,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+} from '@/components/ui/dropdown-menu';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
+import { Label } from '@/components/ui/label';
+import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
-import type { GitHubBoard, GitHubBoardItem } from '@/types';
+import { useGitHubResource } from '../hooks/useGitHubResource';
+import { useStartIssueSession } from '../hooks/useStartIssueSession';
+import { GitHubScopeGate } from '../components/github/GitHubScopeGate';
+import { ProjectLinkPrompt } from '../components/github/ProjectLinkPrompt';
+import { GitHubProjectPicker } from '../components/github/GitHubProjectPicker';
+import { ProjectMetaDialog } from '../components/github/ProjectMetaDialog';
+import { BoardCanvas } from '../components/github/BoardCanvas';
+import { ProjectViewTable } from '../components/github/ProjectViewTable';
+import { ProjectViewRoadmap } from '../components/github/ProjectViewRoadmap';
+import { ReconcileDonePanel } from '../components/github/ReconcileDonePanel';
+import type {
+  GitHubProjectLink,
+  GitHubProjectOverview,
+  GitHubProjectView,
+  GitHubProjectViewLayout,
+  GitHubProjectViewSummary,
+} from '@/types';
 
-const NO_STATUS = '__no_status__';
+function layoutIcon(layout: GitHubProjectViewLayout) {
+  if (layout === 'table') return <Table2 className="h-3.5 w-3.5" />;
+  if (layout === 'roadmap') return <CalendarRange className="h-3.5 w-3.5" />;
+  return <KanbanSquare className="h-3.5 w-3.5" />;
+}
 
+function visIcon(isPublic: boolean | undefined) {
+  return isPublic ? (
+    <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+  ) : (
+    <Lock className="h-3.5 w-3.5 text-muted-foreground" />
+  );
+}
+
+/**
+ * The Projects V2 explorer: a top-level project dropdown, that project's saved
+ * views as tabs (honoring each view's board/table/roadmap layout), item-level
+ * editing, project settings, a repeatable reconcile-to-Done prompt, and a
+ * start/resume Copilot session action on issue cards.
+ */
 export default function ProjectBoardPage() {
   const { id = '' } = useParams<{ id: string }>();
-  const { data, loading, loaded, error, refresh } = useGitHubResource<{ board: GitHubBoard }>(id, '/board');
-  const board = data?.board ?? null;
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  return (
-    <GitHubViewShell title="Board" icon={<KanbanSquare className="h-4 w-4" />} loading={loading} loaded={loaded} error={error} onRefresh={refresh}>
-      {board && <InteractiveBoard projectId={id} board={board} onRefresh={refresh} />}
-    </GitHubViewShell>
-  );
-}
+  const [links, setLinks] = useState<GitHubProjectLink[]>([]);
+  const [linksLoaded, setLinksLoaded] = useState(false);
+  const [publicMap, setPublicMap] = useState<Record<string, boolean>>({});
 
-function InteractiveBoard({ projectId, board, onRefresh }: { projectId: string; board: GitHubBoard; onRefresh: () => void }) {
-  // Local, optimistic copy of item statuses; re-synced whenever the board reloads.
-  const [items, setItems] = useState<GitHubBoardItem[]>(board.items);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  useEffect(() => setItems(board.items), [board.items]);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [linkOpen, setLinkOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [renameView, setRenameView] = useState<GitHubProjectViewSummary | null>(null);
 
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
-  const editable = board.statusFieldId != null;
-  const base = `/api/projects/${encodeURIComponent(projectId)}/github`;
+  const { start, startingIssue } = useStartIssueSession(id);
 
-  const columns = useMemo(() => [...board.columns, { id: NO_STATUS, name: 'No Status' }], [board.columns]);
-  const itemsByStatus = (name: string) =>
-    items.filter((it) => (name === 'No Status' ? it.status === null : it.status === name));
-
-  const activeItem = items.find((it) => it.itemId === activeId) ?? null;
-
-  const onDragStart = (e: DragStartEvent) => setActiveId(String(e.active.id));
-
-  const onDragEnd = async (e: DragEndEvent) => {
-    setActiveId(null);
-    const { active, over } = e;
-    if (!over || !board.statusFieldId) return;
-    const itemId = String(active.id);
-    const targetColId = String(over.id);
-    const item = items.find((it) => it.itemId === itemId);
-    if (!item) return;
-
-    const targetName = targetColId === NO_STATUS ? null : board.columns.find((c) => c.id === targetColId)?.name ?? null;
-    if (item.status === targetName) return;
-
-    const optionId = targetColId === NO_STATUS ? null : targetColId;
-    const prevStatus = item.status;
-    setItems((cur) => cur.map((it) => (it.itemId === itemId ? { ...it, status: targetName } : it)));
-
+  const loadLinks = useCallback(async () => {
     try {
-      const res = await fetch(`${base}/board/item/move`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ghProjectId: board.projectId, itemId, fieldId: board.statusFieldId, optionId }),
-      });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Move failed (${res.status})`);
-    } catch (err) {
-      setItems((cur) => cur.map((it) => (it.itemId === itemId ? { ...it, status: prevStatus } : it)));
-      toast.error((err as Error).message);
-      onRefresh();
-    }
-  };
-
-  const createCard = async (columnId: string, title: string) => {
-    setBusy(true);
-    try {
-      const optionId = columnId === NO_STATUS ? null : columnId;
-      const res = await fetch(`${base}/board/item/create`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ghProjectId: board.projectId, statusFieldId: board.statusFieldId, optionId, title }),
-      });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Create failed (${res.status})`);
-      toast.success('Issue created');
-      onRefresh();
-    } catch (err) {
-      toast.error((err as Error).message);
+      const res = await fetch(`/api/projects/${encodeURIComponent(id)}/github/links`);
+      const body = await res.json().catch(() => ({}));
+      setLinks(body.links ?? []);
+    } catch {
+      // leave links empty; prompt will offer to create/link
     } finally {
-      setBusy(false);
+      setLinksLoaded(true);
     }
+  }, [id]);
+
+  useEffect(() => {
+    void loadLinks();
+  }, [loadLinks]);
+
+  // Best-effort visibility map for the dropdown (may 403 without project scope).
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/projects/${encodeURIComponent(id)}/github/linked-projects`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((b) => {
+        if (cancelled || !b?.projects) return;
+        const m: Record<string, boolean> = {};
+        for (const p of b.projects) m[p.id] = p.public;
+        setPublicMap(m);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  const selectedProjectId =
+    searchParams.get('project') ||
+    links.find((l) => l.isDefault)?.ghProjectId ||
+    links[0]?.ghProjectId ||
+    null;
+
+  const overviewPath = selectedProjectId
+    ? `/project-overview?ghProjectId=${encodeURIComponent(selectedProjectId)}`
+    : '';
+  const overviewState = useGitHubResource<{ overview: GitHubProjectOverview }>(id, overviewPath, {
+    enabled: !!selectedProjectId,
+  });
+  const overview = overviewState.data?.overview ?? null;
+
+  const viewParam = searchParams.get('view');
+  const selectedViewNumber = viewParam ? Number(viewParam) : overview?.views[0]?.number ?? null;
+
+  const viewPath =
+    selectedProjectId && selectedViewNumber != null
+      ? `/project-view?ghProjectId=${encodeURIComponent(selectedProjectId)}&view=${selectedViewNumber}`
+      : '';
+  const viewState = useGitHubResource<{ view: GitHubProjectView }>(id, viewPath, {
+    enabled: !!viewPath,
+  });
+  const view = viewState.data?.view ?? null;
+
+  const selectProject = (ghProjectId: string) =>
+    setSearchParams((prev) => {
+      const p = new URLSearchParams(prev);
+      p.set('project', ghProjectId);
+      p.delete('view');
+      return p;
+    });
+
+  const selectView = (viewNumber: number) =>
+    setSearchParams((prev) => {
+      const p = new URLSearchParams(prev);
+      p.set('view', String(viewNumber));
+      return p;
+    });
+
+  const refreshAll = () => {
+    overviewState.refresh();
+    viewState.refresh();
   };
 
-  const renameCard = async (item: GitHubBoardItem, title: string) => {
-    if (item.number == null) return;
-    const prev = item.title;
-    setItems((cur) => cur.map((it) => (it.itemId === item.itemId ? { ...it, title } : it)));
-    try {
-      const res = await fetch(`${base}/board/item`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ issueNumber: item.number, title }),
-      });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Rename failed (${res.status})`);
-    } catch (err) {
-      setItems((cur) => cur.map((it) => (it.itemId === item.itemId ? { ...it, title: prev } : it)));
-      toast.error((err as Error).message);
-    }
+  const onCreated = async (link: GitHubProjectLink) => {
+    await loadLinks();
+    selectProject(link.ghProjectId);
   };
 
-  const removeCard = async (item: GitHubBoardItem) => {
-    if (!confirm(`Remove "${item.title}" from the board? The issue/PR itself will not be deleted.`)) return;
-    const snapshot = items;
-    setItems((cur) => cur.filter((it) => it.itemId !== item.itemId));
-    try {
-      const res = await fetch(`${base}/board/item`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ghProjectId: board.projectId, itemId: item.itemId }),
-      });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Remove failed (${res.status})`);
-    } catch (err) {
-      setItems(snapshot);
-      toast.error((err as Error).message);
-    }
-  };
-
-  return (
-    <DndContext sensors={sensors} onDragStart={onDragStart} onDragEnd={onDragEnd}>
-      <div className="flex h-full gap-3 overflow-x-auto pb-2">
-        {columns.map((col) => {
-          const colItems = itemsByStatus(col.name);
-          if (col.name === 'No Status' && colItems.length === 0) return null;
-          return (
-            <Column
-              key={col.id}
-              id={col.id}
-              name={col.name}
-              count={colItems.length}
-              editable={editable}
-              busy={busy}
-              onCreate={(title) => createCard(col.id, title)}
-            >
-              {colItems.map((item) => (
-                <Card
-                  key={item.itemId}
-                  item={item}
-                  editable={editable}
-                  dragging={activeId === item.itemId}
-                  onRename={(title) => renameCard(item, title)}
-                  onRemove={() => removeCard(item)}
-                />
-              ))}
-            </Column>
-          );
-        })}
-      </div>
-      <DragOverlay>{activeItem ? <Card item={activeItem} editable={false} dragging /> : null}</DragOverlay>
-    </DndContext>
-  );
-}
-
-function Column({
-  id,
-  name,
-  count,
-  editable,
-  busy,
-  onCreate,
-  children,
-}: {
-  id: string;
-  name: string;
-  count: number;
-  editable: boolean;
-  busy?: boolean;
-  onCreate?: (title: string) => void;
-  children: React.ReactNode;
-}) {
-  const { setNodeRef, isOver } = useDroppable({ id, disabled: !editable });
-  const [adding, setAdding] = useState(false);
-  const [title, setTitle] = useState('');
-
-  const submit = () => {
-    const t = title.trim();
-    if (!t || !onCreate) return;
-    onCreate(t);
-    setTitle('');
-    setAdding(false);
-  };
-
-  return (
-    <div
-      ref={setNodeRef}
-      className={`flex w-72 shrink-0 flex-col rounded-lg transition-colors ${isOver ? 'bg-primary/10 ring-1 ring-primary/40' : 'bg-muted/40'}`}
-    >
-      <div className="flex items-center justify-between px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        <span>{name}</span>
-        <span className="rounded-full bg-background px-1.5 py-0.5">{count}</span>
-      </div>
-      <div className="flex flex-col gap-2 overflow-y-auto px-2 pb-2">
-        {children}
-        {editable &&
-          (adding ? (
-            <div className="rounded-md border bg-card p-2">
-              <Textarea
-                autoFocus
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    submit();
-                  }
-                  if (e.key === 'Escape') setAdding(false);
-                }}
-                placeholder="Issue title…"
-                rows={2}
-                className="text-sm"
-              />
-              <div className="mt-2 flex items-center gap-2">
-                <Button size="xs" onClick={submit} disabled={busy || !title.trim()}>
-                  Add
-                </Button>
-                <Button size="xs" variant="ghost" onClick={() => setAdding(false)}>
-                  Cancel
-                </Button>
-              </div>
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setAdding(true)}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-background hover:text-foreground"
-            >
-              <Plus className="h-3.5 w-3.5" /> Add card
-            </button>
-          ))}
-      </div>
-    </div>
-  );
-}
-
-function Card({
-  item,
-  editable,
-  dragging,
-  onRename,
-  onRemove,
-}: {
-  item: GitHubBoardItem;
-  editable: boolean;
-  dragging: boolean;
-  onRename?: (title: string) => void;
-  onRemove?: () => void;
-}) {
-  const { attributes, listeners, setNodeRef } = useDraggable({ id: item.itemId, disabled: !editable });
-  const [editing, setEditing] = useState(false);
-  const [title, setTitle] = useState(item.title);
-  const canRename = editable && item.contentType === 'Issue' && item.number != null && onRename;
-
-  const commit = () => {
-    const t = title.trim();
-    if (t && t !== item.title) onRename?.(t);
-    setEditing(false);
-  };
-
-  if (editing) {
+  if (!linksLoaded) {
     return (
-      <div className="rounded-md border bg-card p-2 text-sm shadow-sm">
-        <Input
-          autoFocus
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') commit();
-            if (e.key === 'Escape') setEditing(false);
-          }}
-          className="h-7 text-sm"
-        />
-        <div className="mt-2 flex items-center gap-1">
-          <Button size="xs" onClick={commit}>
-            <Check className="h-3 w-3" /> Save
-          </Button>
-          <Button size="xs" variant="ghost" onClick={() => { setTitle(item.title); setEditing(false); }}>
-            Cancel
-          </Button>
-        </div>
+      <div className="space-y-3 p-4">
+        {Array.from({ length: 5 }, (_, i) => (
+          <Skeleton key={i} className="h-16 w-full" />
+        ))}
       </div>
     );
   }
 
+  if (links.length === 0) {
+    return <ProjectLinkPrompt projectId={id} onLinked={loadLinks} />;
+  }
+
+  const currentProjectLabel = overview?.title ?? links.find((l) => l.ghProjectId === selectedProjectId)?.title ?? 'Project';
+  const currentPublic = overview ? overview.public : selectedProjectId ? publicMap[selectedProjectId] : undefined;
+
   return (
-    <div
-      ref={setNodeRef}
-      {...(editable ? { ...listeners, ...attributes } : {})}
-      className={`group relative rounded-md border bg-card p-2.5 text-sm shadow-sm ${editable ? 'cursor-grab active:cursor-grabbing' : ''} ${dragging ? 'opacity-50' : ''}`}
-    >
-      {(canRename || onRemove) && (
-        <div className="absolute right-1 top-1 flex gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-          {canRename && (
-            <button
-              type="button"
-              onPointerDown={(e) => e.stopPropagation()}
-              onClick={() => { setTitle(item.title); setEditing(true); }}
-              className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-              title="Rename"
-            >
-              <Pencil className="h-3 w-3" />
-            </button>
-          )}
-          {onRemove && (
-            <button
-              type="button"
-              onPointerDown={(e) => e.stopPropagation()}
-              onClick={onRemove}
-              className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-destructive"
-              title="Remove from board"
-            >
-              <X className="h-3 w-3" />
-            </button>
+    <div className="flex h-full flex-col overflow-hidden">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          {/* Project dropdown */}
+          <DropdownMenu>
+            <DropdownMenuTrigger render={<Button variant="outline" size="sm" className="max-w-[16rem]" />}>
+              {visIcon(currentPublic)}
+              <span className="truncate">{currentProjectLabel}</span>
+              <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-64">
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>Projects</DropdownMenuLabel>
+                {links.map((l) => (
+                  <DropdownMenuItem key={l.ghProjectId} onClick={() => selectProject(l.ghProjectId)}>
+                    {visIcon(publicMap[l.ghProjectId])}
+                    <span className="truncate">{l.title}</span>
+                    <span className="ml-auto text-xs text-muted-foreground">#{l.ghProjectNumber}</span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => setCreateOpen(true)}>
+                <Plus className="h-3.5 w-3.5" /> New project…
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setLinkOpen(true)}>
+                <Link2 className="h-3.5 w-3.5" /> Link existing…
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {/* View tabs */}
+          {overview && overview.views.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1">
+              {overview.views.map((v) => {
+                const active = v.number === selectedViewNumber;
+                return (
+                  <div
+                    key={v.id}
+                    className={`flex items-center rounded-md ${
+                      active ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-accent'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => selectView(v.number)}
+                      className={`flex items-center gap-1.5 px-2.5 py-1 text-sm transition-colors ${active ? 'font-medium' : ''}`}
+                      title={`${v.name} (${v.layout})`}
+                    >
+                      {layoutIcon(v.layout)}
+                      <span className="max-w-[10rem] truncate">{v.name}</span>
+                    </button>
+                    {active && overview.viewerCanUpdate && (
+                      <button
+                        type="button"
+                        onClick={() => setRenameView(v)}
+                        className="mr-1 rounded p-0.5 opacity-70 hover:bg-background hover:opacity-100"
+                        title="Rename view"
+                      >
+                        <Pencil className="h-3 w-3" />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           )}
         </div>
-      )}
-      {item.url ? (
-        <a href={item.url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className="font-medium hover:underline">
-          {item.title}
-        </a>
-      ) : (
-        <span className="font-medium">{item.title}</span>
-      )}
-      {item.number != null && <span className="ml-1 text-xs text-muted-foreground">#{item.number}</span>}
-      {item.labels.length > 0 && (
-        <div className="mt-1.5 flex flex-wrap gap-1">
-          {item.labels.map((l) => (
-            <LabelChip key={l.name} name={l.name} color={l.color} />
-          ))}
+
+        <div className="flex items-center gap-1">
+          {overview?.viewerCanUpdate && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setSettingsOpen(true)}
+              title="Project settings"
+            >
+              <Settings2 className="h-4 w-4" />
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            onClick={refreshAll}
+            disabled={overviewState.loading || viewState.loading}
+            title="Refresh"
+          >
+            <RefreshCw
+              className={`h-4 w-4 ${overviewState.loading || viewState.loading ? 'animate-spin' : ''}`}
+            />
+          </Button>
         </div>
-      )}
-      <div className="mt-1.5 flex items-center justify-between text-[10px] text-muted-foreground">
-        <span>{item.contentType === 'PullRequest' ? 'PR' : item.contentType === 'DraftIssue' ? 'Draft' : 'Issue'}</span>
-        {item.assignees.length > 0 && <span>@{item.assignees.map((a) => a.login).join(', @')}</span>}
       </div>
+
+      <div className="flex-1 overflow-auto p-4">
+        {overviewState.error ? (
+          <GateOrError error={overviewState.error} onRetry={refreshAll} />
+        ) : !overviewState.loaded ? (
+          <LoadingSkeleton />
+        ) : overview && overview.views.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            This project has no saved views. Add a view on GitHub to see it here.
+          </p>
+        ) : (
+          <ProjectViewContent
+            consoleProjectId={id}
+            ghProjectId={selectedProjectId!}
+            view={view}
+            loading={viewState.loading}
+            loaded={viewState.loaded}
+            error={viewState.error}
+            onRefresh={refreshAll}
+            onStartSession={start}
+            startingIssue={startingIssue}
+          />
+        )}
+      </div>
+
+      {/* Dialogs */}
+      <CreateProjectDialog open={createOpen} onOpenChange={setCreateOpen} projectId={id} onCreated={onCreated} />
+
+      <Dialog
+        open={linkOpen}
+        onOpenChange={(open) => {
+          setLinkOpen(open);
+          if (!open) void loadLinks();
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Link a GitHub Project</DialogTitle>
+          </DialogHeader>
+          <GitHubProjectPicker projectId={id} />
+        </DialogContent>
+      </Dialog>
+
+      {overview && selectedProjectId && (
+        <ProjectMetaDialog
+          open={settingsOpen}
+          onOpenChange={setSettingsOpen}
+          consoleProjectId={id}
+          ghProjectId={selectedProjectId}
+          overview={overview}
+          onSaved={refreshAll}
+        />
+      )}
+
+      {selectedProjectId && (
+        <RenameViewDialog
+          open={renameView != null}
+          onOpenChange={(open) => {
+            if (!open) setRenameView(null);
+          }}
+          consoleProjectId={id}
+          ghProjectId={selectedProjectId}
+          view={renameView}
+          onSaved={refreshAll}
+        />
+      )}
     </div>
+  );
+}
+
+function ProjectViewContent({
+  consoleProjectId,
+  ghProjectId,
+  view,
+  loading,
+  loaded,
+  error,
+  onRefresh,
+  onStartSession,
+  startingIssue,
+}: {
+  consoleProjectId: string;
+  ghProjectId: string;
+  view: GitHubProjectView | null;
+  loading: boolean;
+  loaded: boolean;
+  error: import('../hooks/useGitHubResource').GitHubError | null;
+  onRefresh: () => void;
+  onStartSession: (issueNumber: number) => void;
+  startingIssue: number | null;
+}) {
+  if (error) return <GateOrError error={error} onRetry={onRefresh} />;
+  if (!loaded && !view) return <LoadingSkeleton />;
+  if (!view) return <LoadingSkeleton />;
+
+  const body = (() => {
+    if (view.layout === 'table') {
+      return (
+        <ProjectViewTable
+          consoleProjectId={consoleProjectId}
+          ghProjectId={ghProjectId}
+          items={view.items}
+          groupFieldName={view.groupFieldName}
+          groupFieldId={view.groupFieldId}
+          columns={view.columns}
+          onRefresh={onRefresh}
+          onStartSession={onStartSession}
+          startingIssue={startingIssue}
+        />
+      );
+    }
+    if (view.layout === 'roadmap') {
+      return (
+        <ProjectViewRoadmap items={view.items} onStartSession={onStartSession} startingIssue={startingIssue} />
+      );
+    }
+    return (
+      <BoardCanvas
+        consoleProjectId={consoleProjectId}
+        ghProjectId={ghProjectId}
+        groupFieldId={view.groupFieldId}
+        columns={view.columns}
+        items={view.items}
+        onRefresh={onRefresh}
+        onStartSession={onStartSession}
+        startingIssue={startingIssue}
+      />
+    );
+  })();
+
+  return (
+    <div className={`flex h-full flex-col ${loading ? 'opacity-60' : ''}`}>
+      <ReconcileDonePanel
+        consoleProjectId={consoleProjectId}
+        ghProjectId={ghProjectId}
+        groupFieldId={view.groupFieldId}
+        columns={view.columns}
+        items={view.items}
+        onRefresh={onRefresh}
+      />
+      <div className="min-h-0 flex-1">{body}</div>
+    </div>
+  );
+}
+
+function LoadingSkeleton() {
+  return (
+    <div className="space-y-3">
+      {Array.from({ length: 5 }, (_, i) => (
+        <Skeleton key={i} className="h-16 w-full" />
+      ))}
+    </div>
+  );
+}
+
+function GateOrError({
+  error,
+  onRetry,
+}: {
+  error: import('../hooks/useGitHubResource').GitHubError;
+  onRetry: () => void;
+}) {
+  const gate = GitHubScopeGate({ error });
+  if (gate) return gate;
+  return (
+    <div className="mx-auto mt-8 max-w-lg rounded-lg border border-destructive/40 bg-destructive/5 p-5 text-sm">
+      <p className="font-semibold text-destructive">Failed to load from GitHub</p>
+      <p className="mt-1 text-muted-foreground">{error.message}</p>
+      <Button variant="outline" size="sm" className="mt-3" onClick={onRetry}>
+        Try again
+      </Button>
+    </div>
+  );
+}
+
+function CreateProjectDialog({
+  open,
+  onOpenChange,
+  projectId,
+  onCreated,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  projectId: string;
+  onCreated: (link: GitHubProjectLink) => void;
+}) {
+  const [title, setTitle] = useState('');
+  const [creating, setCreating] = useState(false);
+
+  const create = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const t = title.trim();
+    if (!t) return;
+    setCreating(true);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/github/links/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: t }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `Create failed (${res.status})`);
+      toast.success('Project created and linked');
+      setTitle('');
+      onOpenChange(false);
+      onCreated(body.link as GitHubProjectLink);
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>New GitHub Project</DialogTitle>
+        </DialogHeader>
+        <form onSubmit={create} className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="create-project-title">Project name</Label>
+            <Input
+              id="create-project-title"
+              autoFocus
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="e.g. Q3 Roadmap"
+            />
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={creating || !title.trim()}>
+              {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+              Create
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RenameViewDialog({
+  open,
+  onOpenChange,
+  consoleProjectId,
+  ghProjectId,
+  view,
+  onSaved,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  consoleProjectId: string;
+  ghProjectId: string;
+  view: GitHubProjectViewSummary | null;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (open && view) setName(view.name);
+  }, [open, view]);
+
+  if (!view) return null;
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const t = name.trim();
+    if (!t) return;
+    setSaving(true);
+    try {
+      const res = await fetch(
+        `/api/projects/${encodeURIComponent(consoleProjectId)}/github/project-view-name?ghProjectId=${encodeURIComponent(ghProjectId)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ view: view.number, name: t }),
+        },
+      );
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Rename failed (${res.status})`);
+      toast.success('View renamed');
+      onSaved();
+      onOpenChange(false);
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Rename view</DialogTitle>
+        </DialogHeader>
+        <form onSubmit={save} className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="view-name">View name</Label>
+            <Input
+              id="view-name"
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={view.name}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              GitHub doesn&apos;t expose a view-rename API, so this name is stored locally in the console and only
+              affects how the view appears here.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={saving || !name.trim()}>
+              {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+              Save
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

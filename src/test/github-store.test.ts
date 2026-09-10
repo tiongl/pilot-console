@@ -5,9 +5,11 @@ describe('github-store', () => {
   let db: InstanceType<typeof Database>;
   let mod: typeof import('../shared/github-store');
   let execFile: ReturnType<typeof vi.fn>;
+  let worktreeRow: { id: string; projectId: string; branch: string; worktreePath: string; issueNumber: number | null } | null;
 
   beforeEach(async () => {
     vi.resetModules();
+    worktreeRow = null;
 
     db = new Database(':memory:');
     db.exec(`
@@ -25,6 +27,14 @@ describe('github-store', () => {
         created_at TEXT DEFAULT (datetime('now')),
         UNIQUE(project_id, gh_project_id)
       );
+      CREATE TABLE project_view_names (
+        project_id TEXT NOT NULL,
+        gh_project_id TEXT NOT NULL,
+        view_number INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        updated_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (project_id, gh_project_id, view_number)
+      );
     `);
     db.prepare('INSERT INTO projects (id, name, repo_path) VALUES (?, ?, ?)').run('p1', 'Proj', '/tmp/repo');
 
@@ -32,6 +42,7 @@ describe('github-store', () => {
     vi.doMock('../shared/project-store', () => ({
       getProjectById: (id: string) =>
         id === 'p1' ? { id: 'p1', name: 'Proj', repoPath: '/tmp/repo' } : null,
+      getWorktreeById: () => worktreeRow,
     }));
 
     // Mock child_process.execFile so promisify(execFile) resolves { stdout }.
@@ -157,6 +168,100 @@ describe('github-store', () => {
       const links = mod.listProjectLinks('p1');
       expect(links.map((l) => l.ghProjectId).sort()).toEqual(['PVT_2', 'PVT_3']);
       expect(mod.getDefaultProjectLink('p1')?.ghProjectId).toBe('PVT_3');
+    });
+  });
+
+  describe('view name overrides', () => {
+    it('sets, reads, updates and scopes overrides by project + gh project', () => {
+      mod.setViewNameOverride('p1', 'PVT_1', 1, 'My Board');
+      mod.setViewNameOverride('p1', 'PVT_1', 2, 'My Table');
+      mod.setViewNameOverride('p1', 'PVT_2', 1, 'Other');
+      expect(mod.getViewNameOverrides('p1', 'PVT_1')).toEqual({ 1: 'My Board', 2: 'My Table' });
+      expect(mod.getViewNameOverrides('p1', 'PVT_2')).toEqual({ 1: 'Other' });
+
+      mod.setViewNameOverride('p1', 'PVT_1', 1, 'Renamed');
+      expect(mod.getViewNameOverrides('p1', 'PVT_1')[1]).toBe('Renamed');
+    });
+
+    it('trims names and clears the override when blank/null', () => {
+      mod.setViewNameOverride('p1', 'PVT_1', 1, '  Padded  ');
+      expect(mod.getViewNameOverrides('p1', 'PVT_1')[1]).toBe('Padded');
+
+      mod.setViewNameOverride('p1', 'PVT_1', 1, '   ');
+      expect(mod.getViewNameOverrides('p1', 'PVT_1')[1]).toBeUndefined();
+
+      mod.setViewNameOverride('p1', 'PVT_1', 2, 'Keep');
+      mod.setViewNameOverride('p1', 'PVT_1', 2, null);
+      expect(mod.getViewNameOverrides('p1', 'PVT_1')[2]).toBeUndefined();
+    });
+  });
+
+  describe('createLinkedProjectV2', () => {
+    function scopedExec(onGraphql: (args: string[], query: string) => { stdout: string } | Error) {
+      whenExec((_cmd, args) => {
+        if (args.includes('repo') && args.includes('view')) {
+          return { stdout: JSON.stringify({ owner: { login: 'o' }, name: 'r' }) };
+        }
+        if (args.includes('graphql')) {
+          const q = args.find((a) => a.startsWith('query=')) ?? '';
+          return onGraphql(args, q);
+        }
+        return { stdout: 'HTTP/2 200\nX-Oauth-Scopes: repo, project\n\n{}' };
+      });
+    }
+
+    it('creates a board, links it to the repo, and persists it as the default', async () => {
+      const seen: string[] = [];
+      scopedExec((_args, query) => {
+        seen.push(query);
+        if (query.includes('repository(owner:$owner,name:$repo){ id owner')) {
+          return { stdout: JSON.stringify({ data: { repository: { id: 'REPO_1', owner: { id: 'OWNER_1' } } } }) };
+        }
+        if (query.includes('createProjectV2')) {
+          return {
+            stdout: JSON.stringify({
+              data: { createProjectV2: { projectV2: { id: 'PVT_NEW', number: 7, title: 'My Board', url: 'u' } } },
+            }),
+          };
+        }
+        if (query.includes('linkProjectV2ToRepository')) {
+          return { stdout: JSON.stringify({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_1' } } } }) };
+        }
+        return new Error(`unexpected graphql: ${query}`);
+      });
+
+      const link = await mod.createLinkedProjectV2('p1', 'My Board');
+      expect(link).toMatchObject({ ghProjectId: 'PVT_NEW', ghProjectNumber: 7, title: 'My Board', isDefault: true });
+      expect(mod.getDefaultProjectLink('p1')?.ghProjectId).toBe('PVT_NEW');
+      expect(seen.some((q) => q.includes('createProjectV2'))).toBe(true);
+      expect(seen.some((q) => q.includes('linkProjectV2ToRepository'))).toBe(true);
+    });
+
+    it('keeps existing links and makes the new board the default', async () => {
+      mod.setProjectLinks('p1', [{ ghProjectId: 'PVT_OLD', ghProjectNumber: 1, title: 'Old', isDefault: true }]);
+      scopedExec((_args, query) => {
+        if (query.includes('repository(owner:$owner,name:$repo){ id owner')) {
+          return { stdout: JSON.stringify({ data: { repository: { id: 'REPO_1', owner: { id: 'OWNER_1' } } } }) };
+        }
+        if (query.includes('createProjectV2')) {
+          return {
+            stdout: JSON.stringify({
+              data: { createProjectV2: { projectV2: { id: 'PVT_NEW', number: 7, title: 'New', url: 'u' } } },
+            }),
+          };
+        }
+        return { stdout: JSON.stringify({ data: { linkProjectV2ToRepository: { repository: { id: 'REPO_1' } } } }) };
+      });
+
+      await mod.createLinkedProjectV2('p1', 'New');
+      const links = mod.listProjectLinks('p1');
+      expect(links.map((l) => l.ghProjectId).sort()).toEqual(['PVT_NEW', 'PVT_OLD']);
+      expect(mod.getDefaultProjectLink('p1')?.ghProjectId).toBe('PVT_NEW');
+    });
+
+    it('rejects an empty title', async () => {
+      scopedExec(() => ({ stdout: '{}' }));
+      await expect(mod.createLinkedProjectV2('p1', '   ')).rejects.toMatchObject({ code: 'failed' });
     });
   });
 
@@ -290,6 +395,288 @@ describe('github-store', () => {
       await mod.removeBoardItem('p1', 'PVT_1', 'ITEM_7');
       const del = calls.find((a) => (a.find((x) => x.startsWith('query=')) ?? '').includes('deleteProjectV2Item'))!;
       expect(del.join(' ')).toContain('item=ITEM_7');
+    });
+  });
+
+  describe('getIssueDetail', () => {
+    it('maps issue view JSON including the body', async () => {
+      whenExec((_cmd, args) => {
+        if (args.includes('repo') && args.includes('view')) {
+          return { stdout: JSON.stringify({ owner: { login: 'o' }, name: 'r' }) };
+        }
+        if (args.includes('issue') && args.includes('view')) {
+          return {
+            stdout: JSON.stringify({
+              number: 5, title: 'Fix thing', state: 'OPEN', url: 'https://x/5', body: '## Details\nDo it',
+              author: { login: 'me' }, assignees: [], labels: [{ name: 'bug', color: 'f00' }],
+              milestone: { title: 'v1' }, comments: [{}, {}], createdAt: 'c', updatedAt: 'u',
+            }),
+          };
+        }
+        return { stdout: 'HTTP/2 200\nX-Oauth-Scopes: repo\n\n{}' };
+      });
+      const issue = await mod.getIssueDetail('p1', 5, true);
+      expect(issue).toMatchObject({ number: 5, title: 'Fix thing', body: '## Details\nDo it', comments: 2, milestone: 'v1' });
+      expect(issue.labels).toEqual([{ name: 'bug', color: 'f00' }]);
+    });
+  });
+
+  describe('updateIssue', () => {
+    it('PATCHes title and body and rejects an empty update', async () => {
+      const calls: string[][] = [];
+      whenExec((_cmd, args) => {
+        if (args.includes('repo') && args.includes('view')) {
+          return { stdout: JSON.stringify({ owner: { login: 'o' }, name: 'r' }) };
+        }
+        if (args[0] === 'api') { calls.push(args); return { stdout: '{}' }; }
+        return { stdout: 'HTTP/2 200\nX-Oauth-Scopes: repo\n\n{}' };
+      });
+      await mod.updateIssue('p1', 5, { title: 'New title', body: 'New body' });
+      const patch = calls.find((a) => a.includes('PATCH'))!;
+      expect(patch.join(' ')).toContain('repos/o/r/issues/5');
+      expect(patch.join(' ')).toContain('title=New title');
+      expect(patch.join(' ')).toContain('body=New body');
+      await expect(mod.updateIssue('p1', 5, {})).rejects.toBeInstanceOf(Error);
+    });
+  });
+
+  describe('createPullRequest', () => {
+    it('pushes the branch and opens a PR appending Closes #N for issue worktrees', async () => {
+      worktreeRow = { id: 'wt1', projectId: 'p1', branch: 'issue-9-fix', worktreePath: '/tmp/repo-wt', issueNumber: 9 };
+      const calls: string[][] = [];
+      whenExec((cmd, args) => {
+        calls.push([cmd, ...args]);
+        if (cmd === 'git') return { stdout: '' };
+        if (args.includes('repo') && args.includes('view')) {
+          return { stdout: JSON.stringify({ owner: { login: 'o' }, name: 'r' }) };
+        }
+        if (args[0] === 'pr' && args[1] === 'create') {
+          return { stdout: 'https://github.com/o/r/pull/42\n' };
+        }
+        return { stdout: 'HTTP/2 200\nX-Oauth-Scopes: repo\n\n{}' };
+      });
+
+      const out = await mod.createPullRequest('p1', 'wt1', { title: 'My PR', body: 'Work done' });
+      expect(out).toEqual({ number: 42, url: 'https://github.com/o/r/pull/42' });
+
+      const push = calls.find((a) => a[0] === 'git' && a.includes('push'))!;
+      expect(push.join(' ')).toContain('HEAD:issue-9-fix');
+
+      const create = calls.find((a) => a[0] === 'gh' && a[1] === 'pr' && a[2] === 'create')!;
+      const flat = create.join(' ');
+      expect(flat).toContain('--head issue-9-fix');
+      expect(flat).toContain('--title My PR');
+      expect(flat).toContain('Closes #9');
+    });
+
+    it('does not duplicate a closing keyword already present in the body', async () => {
+      worktreeRow = { id: 'wt1', projectId: 'p1', branch: 'issue-3', worktreePath: '/tmp/repo-wt', issueNumber: 3 };
+      const calls: string[][] = [];
+      whenExec((cmd, args) => {
+        calls.push([cmd, ...args]);
+        if (cmd === 'git') return { stdout: '' };
+        if (args.includes('repo') && args.includes('view')) {
+          return { stdout: JSON.stringify({ owner: { login: 'o' }, name: 'r' }) };
+        }
+        if (args[0] === 'pr' && args[1] === 'create') return { stdout: 'https://github.com/o/r/pull/8\n' };
+        return { stdout: 'HTTP/2 200\nX-Oauth-Scopes: repo\n\n{}' };
+      });
+      await mod.createPullRequest('p1', 'wt1', { title: 'T', body: 'Fixes #3 already' });
+      const create = calls.find((a) => a[0] === 'gh' && a[1] === 'pr' && a[2] === 'create')!;
+      const bodyIdx = create.indexOf('--body');
+      expect(create[bodyIdx + 1]).toBe('Fixes #3 already');
+    });
+  });
+
+  describe('getProjectOverview', () => {
+    function scopedExec(onGraphql: (query: string) => { stdout: string } | Error) {
+      whenExec((_cmd, args) => {
+        if (args.includes('repo') && args.includes('view')) {
+          return { stdout: JSON.stringify({ owner: { login: 'o' }, name: 'r' }) };
+        }
+        if (args.includes('graphql')) {
+          const q = args.find((a) => a.startsWith('query=')) ?? '';
+          return onGraphql(q);
+        }
+        return { stdout: 'HTTP/2 200\nX-Oauth-Scopes: repo, project\n\n{}' };
+      });
+    }
+
+    it('maps metadata, visibility and views with normalized layouts + group fields', async () => {
+      scopedExec(() => ({
+        stdout: JSON.stringify({
+          data: {
+            node: {
+              id: 'PVT_1', number: 4, title: 'Roadmap', shortDescription: 'desc',
+              public: true, url: 'https://x/4', viewerCanUpdate: true,
+              views: {
+                nodes: [
+                  { id: 'V1', number: 1, name: 'Board', layout: 'BOARD_LAYOUT', verticalGroupByFields: { nodes: [{ name: 'Status' }] }, groupByFields: { nodes: [] } },
+                  { id: 'V2', number: 2, name: 'Table', layout: 'TABLE_LAYOUT', verticalGroupByFields: { nodes: [] }, groupByFields: { nodes: [{ name: 'Priority' }] } },
+                  { id: 'V3', number: 3, name: 'Plan', layout: 'ROADMAP_LAYOUT', verticalGroupByFields: { nodes: [] }, groupByFields: { nodes: [] } },
+                ],
+              },
+            },
+          },
+        }),
+      }));
+      const ov = await mod.getProjectOverview('p1', 'PVT_1', true);
+      expect(ov).toMatchObject({ id: 'PVT_1', number: 4, title: 'Roadmap', public: true, viewerCanUpdate: true });
+      expect(ov.views).toEqual([
+        { id: 'V1', number: 1, name: 'Board', layout: 'board', groupByField: 'Status' },
+        { id: 'V2', number: 2, name: 'Table', layout: 'table', groupByField: 'Priority' },
+        { id: 'V3', number: 3, name: 'Plan', layout: 'roadmap', groupByField: null },
+      ]);
+    });
+
+    it('throws not-found when the node is null', async () => {
+      scopedExec(() => ({ stdout: JSON.stringify({ data: { node: null } }) }));
+      await expect(mod.getProjectOverview('p1', 'MISSING', true)).rejects.toMatchObject({ code: 'not-found' });
+    });
+  });
+
+  describe('getProjectView', () => {
+    function scopedExec(dispatch: (query: string) => { stdout: string } | Error) {
+      whenExec((_cmd, args) => {
+        if (args.includes('repo') && args.includes('view')) {
+          return { stdout: JSON.stringify({ owner: { login: 'o' }, name: 'r' }) };
+        }
+        if (args.includes('graphql')) {
+          const q = args.find((a) => a.startsWith('query=')) ?? '';
+          return dispatch(q);
+        }
+        return { stdout: 'HTTP/2 200\nX-Oauth-Scopes: repo, project\n\n{}' };
+      });
+    }
+
+    it('resolves a board view: columns from the group field, items with status', async () => {
+      scopedExec((q) => {
+        if (q.includes('ProjectV2SingleSelectField')) {
+          return {
+            stdout: JSON.stringify({
+              data: {
+                node: {
+                  number: 4, title: 'Proj',
+                  fields: { nodes: [{ __typename: 'ProjectV2SingleSelectField', id: 'F_STATUS', name: 'Status', options: [{ id: 'OPT_TODO', name: 'Todo' }, { id: 'OPT_DONE', name: 'Done' }] }] },
+                  views: { nodes: [{ number: 1, name: 'Board', layout: 'BOARD_LAYOUT', verticalGroupByFields: { nodes: [{ name: 'Status' }] }, groupByFields: { nodes: [] } }] },
+                },
+              },
+            }),
+          };
+        }
+        // items page
+        return {
+          stdout: JSON.stringify({
+            data: {
+              node: {
+                items: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [
+                    {
+                      id: 'ITEM_1',
+                      fieldValues: { nodes: [{ __typename: 'ProjectV2ItemFieldSingleSelectValue', name: 'Todo', field: { name: 'Status' } }] },
+                      content: { __typename: 'Issue', number: 11, title: 'Bug', url: 'https://x/11', state: 'OPEN', assignees: { nodes: [] }, labels: { nodes: [] }, closedByPullRequestsReferences: { nodes: [] } },
+                    },
+                  ],
+                },
+              },
+            },
+          }),
+        };
+      });
+
+      const view = await mod.getProjectView('p1', 'PVT_1', 1, true);
+      expect(view).toMatchObject({ layout: 'board', groupFieldId: 'F_STATUS', groupFieldName: 'Status', viewNumber: 1, name: 'Board' });
+      expect(view.columns).toEqual([{ id: 'OPT_TODO', name: 'Todo' }, { id: 'OPT_DONE', name: 'Done' }]);
+      expect(view.items).toHaveLength(1);
+      expect(view.items[0]).toMatchObject({ itemId: 'ITEM_1', number: 11, status: 'Todo', state: 'open' });
+    });
+
+    it('derives roadmap start/target dates from date fields', async () => {
+      scopedExec((q) => {
+        if (q.includes('ProjectV2SingleSelectField')) {
+          return {
+            stdout: JSON.stringify({
+              data: {
+                node: {
+                  number: 4, title: 'Proj',
+                  fields: { nodes: [] },
+                  views: { nodes: [{ number: 2, name: 'Plan', layout: 'ROADMAP_LAYOUT', verticalGroupByFields: { nodes: [] }, groupByFields: { nodes: [] } }] },
+                },
+              },
+            }),
+          };
+        }
+        return {
+          stdout: JSON.stringify({
+            data: {
+              node: {
+                items: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [
+                    {
+                      id: 'ITEM_1',
+                      fieldValues: { nodes: [
+                        { __typename: 'ProjectV2ItemFieldDateValue', date: '2026-01-05', field: { name: 'Start Date' } },
+                        { __typename: 'ProjectV2ItemFieldDateValue', date: '2026-02-01', field: { name: 'Target Date' } },
+                      ] },
+                      content: { __typename: 'Issue', number: 3, title: 'Epic', url: 'https://x/3', state: 'OPEN', assignees: { nodes: [] }, labels: { nodes: [] }, closedByPullRequestsReferences: { nodes: [] } },
+                    },
+                  ],
+                },
+              },
+            },
+          }),
+        };
+      });
+      const view = await mod.getProjectView('p1', 'PVT_1', 2, true);
+      expect(view.layout).toBe('roadmap');
+      expect(view.items[0]).toMatchObject({ startDate: '2026-01-05', targetDate: '2026-02-01' });
+      expect(view.items[0].fields).toMatchObject({ 'Start Date': '2026-01-05', 'Target Date': '2026-02-01' });
+    });
+
+    it('throws not-found when the view number is unknown', async () => {
+      scopedExec(() => ({
+        stdout: JSON.stringify({ data: { node: { number: 4, title: 'Proj', fields: { nodes: [] }, views: { nodes: [] } } } }),
+      }));
+      await expect(mod.getProjectView('p1', 'PVT_1', 99, true)).rejects.toMatchObject({ code: 'not-found' });
+    });
+  });
+
+  describe('updateProjectMeta', () => {
+    function scopedExec(capture: (args: string[], query: string) => void) {
+      whenExec((_cmd, args) => {
+        if (args.includes('repo') && args.includes('view')) {
+          return { stdout: JSON.stringify({ owner: { login: 'o' }, name: 'r' }) };
+        }
+        if (args.includes('graphql')) {
+          const q = args.find((a) => a.startsWith('query=')) ?? '';
+          capture(args, q);
+          return { stdout: JSON.stringify({ data: { updateProjectV2: { projectV2: { id: 'PVT_1' } } } }) };
+        }
+        return { stdout: 'HTTP/2 200\nX-Oauth-Scopes: repo, project\n\n{}' };
+      });
+    }
+
+    it('builds a mutation only for provided fields and types the boolean', async () => {
+      let seenArgs: string[] = [];
+      let seenQuery = '';
+      scopedExec((args, q) => { seenArgs = args; seenQuery = q; });
+      await mod.updateProjectMeta('p1', 'PVT_1', { title: 'New', public: true });
+      expect(seenQuery).toContain('updateProjectV2');
+      expect(seenQuery).toContain('title:$title');
+      expect(seenQuery).toContain('public:$public');
+      expect(seenQuery).not.toContain('shortDescription');
+      const flat = seenArgs.join(' ');
+      expect(flat).toContain('title=New');
+      // boolean must be passed as a typed field (-F)
+      const fIdx = seenArgs.indexOf('public=true');
+      expect(seenArgs[fIdx - 1]).toBe('-F');
+    });
+
+    it('rejects when there is nothing to update', async () => {
+      scopedExec(() => {});
+      await expect(mod.updateProjectMeta('p1', 'PVT_1', {})).rejects.toMatchObject({ code: 'failed' });
     });
   });
 });

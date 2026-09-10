@@ -292,6 +292,8 @@ export interface Worktree {
   worktreePath: string;
   isManaged: boolean;
   type: WorktreeType;
+  /** GitHub issue number this worktree was created for, if any. */
+  issueNumber: number | null;
   createdAt: string;
 }
 
@@ -350,6 +352,33 @@ export interface GitHubProjectV2Summary {
   url: string;
   closed: boolean;
   ownerLogin: string;
+  /** Whether the board is publicly visible (else private to its owner/collaborators). */
+  public: boolean;
+}
+
+/** The layout GitHub renders a Projects V2 view with. */
+export type GitHubProjectViewLayout = 'board' | 'table' | 'roadmap';
+
+/** A saved view inside a Projects V2 project. */
+export interface GitHubProjectViewSummary {
+  id: string;
+  number: number;
+  name: string;
+  layout: GitHubProjectViewLayout;
+  /** Name of the field the view groups by (columns for board/roadmap), if any. */
+  groupByField: string | null;
+}
+
+/** Metadata + saved views for a single Projects V2 project. */
+export interface GitHubProjectOverview {
+  id: string;
+  number: number;
+  title: string;
+  shortDescription: string | null;
+  public: boolean;
+  url: string;
+  viewerCanUpdate: boolean;
+  views: GitHubProjectViewSummary[];
 }
 
 export interface GitHubMilestone {
@@ -387,6 +416,11 @@ export interface GitHubIssue {
   updatedAt: string;
 }
 
+/** A single issue with its full body (markdown) for the detail view. */
+export interface GitHubIssueDetail extends GitHubIssue {
+  body: string;
+}
+
 export interface GitHubPullRequest {
   number: number;
   title: string;
@@ -413,6 +447,12 @@ export interface GitHubBoardItem {
   labels: GitHubLabel[];
   /** PRs linked to this item (the item itself if a PR, or PRs closing its issue). */
   linkedPullRequests: GitHubPullRequest[];
+  /** Generic field values (field name → display string) for table/roadmap views. */
+  fields: Record<string, string>;
+  /** Roadmap start date (ISO), from a date/iteration field, if any. */
+  startDate: string | null;
+  /** Roadmap target/end date (ISO), from a date/iteration field, if any. */
+  targetDate: string | null;
 }
 
 /** A Status field option = a board column. */
@@ -427,6 +467,20 @@ export interface GitHubBoard {
   projectNumber: number;
   title: string;
   statusFieldId: string | null;
+  columns: GitHubBoardColumn[];
+  items: GitHubBoardItem[];
+}
+
+/** A resolved Projects V2 view: its layout, grouping field, columns and items. */
+export interface GitHubProjectView {
+  projectId: string;
+  projectNumber: number;
+  viewNumber: number;
+  name: string;
+  layout: GitHubProjectViewLayout;
+  /** The single-select field used for grouping (columns); null when none. */
+  groupFieldId: string | null;
+  groupFieldName: string | null;
   columns: GitHubBoardColumn[];
   items: GitHubBoardItem[];
 }

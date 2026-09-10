@@ -11,6 +11,7 @@ interface Worktree {
   name: string;
   branch: string;
   worktreePath: string;
+  issueNumber: number | null;
 }
 
 interface Project {
@@ -50,6 +51,7 @@ export default function WorktreeLayout({
           projectId={project.id}
           projectName={`${project.name} › ${worktree.name}`}
           repoPath={worktree.worktreePath}
+          worktree={{ id: worktree.id, branch: worktree.branch, issueNumber: worktree.issueNumber ?? null }}
           todoPanel={<ProjectTodoPanel projectId={project.id} projectName={project.name} />}
         >
           {children || <Outlet />}

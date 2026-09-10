@@ -98,6 +98,15 @@ function initSchema(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_project_github_projects_project_id ON project_github_projects(project_id);
 
+    CREATE TABLE IF NOT EXISTS project_view_names (
+      project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      gh_project_id TEXT NOT NULL,
+      view_number   INTEGER NOT NULL,
+      name          TEXT NOT NULL,
+      updated_at    TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (project_id, gh_project_id, view_number)
+    );
+
     CREATE TABLE IF NOT EXISTS worktrees (
       id            TEXT PRIMARY KEY,
       project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -289,6 +298,15 @@ function initSchema(db: Database.Database) {
   // Migration: add type column to worktrees ('worktree' for git worktrees, 'directory' for plain folders)
   if (!worktreeColNames.has('type')) {
     db.exec("ALTER TABLE worktrees ADD COLUMN type TEXT NOT NULL DEFAULT 'worktree'");
+  }
+
+  // Migration: link a worktree to the GitHub issue it was created for, plus a
+  // one-shot seed prompt that auto-starts the Copilot CLI session for that issue.
+  if (!worktreeColNames.has('issue_number')) {
+    db.exec('ALTER TABLE worktrees ADD COLUMN issue_number INTEGER');
+  }
+  if (!worktreeColNames.has('seed_prompt')) {
+    db.exec('ALTER TABLE worktrees ADD COLUMN seed_prompt TEXT');
   }
 
   // Migration: add daemon_session_id to report_runs

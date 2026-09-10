@@ -178,6 +178,7 @@ function rowToWorktree(row: Record<string, unknown>): Worktree {
     worktreePath: row.worktree_path as string,
     isManaged: (row.is_managed as number | undefined) !== 0,
     type: (row.type as WorktreeType | undefined) ?? 'worktree',
+    issueNumber: (row.issue_number as number | null | undefined) ?? null,
     createdAt: row.created_at as string,
   };
 }
@@ -225,6 +226,7 @@ export function createWorktree(
   name: string,
   branch: string,
   createNewBranch: boolean = false,
+  opts?: { issueNumber?: number | null; seedPrompt?: string | null },
 ): Worktree {
   const project = getProjectById(projectId);
   if (!project) throw new Error('Project not found');
@@ -264,10 +266,39 @@ export function createWorktree(
 
   const id = crypto.randomUUID();
   getDb()
-    .prepare('INSERT INTO worktrees (id, project_id, name, branch, worktree_path, is_managed) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(id, projectId, slug, branch.trim(), wtPath, 1);
+    .prepare('INSERT INTO worktrees (id, project_id, name, branch, worktree_path, is_managed, issue_number, seed_prompt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(id, projectId, slug, branch.trim(), wtPath, 1, opts?.issueNumber ?? null, opts?.seedPrompt ?? null);
 
   return getWorktreeById(id)!;
+}
+
+/**
+ * Create a managed worktree dedicated to a GitHub issue. Derives a branch
+ * (`issue-<number>-<slug>`) off the current HEAD, records the issue number,
+ * and stores a one-shot seed prompt that the CLI session auto-runs.
+ */
+export function createWorktreeForIssue(
+  projectId: string,
+  issueNumber: number,
+  issueTitle: string,
+  seedPrompt: string,
+): Worktree {
+  const titleSlug = sanitizeWorktreeName(issueTitle).slice(0, 40).replace(/-$/, '');
+  const branch = `issue-${issueNumber}${titleSlug ? `-${titleSlug}` : ''}`;
+  const name = `issue-${issueNumber}`;
+  return createWorktree(projectId, name, branch, true, { issueNumber, seedPrompt });
+}
+
+/** Return and clear the one-shot seed prompt for a worktree (consumed once). */
+export function consumeWorktreeSeed(worktreeId: string): string | null {
+  const row = getDb()
+    .prepare('SELECT seed_prompt FROM worktrees WHERE id = ?')
+    .get(worktreeId) as { seed_prompt: string | null } | undefined;
+  const seed = row?.seed_prompt ?? null;
+  if (seed) {
+    getDb().prepare('UPDATE worktrees SET seed_prompt = NULL WHERE id = ?').run(worktreeId);
+  }
+  return seed;
 }
 
 export function attachExistingWorktree(
@@ -355,6 +386,14 @@ export function getWorktreeById(id: string): Worktree | null {
   const row = getDb()
     .prepare('SELECT * FROM worktrees WHERE id = ?')
     .get(id) as Record<string, unknown> | undefined;
+  return row ? rowToWorktree(row) : null;
+}
+
+/** Find the worktree created for a given issue number (for resume), if any. */
+export function getWorktreeByIssueNumber(projectId: string, issueNumber: number): Worktree | null {
+  const row = getDb()
+    .prepare('SELECT * FROM worktrees WHERE project_id = ? AND issue_number = ? ORDER BY created_at LIMIT 1')
+    .get(projectId, issueNumber) as Record<string, unknown> | undefined;
   return row ? rowToWorktree(row) : null;
 }
 

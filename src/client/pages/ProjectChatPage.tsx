@@ -140,7 +140,7 @@ function findSafeSlicePoint(str: string, pos: number): number {
  * Output is written directly to xterm (no React state accumulation).
  */
 const TerminalTab = React.memo(function TerminalTab({
-  projectId, worktreeId, fontSize, fontFamily, themeName, active, forceNew, mode, sessionId: initialSessionId, onStatusChange, onKill, onSessionId, onTermApi, visible = true,
+  projectId, worktreeId, fontSize, fontFamily, themeName, active, forceNew, mode, sessionId: initialSessionId, onStatusChange, onKill, onSessionId, onTermApi, visible = true, seedInput,
 }: {
   projectId?: string;
   worktreeId?: string;
@@ -157,10 +157,14 @@ const TerminalTab = React.memo(function TerminalTab({
   onTermApi?: (api: TerminalPaneAPI) => void;
   /** Whether this terminal's project is currently visible on screen */
   visible?: boolean;
+  /** One-shot text to type into the CLI once it's ready (auto-run an issue prompt). */
+  seedInput?: string;
 }) {
   const sessionIdRef = useRef<string | null>(initialSessionId ?? null);
   const termApiRef = useRef<TerminalPaneAPI | null>(null);
   const pendingOutput = useRef<string[]>([]);
+  const seededRef = useRef(false);
+  const [seedReady, setSeedReady] = useState(false);
 
   const visibleAndActiveRef = useRef(visible && active);
   visibleAndActiveRef.current = visible && active;
@@ -245,8 +249,20 @@ const TerminalTab = React.memo(function TerminalTab({
       sessionIdRef.current = sid;
       onSessionId?.(sid);
       if (termApiRef.current) termApiRef.current.fit();
+      setSeedReady(true);
     },
   });
+
+  // One-shot seed: once the CLI session is ready, wait for the TUI to boot then
+  // type the seeded issue prompt and submit it (fully hands-off issue start).
+  useEffect(() => {
+    if (!seedInput || seededRef.current || !seedReady) return;
+    seededRef.current = true;
+    const timer = setTimeout(() => {
+      send({ type: 'input', data: `${seedInput}\r` });
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [seedInput, seedReady, send]);
 
   const handleTermReady = useCallback((api: TerminalPaneAPI) => {
     console.log(`[TerminalTab] handleTermReady called, pending=${pendingOutput.current.length}`);
@@ -414,6 +430,23 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   const termApiRefsMap = useRef<Record<string, TerminalPaneAPI>>({});
   const statusCallbacksRef = useRef<Record<string, (status: string) => void>>({});
   const sessionIdCallbacksRef = useRef<Record<string, (sid: string) => void>>({});
+
+  // One-shot issue seed: when this is a worktree created from an issue, the
+  // server holds a prompt to auto-run in the first CLI tab. Consume it once.
+  const [seed, setSeed] = useState<string | null>(null);
+  useEffect(() => {
+    if (!worktreeId || !projectId) return;
+    let cancelled = false;
+    fetch(`/api/projects/${projectId}/worktrees/${worktreeId}/seed`)
+      .then((r) => (r.ok ? r.json() : { seed: null }))
+      .then((d: { seed: string | null }) => {
+        if (!cancelled && d.seed) setSeed(d.seed);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [worktreeId, projectId]);
 
   // Persist tab state whenever it changes (in-memory + localStorage)
   useEffect(() => {
@@ -937,6 +970,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
               mode={tab.mode || 'cli'}
               sessionId={tab.sessionId}
               visible={visible}
+              seedInput={tab.mode === 'cli' && tab.id === firstTabId.current ? seed ?? undefined : undefined}
               onStatusChange={statusCallbacksRef.current[tab.id]}
               onKill={killCallbacksRef.current[tab.id]}
               onSessionId={sessionIdCallbacksRef.current[tab.id]}
