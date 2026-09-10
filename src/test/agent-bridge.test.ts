@@ -12,6 +12,7 @@ import {
   eventTs,
   emptyAgentUsage,
   cwdMatches,
+  buildToolsForKind,
   type AgentSession,
   type AgentSubscriber,
 } from '../shared/agent-bridge';
@@ -39,6 +40,7 @@ function makeSession(): { session: AgentSession; messages: AgentServerMessage[] 
     toolReconcileInFlight: false,
     assistantByMessageId: new Map<string, string>(),
     assistantStartTs: new Map<string, number>(),
+    turnStartTs: null,
     toolByCallId: new Map<string, string>(),
     share: { mode: 'off', steerable: false },
     usage: emptyAgentUsage(),
@@ -331,6 +333,31 @@ describe('event timestamps and durations', () => {
     expect(entry?.kind === 'assistant' && entry.durationMs).toBe(4_500);
   });
 
+  it('measures assistant duration from the user request, not the first token', () => {
+    const { session } = makeSession();
+    const ask = '2024-05-01T10:20:00.000Z';
+    const start = '2024-05-01T10:20:30.000Z';
+    const end = '2024-05-01T10:20:34.500Z';
+    handleSdkEvent(session, ev('user.message', 'u1', { content: 'hi' }, ask));
+    handleSdkEvent(session, ev('assistant.message_start', 'a0', { messageId: 'm1' }, start));
+    handleSdkEvent(session, ev('assistant.message', 'a1', { messageId: 'm1', content: 'done' }, end));
+    const entry = session.transcript.find((e) => e.kind === 'assistant');
+    // 34.5s of round trip from the moment the user asked, not 4.5s of tokens.
+    expect(entry?.kind === 'assistant' && entry.durationMs).toBe(34_500);
+  });
+
+  it('reports the turn start time with the busy status and clears it when idle', () => {
+    const { session, messages } = makeSession();
+    const ask = '2024-05-01T10:20:00.000Z';
+    handleSdkEvent(session, ev('user.message', 'u1', { content: 'hi' }, ask));
+    handleSdkEvent(session, ev('assistant.turn_start', 'a0', {}, ask));
+    expect(messages).toContainEqual({ type: 'status', status: 'busy', turnStartedAt: Date.parse(ask) });
+
+    handleSdkEvent(session, ev('session.idle', 'i0', {}, ask));
+    expect(messages).toContainEqual({ type: 'status', status: 'idle', turnStartedAt: null });
+    expect(session.turnStartTs).toBeNull();
+  });
+
   it('derives tool duration from execution_start to execution_complete', () => {
     const { session } = makeSession();
     const start = '2024-05-01T10:20:30.000Z';
@@ -485,7 +512,7 @@ describe('busy watchdog', () => {
     await checkBusyLiveness(session);
 
     expect(session.status).toBe('idle');
-    expect(messages).toContainEqual({ type: 'status', status: 'idle' });
+    expect(messages).toContainEqual({ type: 'status', status: 'idle', turnStartedAt: null });
     expect(session.transcript.some((e) => e.kind === 'notice')).toBe(true);
   });
 
@@ -547,5 +574,41 @@ describe('session cwd matching', () => {
 
   it('ignores sessions with no recorded working directory', () => {
     expect(cwdMatches(undefined, root)).toBe(false);
+  });
+});
+
+describe('buildToolsForKind', () => {
+  // Regression coverage for a bug where resuming a session after a server
+  // restart lost its tools: the SDK negotiates tool availability per
+  // connection, and `resumeAgentSession` was hardcoding kind 'agent' and
+  // never passing `tools` to `client.resumeSession`. Any session that needed
+  // a tool call (worktree/merge/project-lead/chief-of-staff sessions) would
+  // then silently stall or error on the next turn — the "dead after restart"
+  // symptom. `createAgentSession` and `resumeAgentSession` both now derive
+  // their tool set from this single helper so they can never drift apart.
+  it('gives chief_of_staff sessions the chief-of-staff tool set regardless of scope', () => {
+    const tools = buildToolsForKind('chief_of_staff', null, null);
+    expect(tools).toBeDefined();
+    expect(tools!.length).toBeGreaterThan(0);
+  });
+
+  it('gives project_lead sessions the project-lead tool set when a projectId is present', () => {
+    const tools = buildToolsForKind('project_lead', 'proj-1', null);
+    expect(tools).toBeDefined();
+    expect(tools!.length).toBeGreaterThan(0);
+  });
+
+  it('gives project_lead sessions no tools when projectId is missing', () => {
+    expect(buildToolsForKind('project_lead', null, null)).toBeUndefined();
+  });
+
+  it('gives plain agent sessions worktree + merge tools when scoped to a worktree', () => {
+    const tools = buildToolsForKind('agent', null, 'wt-1');
+    expect(tools).toBeDefined();
+    expect(tools!.length).toBeGreaterThan(0);
+  });
+
+  it('gives plain agent sessions with no worktree no extra tools', () => {
+    expect(buildToolsForKind('agent', null, null)).toBeUndefined();
   });
 });

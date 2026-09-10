@@ -1,11 +1,11 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useParams } from 'react-router';
 import { useCliSocket } from '../hooks/useCliSocket';
 import TerminalPane, { type TerminalPaneAPI, TERMINAL_FONTS } from '../components/terminal/TerminalPane';
 import NewTabMenu from '../components/terminal/NewTabMenu';
 import AgentPane from '../components/terminal/AgentPane';
 import { Button } from '../components/ui/button';
-import { Square, Minus, Plus, Palette, Type, X as XIcon, Terminal, Bot, GitCommitHorizontal, GitBranch, FolderOpen, RotateCcw, Sparkles } from 'lucide-react';
+import { Square, Minus, Plus, Palette, Type, X as XIcon, Terminal, SquareTerminal, Bot, GitCommitHorizontal, GitBranch, FolderOpen, RotateCcw, Sparkles, ExternalLink } from 'lucide-react';
 import { THEMES } from '../lib/terminal-themes';
 import GitLogTab from '../components/project/GitLogTab';
 import GitPanel from '../components/project/GitPanel';
@@ -16,11 +16,17 @@ import { useProjectSplit, splitGroupCount } from '../lib/project-split-context';
 interface TabMeta {
   id: string;
   label: string;
-  mode: 'cli' | 'shell' | 'powershell' | 'agent' | 'git' | 'git-status' | 'files';
+  mode: 'cli' | 'cli-classic' | 'shell' | 'powershell' | 'agent' | 'git' | 'git-status' | 'files';
   themeName: string;
   fontFamily: string;
   sessionId?: string;
   group: number;
+}
+
+interface DetachedTabConfig {
+  mode: TabMeta['mode'];
+  sessionId?: string;
+  label?: string;
 }
 
 let tabCounter = 0;
@@ -77,6 +83,38 @@ function rehydrateTabs(tabs: TabMeta[]): TabMeta[] {
   });
 }
 
+function defaultTabLabel(mode: TabMeta['mode'], n: number): string {
+  if (mode === 'shell') return `Shell ${n}`;
+  if (mode === 'powershell') return `PS ${n}`;
+  if (mode === 'agent') return `Agent ${n}`;
+  if (mode === 'git') return `Git Log ${n}`;
+  if (mode === 'git-status') return `Git Status ${n}`;
+  if (mode === 'files') return `Files ${n}`;
+  if (mode === 'cli-classic') return `Copilot (classic) ${n}`;
+  return `Copilot ${n}`;
+}
+
+function parseDetachedTabConfig(search: string): DetachedTabConfig | null {
+  const params = new URLSearchParams(search);
+  if (params.get('detachedTab') !== '1') return null;
+  const mode = params.get('mode');
+  if (
+    mode !== 'cli' &&
+    mode !== 'cli-classic' &&
+    mode !== 'shell' &&
+    mode !== 'powershell' &&
+    mode !== 'agent' &&
+    mode !== 'git' &&
+    mode !== 'git-status' &&
+    mode !== 'files'
+  ) {
+    return null;
+  }
+  const sessionId = params.get('sessionId')?.trim() || undefined;
+  const label = params.get('label')?.trim() || undefined;
+  return { mode, sessionId, label };
+}
+
 const MAX_HIDDEN_BUFFER = 100_000; // chars to retain for hidden terminals
 
 /**
@@ -111,7 +149,7 @@ const TerminalTab = React.memo(function TerminalTab({
   themeName: string;
   active: boolean;
   forceNew: boolean;
-  mode: 'cli' | 'shell' | 'powershell';
+  mode: 'cli' | 'cli-classic' | 'shell' | 'powershell';
   sessionId?: string;
   onStatusChange: (status: string) => void;
   onKill: (sessionId: string | null) => void;
@@ -267,7 +305,10 @@ const TerminalTab = React.memo(function TerminalTab({
 
 export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, cwd, visible = true }: { worktreeId?: string; projectId?: string; cwd?: string; visible?: boolean }) {
   const { id: routeProjectId } = useParams<{ id: string }>();
+  const location = useLocation();
   const projectId = projectIdProp || routeProjectId;
+  const detachedTabConfig = useMemo(() => parseDetachedTabConfig(location.search), [location.search]);
+  const isDetachedTabView = Boolean(detachedTabConfig);
 
   // Use cwd as the tab state key for clean directory-based separation;
   // falls back to projectId if cwd is not available
@@ -278,6 +319,18 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
 
   // Restore persisted tab state for this context, or create fresh
   const [tabs, setTabs] = useState<TabMeta[]>(() => {
+    if (detachedTabConfig) {
+      tabCounter++;
+      return [{
+        id: `tab-${tabCounter}`,
+        label: detachedTabConfig.label || defaultTabLabel(detachedTabConfig.mode, tabCounter),
+        mode: detachedTabConfig.mode,
+        themeName: defaultTheme,
+        fontFamily: defaultFont,
+        sessionId: detachedTabConfig.sessionId,
+        group: 1,
+      }];
+    }
     // 1. In-memory cache (fastest — survives route changes)
     const mem = tabStateKey ? projectTabStates.get(tabStateKey) : null;
     if (mem && mem.tabs.length > 0) return mem.tabs;
@@ -332,6 +385,10 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   // Active tab per group: Record<groupNumber, tabId>
   const [activeTabIds, setActiveTabIds] = useState<Record<number, string>>(() => {
     const result: Record<number, string> = {};
+    if (detachedTabConfig) {
+      result[1] = tabs[0]?.id ?? '';
+      return result;
+    }
     // Try to restore active tab from persistence for group 1
     const mem = tabStateKey ? projectTabStates.get(tabStateKey) : null;
     if (mem?.activeTabId) {
@@ -360,12 +417,13 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
 
   // Persist tab state whenever it changes (in-memory + localStorage)
   useEffect(() => {
+    if (isDetachedTabView) return;
     if (tabStateKey) {
       const state = { tabs, activeTabId: activeTabIds[1] || '', fontSize, themeName: projectThemeName, fontFamily: projectFontFamily };
       projectTabStates.set(tabStateKey, state);
       saveTabState(tabStateKey, state);
     }
-  }, [tabStateKey, tabs, activeTabIds, fontSize, projectThemeName, projectFontFamily]);
+  }, [isDetachedTabView, tabStateKey, tabs, activeTabIds, fontSize, projectThemeName, projectFontFamily]);
 
   // Also persist global font size for migration/fallback
   useEffect(() => {
@@ -409,6 +467,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   // against the server. When no tabs exist, create tabs from active sessions.
   const resumeCheckedRef = useRef(false);
   useEffect(() => {
+    if (isDetachedTabView) return;
     if (resumeCheckedRef.current) return;
     if (!projectId) return;
     // Skip if tabs came from in-memory cache (sessions are already live)
@@ -446,7 +505,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
               }
               // No sessionId — try to match by mode
               const match = matching.find(s => {
-                const sMode = (s.mode === 'shell' || s.mode === 'powershell') ? s.mode : 'cli';
+                const sMode = (s.mode === 'shell' || s.mode === 'powershell' || s.mode === 'cli-classic') ? s.mode : 'cli';
                 return sMode === tab.mode && !usedSessionIds.has(s.sessionId);
               });
               if (match) {
@@ -461,8 +520,8 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
           if (matching.length === 0) return prev;
           const newTabs: TabMeta[] = matching.map(s => {
             tabCounter++;
-            const mode = (s.mode === 'shell' || s.mode === 'powershell') ? s.mode : 'cli';
-            const label = mode === 'shell' ? `Shell ${tabCounter}` : mode === 'powershell' ? `PS ${tabCounter}` : `Copilot ${tabCounter}`;
+            const mode = (s.mode === 'shell' || s.mode === 'powershell' || s.mode === 'cli-classic') ? s.mode : 'cli';
+            const label = defaultTabLabel(mode, tabCounter);
             return { id: `tab-${tabCounter}`, label, mode, themeName: defaultTheme, fontFamily: defaultFont, sessionId: s.sessionId, group: 1 as const };
           });
           return newTabs;
@@ -473,15 +532,28 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
         });
       })
       .catch(() => {});
-  }, [projectId, worktreeId, tabStateKey, defaultTheme, defaultFont]);
+  }, [isDetachedTabView, projectId, worktreeId, tabStateKey, defaultTheme, defaultFont]);
 
-  const addTab = useCallback((mode: 'cli' | 'shell' | 'powershell' | 'agent' | 'git' | 'git-status' | 'files' = 'cli', targetGroup: number = 1) => {
+  const addTab = useCallback((mode: TabMeta['mode'] = 'cli', targetGroup: number = 1) => {
     tabCounter++;
-    const label = mode === 'shell' ? `Shell ${tabCounter}` : mode === 'powershell' ? `PS ${tabCounter}` : mode === 'agent' ? `Agent ${tabCounter}` : mode === 'git' ? `Git Log ${tabCounter}` : mode === 'git-status' ? `Git Status ${tabCounter}` : mode === 'files' ? `Files ${tabCounter}` : `Copilot ${tabCounter}`;
+    const label = defaultTabLabel(mode, tabCounter);
     const newTab: TabMeta = { id: `tab-${tabCounter}`, label, mode, themeName: defaultTheme, fontFamily: defaultFont, group: targetGroup };
     setTabs(prev => [...prev, newTab]);
     setActiveTabIds(prev => ({ ...prev, [targetGroup]: newTab.id }));
   }, [defaultTheme, defaultFont]);
+
+  const openTabInBrowserTab = useCallback((tab: TabMeta) => {
+    if (!projectId) return;
+    const basePath = worktreeId
+      ? `/projects/${projectId}/worktrees/${worktreeId}/chat`
+      : `/projects/${projectId}/chat`;
+    const params = new URLSearchParams();
+    params.set('detachedTab', '1');
+    params.set('mode', tab.mode);
+    if (tab.sessionId) params.set('sessionId', tab.sessionId);
+    if (tab.label) params.set('label', tab.label);
+    window.open(`${basePath}?${params.toString()}`, '_blank', 'noopener,noreferrer');
+  }, [projectId, worktreeId]);
 
   const moveTab = useCallback((sourceId: string, targetId: string) => {
     if (sourceId === targetId) return;
@@ -619,6 +691,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
             const tabIcon = tab.mode === 'powershell'
               ? <span className="h-3 w-3 text-[9px] font-bold leading-3 text-center shrink-0">PS</span>
               : tab.mode === 'shell' ? <Terminal className="h-3 w-3 shrink-0" />
+              : tab.mode === 'cli-classic' ? <SquareTerminal className="h-3 w-3 shrink-0" />
               : tab.mode === 'git' ? <GitCommitHorizontal className="h-3 w-3 shrink-0" />
               : tab.mode === 'git-status' ? <GitBranch className="h-3 w-3 shrink-0" />
               : tab.mode === 'files' ? <FolderOpen className="h-3 w-3 shrink-0" />
@@ -675,6 +748,16 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
                 {!isUtilTab && <div className={`h-1.5 w-1.5 rounded-full ${stColor}`} />}
                 {tabIcon}
                 <span className="truncate max-w-[100px]">{tab.label}</span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openTabInBrowserTab(tab);
+                  }}
+                  className="h-4 w-4 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-muted"
+                  title="Open this tab in a new browser tab"
+                >
+                  <ExternalLink className="h-3 w-3" />
+                </button>
                 <button
                   onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
                   className={`h-4 w-4 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-muted`}
@@ -885,6 +968,17 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
             <div>
               <div className="text-sm font-medium">Copilot CLI</div>
               <div className="text-[10px] text-muted-foreground">AI-powered terminal</div>
+            </div>
+          </button>
+          <button
+            onClick={() => addTab('cli-classic')}
+            className="flex flex-col items-center gap-2 rounded-lg border p-4 hover:bg-accent hover:text-accent-foreground transition-colors"
+            title="Same Copilot CLI, but reports an accurate terminal identity (TERM=xterm-256color) — fixes scrollback glitches at the cost of re-exposing any TUI rendering bugs the default was working around."
+          >
+            <SquareTerminal className="h-6 w-6" />
+            <div>
+              <div className="text-sm font-medium">Copilot CLI (classic)</div>
+              <div className="text-[10px] text-muted-foreground">True TTY identity</div>
             </div>
           </button>
           <button

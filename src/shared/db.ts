@@ -98,6 +98,98 @@ function initSchema(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_worktrees_project_id ON worktrees(project_id);
 
+    CREATE TABLE IF NOT EXISTS agent_digests (
+      worktree_id   TEXT PRIMARY KEY REFERENCES worktrees(id) ON DELETE CASCADE,
+      project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      headline      TEXT,
+      status        TEXT,
+      detail        TEXT,
+      scope         TEXT,
+      touched_files TEXT,
+      risk_notes    TEXT,
+      stuck_since   TEXT,
+      updated_at    TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_digests_project_id ON agent_digests(project_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_digests_status ON agent_digests(status);
+
+    CREATE TABLE IF NOT EXISTS project_audit_log (
+      id          TEXT PRIMARY KEY,
+      project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      actor       TEXT NOT NULL,
+      action      TEXT NOT NULL,
+      reasoning   TEXT,
+      risk_level  TEXT,
+      created_at  TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_project_audit_log_project_id ON project_audit_log(project_id);
+
+    CREATE TABLE IF NOT EXISTS decision_threads (
+      id                      TEXT PRIMARY KEY,
+      project_id              TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      title                   TEXT,
+      question                TEXT NOT NULL,
+      status                  TEXT NOT NULL DEFAULT 'open',
+      session_id              TEXT,
+      decision                TEXT,
+      rationale               TEXT,
+      alternatives_considered TEXT,
+      user_verdict            TEXT,
+      follow_up_actions       TEXT,
+      created_at              TEXT DEFAULT (datetime('now')),
+      updated_at              TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_decision_threads_project_id ON decision_threads(project_id);
+
+    CREATE TABLE IF NOT EXISTS project_autonomy_settings (
+      project_id        TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      merge_mode        TEXT NOT NULL DEFAULT 'advisory',
+      intervention_mode TEXT NOT NULL DEFAULT 'flag_only',
+      dnd               INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS merge_locks (
+      project_id         TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      held_by_worktree_id TEXT REFERENCES worktrees(id) ON DELETE SET NULL,
+      held_since         TEXT,
+      expires_at         TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS merge_requests (
+      id            TEXT PRIMARY KEY,
+      project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      worktree_id   TEXT NOT NULL UNIQUE REFERENCES worktrees(id) ON DELETE CASCADE,
+      branch        TEXT NOT NULL,
+      status        TEXT NOT NULL DEFAULT 'pending',
+      priority      TEXT NOT NULL DEFAULT 'normal',
+      requested_at  TEXT DEFAULT (datetime('now')),
+      resolved_at   TEXT,
+      summary       TEXT,
+      lead_note     TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_merge_requests_project_id ON merge_requests(project_id);
+    CREATE INDEX IF NOT EXISTS idx_merge_requests_status ON merge_requests(status);
+
+    CREATE TABLE IF NOT EXISTS project_memory (
+      project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      summary    TEXT NOT NULL,
+      source     TEXT,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS cos_briefings (
+      id         TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      summary    TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cos_briefings_project_id ON cos_briefings(project_id);
+
     CREATE TABLE IF NOT EXISTS report_schedules (
       id                TEXT PRIMARY KEY,
       name              TEXT NOT NULL,

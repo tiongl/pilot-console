@@ -52,6 +52,16 @@ export interface CreateCmd {
   cols: number;
   rows: number;
   meta?: SessionMeta;
+  /**
+   * Override the PTY's reported terminal type (node-pty's `name` param).
+   * When unset, the daemon uses its platform default (blank on Windows, to
+   * avoid ConPTY/ink rendering bugs; `xterm-256color` elsewhere). Set this to
+   * `xterm-256color` for a "classic terminal" session that identifies itself
+   * accurately to the child process, matching what xterm.js actually renders
+   * — at the cost of re-exposing whatever TUI rendering bugs that mismatch
+   * was working around.
+   */
+  ptyName?: string;
 }
 
 export interface WriteCmd {

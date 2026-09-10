@@ -10,6 +10,7 @@ import * as net from 'net';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
 import * as pty from 'node-pty';
+import { StringDecoder } from 'string_decoder';
 import {
   DAEMON_SOCKET_PATH,
   DAEMON_SECRET_PATH,
@@ -69,13 +70,22 @@ const ENV_STRIP_EXACT = new Set([
   ...(os.platform() === 'win32' ? ['TERM', 'TERM_PROGRAM', 'TERM_PROGRAM_VERSION'] : []),
 ]);
 
-function cleanEnvForChild(): Record<string, string> {
+function cleanEnvForChild(termOverride?: string): Record<string, string> {
   const clean: Record<string, string> = {};
   for (const [key, val] of Object.entries(process.env)) {
     if (val === undefined) continue;
     if (ENV_STRIP_EXACT.has(key)) continue;
     if (ENV_STRIP_PREFIXES.some(p => key.startsWith(p))) continue;
     clean[key] = val;
+  }
+  // A "classic terminal" session asks to present an accurate terminal
+  // identity to the child process (matching what xterm.js actually renders)
+  // instead of the blanked-out default used to dodge ink/ConPTY rendering
+  // bugs. node-pty's Windows backend does not derive TERM from its `name`
+  // spawn option (unlike the Unix backend), so it must be set here instead.
+  if (termOverride) {
+    clean.TERM = termOverride;
+    clean.COLORTERM = 'truecolor';
   }
   return clean;
 }
@@ -99,6 +109,28 @@ function writeSecret() {
 
 const authenticatedClients = new WeakSet<net.Socket>();
 
+/**
+ * Trims scrollback to at most MAX_SCROLLBACK chars without cutting in the
+ * middle of an ANSI escape sequence. A naive `.slice(-MAX_SCROLLBACK)` can
+ * land inside a control sequence (e.g. leaving a dangling "31m" from a
+ * truncated "\x1b[31m"), which renders as garbled literal text at the top
+ * of the scrollback when a client later replays the buffer. Scanning
+ * forward a short distance for the next escape or newline gives a safe cut
+ * point at the cost of at most a few extra characters of retained history.
+ */
+function trimScrollback(buffer: string): string {
+  if (buffer.length <= MAX_SCROLLBACK) return buffer;
+  const naiveCut = buffer.length - MAX_SCROLLBACK;
+  const lookaheadEnd = Math.min(buffer.length, naiveCut + 256);
+  for (let i = naiveCut; i < lookaheadEnd; i++) {
+    const ch = buffer.charCodeAt(i);
+    if (ch === 0x1b /* ESC */ || ch === 0x0a /* \n */) {
+      return buffer.slice(i);
+    }
+  }
+  return buffer.slice(naiveCut);
+}
+
 // ---------------------------------------------------------------------------
 // Per-client NDJSON parser
 // ---------------------------------------------------------------------------
@@ -106,9 +138,14 @@ const authenticatedClients = new WeakSet<net.Socket>();
 function setupClient(socket: net.Socket) {
   socket.setNoDelay(true);
   let buffer = '';
+  // See daemon/client.ts: use StringDecoder so a UTF-8 multi-byte character
+  // split across TCP chunk boundaries isn't corrupted into U+FFFD before the
+  // halves are reassembled. This matters for `write` commands carrying
+  // pasted/typed Unicode (e.g. non-ASCII input) into the PTY.
+  const decoder = new StringDecoder('utf8');
 
   socket.on('data', (chunk) => {
-    buffer += chunk.toString();
+    buffer += decoder.write(chunk);
     let newlineIdx: number;
     while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
       const line = buffer.slice(0, newlineIdx);
@@ -194,11 +231,11 @@ function handleAuth(socket: net.Socket, cmd: DaemonCommand & { cmd: 'auth' }) {
 function handleCreate(socket: net.Socket, cmd: DaemonCommand & { cmd: 'create' }) {
   try {
     const proc = pty.spawn(cmd.shell, cmd.args, {
-      name: PTY_NAME,
+      name: cmd.ptyName || PTY_NAME,
       cols: cmd.cols,
       rows: cmd.rows,
       cwd: cmd.cwd,
-      env: cleanEnvForChild(),
+      env: cleanEnvForChild(cmd.ptyName),
     });
 
     const session: DaemonSession = {
@@ -220,7 +257,7 @@ function handleCreate(socket: net.Socket, cmd: DaemonCommand & { cmd: 'create' }
     proc.onData((data: string) => {
       session.outputBuffer += data;
       if (session.outputBuffer.length > MAX_SCROLLBACK) {
-        session.outputBuffer = session.outputBuffer.slice(-MAX_SCROLLBACK);
+        session.outputBuffer = trimScrollback(session.outputBuffer);
       }
       session.lastOutputAt = Date.now();
       session.seq++;

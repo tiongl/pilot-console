@@ -15,9 +15,13 @@ import { createProject, listProjects, getProjectById, updateProject, deleteProje
 import { listSessionsForUser, listAllSessions, getCopilotSessionDetail, listCopilotSessionsForProject } from '../shared/session-store';
 import { setupWebSocketServer } from './websocket';
 import { setupAgentWebSocketServer } from './agent-websocket';
-import { listAgentModels, detachAgentBridge } from '../shared/agent-bridge';
+import { listAgentModels, detachAgentBridge, listLiveAgentSessions } from '../shared/agent-bridge';
 import { getAllSessions, getAllSessionsWithExited, getSessionStatus, endCliSession, endSessionByProject, initDaemonBridge } from '../shared/cli-bridge';
 import { getDb } from '../shared/db';
+import { getDigest, listDigests, bootstrapDigest, reconcileDigest } from '../shared/digest-store';
+import { listMergeRequests, getMergeRequest, setMergePriority, resolveMergeRequest, releaseMergeLock, getMergeLock, executeApprovedMerge } from '../shared/merge-store';
+import { getOrBootstrapProjectMemory, refreshProjectMemory } from '../shared/project-memory-store';
+import { listCosBriefings, listCosBriefingsForProject } from '../shared/cos-briefing-store';
 import { revealPathInFileSystem } from './file-system';
 import scheduleRoutes from './routes/schedules';
 import { startScheduler } from './scheduler';
@@ -94,6 +98,51 @@ app.get('/api/projects', (req, res) => {
   const db = getDb();
   const projects = db.prepare('SELECT id, name, repo_path as repoPath, description, pinned, sort_order as sortOrder, created_at as createdAt FROM projects ORDER BY pinned DESC, sort_order, name').all();
   res.json({ projects });
+});
+
+app.get('/api/chief-of-staff/overview', (_req, res) => {
+  const db = getDb();
+  const projects = db.prepare('SELECT id, name FROM projects ORDER BY name').all() as Array<{ id: string; name: string }>;
+  const projectNames = new Map(projects.map((project) => [project.id, project.name]));
+  const workers = listLiveAgentSessions()
+    .filter((session) => session.kind === 'agent' && session.worktreeId)
+    .map((session) => ({
+      ...session,
+      projectName: session.projectId ? projectNames.get(session.projectId) ?? session.projectId : 'Unknown project',
+    }));
+  const leadSessions = listLiveAgentSessions()
+    .filter((session) => session.kind === 'project_lead')
+    .map((session) => ({
+      ...session,
+      projectName: session.projectId ? projectNames.get(session.projectId) ?? session.projectId : 'Unknown project',
+    }));
+  const digests = db.prepare(`
+    SELECT d.worktree_id as worktreeId, d.project_id as projectId, w.name as worktreeName,
+           d.headline, d.status, d.detail, d.updated_at as updatedAt
+    FROM agent_digests d
+    JOIN worktrees w ON w.id = d.worktree_id
+    ORDER BY d.updated_at DESC
+    LIMIT 50
+  `).all() as Array<Record<string, unknown>>;
+  const threads = db.prepare(`
+    SELECT dt.id, dt.project_id as projectId, p.name as projectName, dt.title,
+           dt.question, dt.status, dt.updated_at as updatedAt
+    FROM decision_threads dt
+    JOIN projects p ON p.id = dt.project_id
+    WHERE dt.status NOT IN ('confirmed', 'closed', 'resolved')
+    ORDER BY dt.updated_at DESC
+    LIMIT 25
+  `).all();
+  const history = db.prepare(`
+    SELECT a.id, a.project_id as projectId, p.name as projectName, a.actor,
+           a.action, a.reasoning, a.risk_level as riskLevel, a.created_at as createdAt
+    FROM project_audit_log a
+    JOIN projects p ON p.id = a.project_id
+    ORDER BY a.created_at DESC
+    LIMIT 25
+  `).all();
+  const briefings = listCosBriefings(25);
+  res.json({ workers, leadSessions, digests, threads, history, briefings });
 });
 
 app.post('/api/projects', (req, res) => {
@@ -180,6 +229,265 @@ app.get('/api/projects/:id/worktrees/:worktreeId', (req, res) => {
     return;
   }
   res.json(wt);
+});
+
+app.get('/api/projects/:id/digests', (req, res) => {
+  try {
+    const digests = listDigests(req.params.id);
+    res.json({ digests });
+  } catch (err) {
+    res.status(404).json({ error: (err as Error).message });
+  }
+});
+
+app.get('/api/projects/:id/audit-log', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+  const entries = getDb().prepare(
+    'SELECT * FROM project_audit_log WHERE project_id = ? ORDER BY created_at DESC LIMIT ?',
+  ).all(req.params.id, limit);
+  res.json({ entries });
+});
+
+app.get('/api/projects/:id/memory', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  res.json(getOrBootstrapProjectMemory(req.params.id));
+});
+
+app.post('/api/projects/:id/memory/refresh', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  res.json(refreshProjectMemory(req.params.id));
+});
+
+app.get('/api/projects/:id/briefings', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  res.json({ briefings: listCosBriefingsForProject(req.params.id) });
+});
+
+app.get('/api/projects/:id/decision-threads', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+  const threads = search
+    ? getDb().prepare(`
+        SELECT * FROM decision_threads
+        WHERE project_id = ? AND (title LIKE ? OR question LIKE ? OR decision LIKE ?)
+        ORDER BY updated_at DESC
+      `).all(req.params.id, `%${search}%`, `%${search}%`, `%${search}%`)
+    : getDb().prepare(
+        'SELECT * FROM decision_threads WHERE project_id = ? ORDER BY updated_at DESC',
+      ).all(req.params.id);
+  res.json({ threads });
+});
+
+app.patch('/api/projects/:id/decision-threads/:threadId', (req, res) => {
+  const thread = getDb().prepare(
+    'SELECT id FROM decision_threads WHERE id = ? AND project_id = ?',
+  ).get(req.params.threadId, req.params.id);
+  if (!thread) { res.status(404).json({ error: 'Decision thread not found' }); return; }
+  const fields = req.body as {
+    status?: string; decision?: string; rationale?: string; userVerdict?: string; followUpActions?: string;
+  };
+  getDb().prepare(`
+    UPDATE decision_threads SET
+      status = COALESCE(?, status),
+      decision = COALESCE(?, decision),
+      rationale = COALESCE(?, rationale),
+      user_verdict = COALESCE(?, user_verdict),
+      follow_up_actions = COALESCE(?, follow_up_actions),
+      updated_at = datetime('now')
+    WHERE id = ? AND project_id = ?
+  `).run(
+    fields.status ?? null,
+    fields.decision ?? null,
+    fields.rationale ?? null,
+    fields.userVerdict ?? null,
+    fields.followUpActions ?? null,
+    req.params.threadId,
+    req.params.id,
+  );
+  res.json({ ok: true });
+});
+
+app.get('/api/projects/:id/autonomy', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const settings = getDb().prepare(
+    'SELECT project_id as projectId, merge_mode as mergeMode, intervention_mode as interventionMode, dnd FROM project_autonomy_settings WHERE project_id = ?',
+  ).get(req.params.id) ?? { projectId: req.params.id, mergeMode: 'advisory', interventionMode: 'flag_only', dnd: 0 };
+  res.json({ settings });
+});
+
+app.patch('/api/projects/:id/autonomy', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const { mergeMode = 'advisory', interventionMode = 'flag_only', dnd = false } = req.body as {
+    mergeMode?: string; interventionMode?: string; dnd?: boolean;
+  };
+  if (!['advisory', 'auto_queue', 'full_auto'].includes(mergeMode) ||
+      !['flag_only', 'flag_nudge', 'flag_nudge_cancel'].includes(interventionMode)) {
+    res.status(400).json({ error: 'Invalid autonomy settings' });
+    return;
+  }
+  getDb().prepare(`
+    INSERT INTO project_autonomy_settings (project_id, merge_mode, intervention_mode, dnd)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(project_id) DO UPDATE SET
+      merge_mode = excluded.merge_mode,
+      intervention_mode = excluded.intervention_mode,
+      dnd = excluded.dnd
+  `).run(req.params.id, mergeMode, interventionMode, dnd ? 1 : 0);
+  res.json({ ok: true });
+});
+
+app.get('/api/merge-queue', (_req, res) => {
+  res.json({ requests: listMergeRequests() });
+});
+
+app.get('/api/portfolio-alerts', (_req, res) => {
+  const db = getDb();
+  const rows: Array<{ projectId: string; projectName: string; kind: 'blocked' | 'stale' | 'merge' | 'decision'; label: string; detail: string }> = [];
+  const projects = db.prepare('SELECT id, name FROM projects ORDER BY name').all() as Array<{ id: string; name: string }>;
+  for (const project of projects) {
+    const settings = db.prepare('SELECT dnd FROM project_autonomy_settings WHERE project_id = ?').get(project.id) as { dnd?: number } | undefined;
+    if (settings?.dnd) continue;
+    const digests = db.prepare(`
+      SELECT headline, status, detail, updated_at as updatedAt
+      FROM agent_digests WHERE project_id = ?
+      AND status IN ('blocked', 'in_progress')
+    `).all(project.id) as Array<{ headline: string | null; status: string; detail: string | null; updatedAt: string | null }>;
+    for (const digest of digests) {
+      const timestamp = digest.updatedAt ? new Date(`${digest.updatedAt.replace(' ', 'T')}Z`).getTime() : Date.now();
+      if (digest.status === 'blocked') {
+        rows.push({ projectId: project.id, projectName: project.name, kind: 'blocked', label: 'Blocked worktree', detail: digest.detail || digest.headline || 'A worktree reports a blocker.' });
+      } else if (Date.now() - timestamp > 30 * 60 * 1000) {
+        rows.push({ projectId: project.id, projectName: project.name, kind: 'stale', label: 'Stale activity', detail: digest.detail || digest.headline || 'No digest update in more than 30 minutes.' });
+      }
+    }
+    const pending = db.prepare(
+      "SELECT COUNT(*) as count FROM merge_requests WHERE project_id = ? AND status IN ('pending', 'approved', 'conflict')",
+    ).get(project.id) as { count: number };
+    if (pending.count > 0) rows.push({ projectId: project.id, projectName: project.name, kind: 'merge', label: 'Merge queue', detail: `${pending.count} merge request${pending.count === 1 ? '' : 's'} need attention.` });
+    const decisions = db.prepare(
+      "SELECT COUNT(*) as count FROM decision_threads WHERE project_id = ? AND status = 'open'",
+    ).get(project.id) as { count: number };
+    if (decisions.count > 0) rows.push({ projectId: project.id, projectName: project.name, kind: 'decision', label: 'Open decision', detail: `${decisions.count} decision thread${decisions.count === 1 ? '' : 's'} awaiting a verdict.` });
+  }
+  res.json({ rows: rows.slice(0, 20) });
+});
+
+app.get('/api/projects/:id/merge-queue', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  res.json({ requests: listMergeRequests(req.params.id) });
+});
+
+app.patch('/api/projects/:id/merge-queue/:requestId/priority', (req, res) => {
+  try {
+    const request = getMergeRequest(req.params.requestId);
+    if (!request || request.projectId !== req.params.id) { res.status(404).json({ error: 'Merge request not found' }); return; }
+    res.json(setMergePriority(request.id, req.body.priority));
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.post('/api/projects/:id/merge-queue/:requestId/approve', async (req, res) => {
+  try {
+    const request = getMergeRequest(req.params.requestId);
+    if (!request || request.projectId !== req.params.id) { res.status(404).json({ error: 'Merge request not found' }); return; }
+    resolveMergeRequest(request.id, 'approved', req.body.note);
+    getDb().prepare(`
+      INSERT INTO project_audit_log (id, project_id, actor, action, reasoning, risk_level)
+      VALUES (?, ?, 'project_lead', 'approve_merge', ?, 'medium')
+    `).run(crypto.randomUUID(), req.params.id, req.body.note ?? 'Approved merge request');
+    res.json(await executeApprovedMerge(request.id));
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.post('/api/projects/:id/merge-queue/:requestId/reject', (req, res) => {
+  try {
+    const request = getMergeRequest(req.params.requestId);
+    if (!request || request.projectId !== req.params.id) { res.status(404).json({ error: 'Merge request not found' }); return; }
+    const resolved = resolveMergeRequest(request.id, 'rejected', req.body.reason);
+    getDb().prepare(`
+      INSERT INTO project_audit_log (id, project_id, actor, action, reasoning, risk_level)
+      VALUES (?, ?, 'project_lead', 'reject_merge', ?, 'medium')
+    `).run(crypto.randomUUID(), req.params.id, req.body.reason);
+    res.json({ request: resolved });
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.post('/api/projects/:id/merge-lock/release', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  releaseMergeLock(req.params.id);
+  getDb().prepare(`
+    INSERT INTO project_audit_log (id, project_id, actor, action, reasoning, risk_level)
+    VALUES (?, ?, 'user', 'force_release_merge_lock', ?, 'high')
+  `).run(crypto.randomUUID(), req.params.id, req.body.reason ?? 'Merge lock force-released');
+  res.json({ ok: true });
+});
+
+app.get('/api/projects/:id/merge-lock', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  res.json({ lock: getMergeLock(req.params.id) });
+});
+
+app.get('/api/projects/:id/worktrees/:worktreeId/digest', (req, res) => {
+  try {
+    const digest = getDigest(req.params.worktreeId, req.params.id);
+    res.json({ digest });
+  } catch (err) {
+    res.status(404).json({ error: (err as Error).message });
+  }
+});
+
+app.post('/api/projects/:id/worktrees/:worktreeId/digest/bootstrap', (req, res) => {
+  try {
+    const digest = getDigest(req.params.worktreeId, req.params.id) ?? bootstrapDigest(req.params.worktreeId);
+    res.status(201).json({ digest });
+  } catch (err) {
+    res.status(404).json({ error: (err as Error).message });
+  }
+});
+
+app.post('/api/projects/:id/worktrees/:worktreeId/digest/reconcile', (req, res) => {
+  try {
+    const digest = getDigest(req.params.worktreeId, req.params.id);
+    if (!digest) bootstrapDigest(req.params.worktreeId);
+    res.json({ digest: reconcileDigest(req.params.worktreeId) });
+  } catch (err) {
+    res.status(404).json({ error: (err as Error).message });
+  }
+});
+
+app.post('/api/projects/:id/worktrees/:worktreeId/digest/spot-check', (req, res) => {
+  try {
+    const digest = getDigest(req.params.worktreeId, req.params.id);
+    if (!digest) bootstrapDigest(req.params.worktreeId);
+    const live = reconcileDigest(req.params.worktreeId);
+    getDb().prepare(`
+      INSERT INTO project_audit_log (id, project_id, actor, action, reasoning, risk_level)
+      VALUES (?, ?, 'user', 'digest_spot_check', ?, 'low')
+    `).run(
+      crypto.randomUUID(),
+      req.params.id,
+      req.body?.reason ?? 'User requested a live digest spot-check',
+    );
+    res.json({ digest: live, checked: true });
+  } catch (err) {
+    res.status(404).json({ error: (err as Error).message });
+  }
 });
 
 app.delete('/api/projects/:id/worktrees/:worktreeId', (req, res) => {

@@ -2,7 +2,7 @@
 
 import { useCallback, useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
-import { Wrench, ListTodo, History, Keyboard, Bookmark, Columns2 } from 'lucide-react';
+import { Wrench, ListTodo, History, Keyboard, Bookmark, Columns2, ExternalLink, Compass } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -23,7 +23,7 @@ interface Props {
 }
 
 export default function ProjectHeader({ projectId, projectName, repoPath, children, todoPanel, onSnippetInsert }: Props) {
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
   const basePath = `/projects/${projectId}`;
   const isChat = pathname.endsWith('/chat') || pathname === basePath;
   const [activePanel, setActivePanel] = useState<'none' | 'notes' | 'history' | 'snippets'>('none');
@@ -90,6 +90,10 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
     await fetch(`/api/projects/${projectId}`, { method: 'DELETE' });
     navigate('/');
   };
+
+  const openInNewTab = useCallback(() => {
+    window.open(`${pathname}${search}`, '_blank', 'noopener,noreferrer');
+  }, [pathname, search]);
 
   return (
     <div className="flex flex-col h-full">
@@ -165,6 +169,11 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
                     </div>
                   </div>
                 )}
+                <Link to={`${basePath}/lead`}>
+                  <Button variant={pathname.endsWith('/lead') ? 'secondary' : 'ghost'} size="icon" className="h-8 w-8" title="Project Lead">
+                    <Compass className="h-4 w-4" />
+                  </Button>
+                </Link>
               </div>
               <Button
                 variant={activePanel === 'history' ? 'secondary' : 'ghost'}
@@ -203,6 +212,15 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
             title="Project Settings"
           >
             <Wrench className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            onClick={openInNewTab}
+            title="Open in new browser tab"
+          >
+            <ExternalLink className="h-4 w-4" />
           </Button>
         </div>
       </div>

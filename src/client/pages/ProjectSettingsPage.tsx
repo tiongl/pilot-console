@@ -13,6 +13,12 @@ interface Project {
   description: string | null;
 }
 
+interface AutonomySettings {
+  mergeMode: 'advisory' | 'auto_queue' | 'full_auto';
+  interventionMode: 'flag_only' | 'flag_nudge' | 'flag_nudge_cancel';
+  dnd: number;
+}
+
 export default function ProjectSettingsPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -22,16 +28,24 @@ export default function ProjectSettingsPage() {
   const [description, setDescription] = useState('');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [autonomy, setAutonomy] = useState<AutonomySettings>({
+    mergeMode: 'advisory',
+    interventionMode: 'flag_only',
+    dnd: 0,
+  });
+  const [autonomySaving, setAutonomySaving] = useState(false);
 
   useEffect(() => {
     if (!id) return;
-    fetch(`/api/projects/${id}`)
-      .then((r) => r.json())
-      .then((p: Project) => {
+    Promise.all([
+      fetch(`/api/projects/${id}`).then((r) => r.json()),
+      fetch(`/api/projects/${id}/autonomy`).then((r) => r.json()),
+    ]).then(([p, autonomyData]: [Project, { settings: AutonomySettings }]) => {
         setProject(p);
         setName(p.name);
         setRepoPath(p.repoPath);
         setDescription(p.description ?? '');
+        setAutonomy(autonomyData.settings);
       });
   }, [id]);
 
@@ -51,6 +65,20 @@ export default function ProjectSettingsPage() {
       setError((err as Error).message);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const saveAutonomy = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAutonomySaving(true);
+    try {
+      await fetch(`/api/projects/${id}/autonomy`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...autonomy, dnd: Boolean(autonomy.dnd) }),
+      });
+    } finally {
+      setAutonomySaving(false);
     }
   };
 
@@ -97,6 +125,52 @@ export default function ProjectSettingsPage() {
             <Button type="submit" disabled={saving}>
               {saving ? 'Saving…' : 'Save Changes'}
             </Button>
+          </form>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Chief of Staff autonomy</CardTitle>
+          <CardDescription>Conservative defaults are recommended. Full auto can create and auto-merge pull requests.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={saveAutonomy} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="merge-mode">Merge mode</Label>
+              <select
+                id="merge-mode"
+                className="flex h-9 w-full rounded-md border bg-background px-3 text-sm"
+                value={autonomy.mergeMode}
+                onChange={(e) => setAutonomy((current) => ({ ...current, mergeMode: e.target.value as AutonomySettings['mergeMode'] }))}
+              >
+                <option value="advisory">Advisory - require approval</option>
+                <option value="auto_queue">Auto-queue approved requests</option>
+                <option value="full_auto">Full auto - request GitHub auto-merge</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="intervention-mode">Intervention mode</Label>
+              <select
+                id="intervention-mode"
+                className="flex h-9 w-full rounded-md border bg-background px-3 text-sm"
+                value={autonomy.interventionMode}
+                onChange={(e) => setAutonomy((current) => ({ ...current, interventionMode: e.target.value as AutonomySettings['interventionMode'] }))}
+              >
+                <option value="flag_only">Flag only</option>
+                <option value="flag_nudge">Allow soft nudges</option>
+                <option value="flag_nudge_cancel">Allow nudges and cancellation</option>
+              </select>
+            </div>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={Boolean(autonomy.dnd)}
+                onChange={(e) => setAutonomy((current) => ({ ...current, dnd: e.target.checked ? 1 : 0 }))}
+              />
+              Quiet notifications for this project
+            </label>
+            <Button type="submit" disabled={autonomySaving}>{autonomySaving ? 'Saving…' : 'Save autonomy settings'}</Button>
           </form>
         </CardContent>
       </Card>

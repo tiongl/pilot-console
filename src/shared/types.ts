@@ -77,6 +77,7 @@ export type WsServerMessage =
 // ---------------------------------------------------------------------------
 
 export type AgentStatus = 'idle' | 'busy';
+export type AgentSessionKind = 'agent' | 'project_lead' | 'chief_of_staff';
 
 /** Agent UI mode, mirroring the Copilot CLI (Shift+Tab cycles these). */
 export type AgentMode = 'interactive' | 'plan' | 'autopilot';
@@ -221,7 +222,15 @@ export type AgentClientMessage =
 
 /** Server → Client messages for the `/ws/agent` socket. */
 export type AgentServerMessage =
-  | { type: 'ready'; sessionId: string; model: string; mode: AgentMode; status: AgentStatus }
+  | {
+      type: 'ready';
+      sessionId: string;
+      model: string;
+      mode: AgentMode;
+      status: AgentStatus;
+      /** Wall-clock start of the in-flight turn (the user's request), if busy. */
+      turnStartedAt?: number | null;
+    }
   | { type: 'replay'; events: AgentTranscriptEvent[] }
   // Upsert (create or update) a transcript entry, keyed by `event.id`.
   | { type: 'event'; event: AgentTranscriptEvent }
@@ -240,9 +249,18 @@ export type AgentServerMessage =
       planContent?: string;
       actions: string[];
       recommended: string;
+      reviewNote?: string;
     }
   | { type: 'exit_plan_resolved'; requestId: string }
-  | { type: 'status'; status: AgentStatus }
+  | {
+      type: 'status';
+      status: AgentStatus;
+      /**
+       * Wall-clock start of the in-flight turn — the moment the user's request
+       * was submitted, not when the model started generating. Null when idle.
+       */
+      turnStartedAt?: number | null;
+    }
   | { type: 'model'; model: string }
   | { type: 'mode'; mode: AgentMode }
   // The dynamic slash-command catalog for this session.
@@ -275,6 +293,22 @@ export interface Worktree {
   isManaged: boolean;
   type: WorktreeType;
   createdAt: string;
+}
+
+export type AgentDigestStatus = 'in_progress' | 'blocked' | 'ready_to_merge' | 'idle';
+export type AgentDigestScope = 'small' | 'medium' | 'large';
+
+export interface AgentDigest {
+  worktreeId: string;
+  projectId: string;
+  headline: string | null;
+  status: AgentDigestStatus | null;
+  detail: string | null;
+  scope: AgentDigestScope | null;
+  touchedFiles: string[];
+  riskNotes: string | null;
+  stuckSince: string | null;
+  updatedAt: string | null;
 }
 
 export interface ChatMessage {

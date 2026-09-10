@@ -20,6 +20,13 @@ vi.mock('@/hooks/useAgentSocket', () => ({
   },
 }));
 
+vi.mock('mermaid', () => ({
+  default: {
+    initialize: vi.fn(),
+    render: vi.fn(async () => ({ svg: '<svg viewBox="0 0 200 100" data-testid="agent-mermaid-svg"></svg>' })),
+  },
+}));
+
 import AgentPane from '@/components/terminal/AgentPane';
 
 function emit(msg: AgentServerMessage) {
@@ -79,6 +86,73 @@ describe('AgentPane', () => {
     expect(screen.getByText('Hi there')).toBeTruthy();
   });
 
+  it('copies an assistant reply as markdown source and rendered text', async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'assistant', id: 'a1', ts: 2, content: '# Title\n\nBody text' },
+      ],
+    });
+
+    const trigger = await screen.findByTestId('assistant-copy-button');
+    fireEvent.click(trigger);
+    const md = await screen.findByTestId('assistant-copy-markdown');
+    fireEvent.click(md);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('# Title\n\nBody text'));
+
+    fireEvent.click(await screen.findByTestId('assistant-copy-button'));
+    const txt = await screen.findByTestId('assistant-copy-text');
+    fireEvent.click(txt);
+    await waitFor(() => {
+      const copied = writeText.mock.calls.at(-1)?.[0] as string;
+      expect(copied).toContain('Title');
+      expect(copied).toContain('Body text');
+      expect(copied).not.toContain('#');
+    });
+  });
+
+  it('renders mermaid diagrams in assistant markdown', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        {
+          kind: 'assistant',
+          id: 'a1',
+          ts: 1,
+          content: '```mermaid\ngraph TD;A-->B;\n```',
+        },
+      ],
+    });
+
+    const frame = await screen.findByTestId('mermaid-diagram');
+    expect(frame.querySelector('svg')).toBeTruthy();
+  });
+
+  it('renders rich markdown code blocks with copy controls and math', async () => {
+    renderPane();
+    emit({
+      type: 'event',
+      event: {
+        kind: 'assistant',
+        id: 'a-rich',
+        ts: 1,
+        content: '```typescript\nconst answer = 42;\n```\n\nInline math: $x^2$.',
+      },
+    });
+
+    expect(await screen.findByText('typescript')).toBeTruthy();
+    expect(screen.getByLabelText('Copy code')).toBeTruthy();
+    expect(screen.getByText('answer')).toBeTruthy();
+    expect(document.querySelector('.katex')).toBeTruthy();
+  });
+
   it('hides an assistant entry that has no text', async () => {
     renderPane();
     emit({
@@ -116,7 +190,8 @@ describe('AgentPane', () => {
       },
     });
     await waitFor(() => expect(screen.getByText('bash')).toBeTruthy());
-    expect(screen.getAllByText('Launching command')).toHaveLength(2);
+    // Collapsed header, expanded body, and the composer progress banner.
+    expect(screen.getAllByText('Launching command')).toHaveLength(3);
     expect(screen.getByTestId('tool-progress-c1')).toHaveTextContent('Running for 0s');
   });
 
@@ -508,7 +583,8 @@ describe('AgentPane', () => {
     const badge = await screen.findByTestId('tool-badge-c1');
     expect(badge.textContent).toContain('powershell');
     expect(badge.textContent).not.toContain('Build the project');
-    expect(badge.textContent).toContain('2.5s');
+    // Durations render in whole minutes/seconds everywhere: 2.5s rounds to 3s.
+    expect(badge.textContent).toContain('3s');
     // Shell tools are indistinguishable by name alone, so a short command
     // prefix rides along on the badge face.
     expect(badge.textContent).toContain('npm run bu…');
@@ -582,14 +658,14 @@ describe('AgentPane', () => {
     expect(screen.getByTestId('filter-tool-output')).not.toBeChecked();
   });
 
-  it('renders a system message entry with a "System message" indicator', async () => {
+  it('does not render system messages', async () => {
     renderPane();
     emit({
       type: 'event',
       event: { kind: 'system', id: 's1', ts: 1, content: 'You are a helpful assistant.' },
     });
-    await waitFor(() => expect(screen.getByText('System message')).toBeTruthy());
-    expect(screen.getByText('You are a helpful assistant.')).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText('You are a helpful assistant.')).toBeNull());
+    expect(screen.queryByText('System message')).toBeNull();
   });
 
   it('shares the session read-only from the Share panel', async () => {
@@ -863,5 +939,67 @@ describe('AgentPane', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe('turn progress', () => {
+    it('shows no progress banner while the agent is idle', () => {
+      renderPane();
+      emit({ type: 'status', status: 'idle', turnStartedAt: null });
+      expect(screen.queryByTestId('agent-turn-progress')).toBeNull();
+    });
+
+    it('shows a live progress banner with elapsed time while the agent works', () => {
+      vi.useFakeTimers();
+      try {
+        const started = Date.now();
+        renderPane();
+        emit({ type: 'status', status: 'busy', turnStartedAt: started });
+
+        expect(screen.getByTestId('agent-turn-progress')).toBeTruthy();
+        expect(screen.getByTestId('agent-turn-elapsed').textContent).toBe('0s');
+
+        act(() => {
+          vi.advanceTimersByTime(5_000);
+        });
+        expect(screen.getByTestId('agent-turn-elapsed').textContent).toBe('5s');
+
+        // Past a minute the counter switches to minutes + zero-padded seconds.
+        act(() => {
+          vi.advanceTimersByTime(60_000);
+        });
+        expect(screen.getByTestId('agent-turn-elapsed').textContent).toBe('1m 05s');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('measures elapsed time from the server-reported request start, not from render', () => {
+      vi.useFakeTimers();
+      try {
+        renderPane();
+        // The turn began 90s ago; a reconnect must not restart the clock.
+        emit({ type: 'status', status: 'busy', turnStartedAt: Date.now() - 90_000 });
+        expect(screen.getByTestId('agent-turn-elapsed').textContent).toBe('1m 30s');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('clears the progress banner once the turn completes', () => {
+      renderPane();
+      emit({ type: 'status', status: 'busy', turnStartedAt: Date.now() });
+      expect(screen.getByTestId('agent-turn-progress')).toBeTruthy();
+      emit({ type: 'status', status: 'idle', turnStartedAt: null });
+      expect(screen.queryByTestId('agent-turn-progress')).toBeNull();
+    });
+
+    it('renders assistant reply durations in minutes and seconds', () => {
+      renderPane();
+      emit({
+        type: 'event',
+        event: { kind: 'assistant', id: 'a1', ts: Date.now(), content: 'done', durationMs: 95_000 },
+      });
+      expect(screen.getByText(/1m 35s/)).toBeTruthy();
+    });
   });
 });

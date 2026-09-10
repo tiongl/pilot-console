@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate, useParams } from 'react-router';
+import { Routes, Route, Navigate, useLocation, useParams } from 'react-router';
 import { AuthProvider, useAuth } from './lib/auth-context';
 import { AutomationProvider } from './lib/automation-context';
 import { SplitProvider } from './lib/split-context';
@@ -16,6 +16,8 @@ import ProjectSkillsPage from './pages/ProjectSkillsPage';
 import ProjectSettingsPage from './pages/ProjectSettingsPage';
 import WorktreeLayout from './pages/WorktreeLayout';
 import WorktreeChatPage from './pages/WorktreeChatPage';
+import ProjectChatPage from './pages/ProjectChatPage';
+import ProjectLeadPage from './pages/ProjectLeadPage';
 import AdminPage from './pages/AdminPage';
 import AdminSessionsPage from './pages/AdminSessionsPage';
 import AdminDaemonPage from './pages/AdminDaemonPage';
@@ -29,7 +31,11 @@ import { useReportNotifications } from './hooks/useReportNotifications';
 /** Uses KeepAliveChat to keep recently-used project terminals alive across switches */
 function ProjectChatKeepAlive() {
   const { id } = useParams<{ id: string }>();
+  const { search } = useLocation();
   const ctx = useProjectContextOptional();
+  if (new URLSearchParams(search).get('detachedTab') === '1') {
+    return <ProjectChatPage projectId={id} cwd={ctx?.cwd} />;
+  }
   return <KeepAliveChat projectId={id} cwd={ctx?.cwd} />;
 }
 
@@ -62,6 +68,7 @@ export function App() {
             <Route path="projects/:id" element={<ProjectLayout />}>
               <Route index element={<Navigate to="chat" replace />} />
               <Route path="chat" element={<ProjectChatKeepAlive />} />
+              <Route path="lead" element={<ProjectLeadPage />} />
               <Route path="skills" element={<ProjectSkillsPage />} />
               <Route path="settings" element={<ProjectSettingsPage />} />
             </Route>

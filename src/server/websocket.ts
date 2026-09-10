@@ -120,7 +120,7 @@ export function setupWebSocketServer(): WebSocketServer {
     const forceNew = url.searchParams.get('new') === 'true';
     const notifyOnly = url.searchParams.get('notify') === 'true';
     const modeParam = url.searchParams.get('mode');
-    const mode = (['shell', 'powershell'].includes(modeParam!) ? modeParam : 'cli') as SessionMode;
+    const mode = (['cli-classic', 'shell', 'powershell'].includes(modeParam!) ? modeParam : 'cli') as SessionMode;
 
     // Notify-only connections just receive broadcasts (e.g. report-ready) — no CLI session
     if (notifyOnly) {

@@ -27,7 +27,7 @@ import {
   getAgentShareStatus,
   getAgentUsage,
 } from '../shared/agent-bridge';
-import type { AgentClientMessage, AgentServerMessage } from '../shared/types';
+import type { AgentClientMessage, AgentServerMessage, AgentSessionKind } from '../shared/types';
 
 interface AuthedAgentSocket extends WebSocket {
   userId?: string;
@@ -87,6 +87,10 @@ export function setupAgentWebSocketServer(): WebSocketServer {
     const requestedSessionId = url.searchParams.get('sessionId');
     const forceNew = url.searchParams.get('new') === 'true';
     const model = url.searchParams.get('model') || undefined;
+    const requestedKind = url.searchParams.get('kind');
+    const kind: AgentSessionKind = requestedKind === 'project_lead' || requestedKind === 'chief_of_staff'
+      ? requestedKind
+      : 'agent';
 
     const send = (msg: AgentServerMessage) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
@@ -111,14 +115,16 @@ export function setupAgentWebSocketServer(): WebSocketServer {
         }
       }
     } else if (forceNew) {
-      session = await createSafe(ws, ws.userId, projectId, worktreeId, model);
+      session = await createSafe(ws, ws.userId, projectId, worktreeId, model, kind);
       if (!session) return;
     } else {
-      session = findAgentSession(ws.userId, projectId ?? null, worktreeId ?? null);
+      session = findAgentSession(ws.userId, projectId ?? null, worktreeId ?? null, kind);
       if (!session) {
-        session = await resumeBestAgentSessionForWorkspace(ws.userId, projectId ?? null, worktreeId ?? null);
+        session = kind === 'agent'
+          ? await resumeBestAgentSessionForWorkspace(ws.userId, projectId ?? null, worktreeId ?? null)
+          : undefined;
         if (!session) {
-          session = await createSafe(ws, ws.userId, projectId, worktreeId, model);
+          session = await createSafe(ws, ws.userId, projectId, worktreeId, model, kind);
           if (!session) return;
         }
       }
@@ -135,6 +141,7 @@ export function setupAgentWebSocketServer(): WebSocketServer {
       model: session.model,
       mode: session.mode,
       status: session.status,
+      turnStartedAt: session.turnStartTs,
     });
     send({ type: 'replay', events: getReplay(sessionId) });
     for (const message of getPendingAgentMessages(sessionId)) send(message);
@@ -219,9 +226,10 @@ async function createSafe(
   projectId: string | null,
   worktreeId: string | null,
   model?: string,
+  kind: AgentSessionKind = 'agent',
 ) {
   try {
-    return await createAgentSession(userId, projectId, worktreeId, model);
+    return await createAgentSession(userId, projectId, worktreeId, model, kind);
   } catch (err) {
     console.error('[agent-ws] failed to create agent session:', err);
     if (ws.readyState === WebSocket.OPEN) {

@@ -318,6 +318,25 @@
   animation: pulse-dot 1.5s ease-in-out infinite;
 }
 
+/* Indeterminate progress bar for an in-flight agent turn. The runtime reports
+   no completion percentage, so the bar conveys liveness by sweeping. */
+@keyframes agent-progress {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+
+.animate-agent-progress {
+  animation: agent-progress 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-agent-progress {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
+}
+
 /* Terminal padding – no padding on .xterm so scrollbar spans full height;
    text padding applied to .xterm-screen only */
 .xterm {

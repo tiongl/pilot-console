@@ -4,6 +4,11 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { getDb } from './db';
 import { getProjectById, getWorktreeById } from './project-store';
+import { createWorktreeAgentTools } from './digest-tools';
+import { createProjectLeadTools } from './project-lead-tools';
+import { createChiefOfStaffTools } from './chief-of-staff-tools';
+import { createMergeTools } from './merge-tools';
+import { getOrBootstrapProjectMemory } from './project-memory-store';
 import { getDaemonClient } from '../daemon/client';
 import type {
   AgentServerMessage,
@@ -16,6 +21,7 @@ import type {
   AgentShareMode,
   AgentShareStatus,
   AgentUsage,
+  AgentSessionKind,
 } from './types';
 import type {
   CopilotClient as CopilotClientType,
@@ -25,6 +31,7 @@ import type {
   PermissionRequestResult,
   ExitPlanModeRequest,
   ExitPlanModeResult,
+  Tool,
 } from '@github/copilot-sdk';
 
 const MAX_TRANSCRIPT_EVENTS = 5_000;
@@ -55,6 +62,7 @@ export interface AgentSession {
   userId: string;
   projectId: string | null;
   worktreeId: string | null;
+  kind: AgentSessionKind;
   cwd: string;
   model: string;
   mode: AgentMode;
@@ -76,6 +84,13 @@ export interface AgentSession {
   assistantByMessageId: Map<string, string>;
   /** Maps SDK messageId → `message_start` time, used to derive reply duration. */
   assistantStartTs: Map<string, number>;
+  /**
+   * Wall-clock start of the in-flight turn: the moment the user's request was
+   * submitted. Durations reported to the UI are measured from here through to
+   * completion so they cover the whole round trip (queueing, thinking, tools),
+   * not just token generation. Null whenever the session is idle.
+   */
+  turnStartTs: number | null;
   /** Maps SDK toolCallId → transcript entry id for tool activity */
   toolByCallId: Map<string, string>;
   /** Current GitHub session-sharing state (remote-control mode). */
@@ -87,6 +102,24 @@ export interface AgentSession {
 }
 
 const agentSessions = new Map<string, AgentSession>();
+
+/**
+ * In-flight `resumeAgentSession` calls, keyed by the requested session id.
+ *
+ * Resuming is a slow, awaited round trip (`client.resumeSession`), and the
+ * session is only registered in `agentSessions` once that resolves. Without
+ * this guard, two overlapping connects for the same id — a reconnect storm, a
+ * StrictMode double-mount, or two panes bound to the same Chief-of-Staff/Lead
+ * session — each build a *separate* session object with its own SDK connection
+ * and its own `pendingPermissions` map. Whichever registers last wins, so the
+ * permission promise the runtime is actually blocked on can end up stranded in
+ * an orphaned object that `setAllowAllPermissions` / `setAgentMode` /
+ * `respondToPermission` (all keyed by `agentSessions.get`) can never resolve —
+ * the "allow all / autopilot does nothing on a reloaded session" symptom.
+ * Coalescing concurrent resumes onto one promise keeps a single canonical
+ * session object per id.
+ */
+const resumeInFlight = new Map<string, Promise<AgentSession | undefined>>();
 
 // ---------------------------------------------------------------------------
 // Shared Copilot SDK client (lazy singleton)
@@ -298,16 +331,32 @@ export function getAgentSession(sessionId: string): AgentSession | undefined {
   return agentSessions.get(sessionId);
 }
 
+export function listLiveAgentSessions() {
+  return [...agentSessions.values()]
+    .filter((session) => session.alive)
+    .map((session) => ({
+      sessionId: session.sessionId,
+      projectId: session.projectId,
+      worktreeId: session.worktreeId,
+      kind: session.kind,
+      status: session.status,
+      mode: session.mode,
+      cwd: session.cwd,
+    }));
+}
+
 export function findAgentSession(
   userId: string,
   projectId: string | null,
   worktreeId: string | null,
+  kind: AgentSessionKind = 'agent',
 ): AgentSession | undefined {
   for (const s of agentSessions.values()) {
     if (
       s.userId === userId &&
       s.projectId === projectId &&
       (s.worktreeId ?? null) === (worktreeId ?? null) &&
+      s.kind === kind &&
       s.alive
     ) {
       return s;
@@ -348,7 +397,14 @@ function upsertEvent(session: AgentSession, event: AgentTranscriptEvent): void {
 function setStatus(session: AgentSession, status: AgentStatus): void {
   if (session.status === status) return;
   session.status = status;
-  emit(session, { type: 'status', status });
+  // Anchor the turn clock the first time we go busy and clear it on completion,
+  // so every duration the UI renders spans user-request → done.
+  if (status === 'busy') {
+    if (session.turnStartTs === null) session.turnStartTs = Date.now();
+  } else {
+    session.turnStartTs = null;
+  }
+  emit(session, { type: 'status', status, turnStartedAt: session.turnStartTs });
   if (status === 'busy') ensureBusyWatchdog(session);
   else stopBusyWatchdog(session);
 }
@@ -414,6 +470,21 @@ function runningTools(session: AgentSession) {
     (event): event is Extract<AgentTranscriptEvent, { kind: 'tool' }> =>
       event.kind === 'tool' && event.status === 'running',
   );
+}
+
+/** Find a live worktree-agent session without requiring the lead to know its user id. */
+export function findLiveWorktreeAgent(projectId: string, worktreeId: string): AgentSession | undefined {
+  for (const session of agentSessions.values()) {
+    if (
+      session.alive &&
+      session.kind === 'agent' &&
+      session.projectId === projectId &&
+      session.worktreeId === worktreeId
+    ) {
+      return session;
+    }
+  }
+  return undefined;
 }
 
 function stopToolReconciliation(session: AgentSession): void {
@@ -508,6 +579,9 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
   switch (event.type) {
     case 'user.message': {
       const content = (event.data as { content?: string }).content ?? '';
+      // The user's request is the origin of the turn clock: everything that
+      // follows is reported as elapsed time from this moment.
+      session.turnStartTs = ts;
       upsertEvent(session, { kind: 'user', id: event.id, ts, content });
       break;
     }
@@ -551,12 +625,15 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
       if (!content) break;
       const startTs = (messageId ? session.assistantStartTs.get(messageId) : undefined) ?? ts;
       if (messageId) session.assistantStartTs.delete(messageId);
+      // Duration is measured from the user's request, not from the first token,
+      // so it reflects the wait the user actually experienced.
+      const originTs = session.turnStartTs ?? startTs;
       upsertEvent(session, {
         kind: 'assistant',
         id: entryId,
         ts: startTs,
         content,
-        durationMs: Math.max(0, ts - startTs),
+        durationMs: Math.max(0, ts - originTs),
       });
       break;
     }
@@ -908,6 +985,51 @@ function makeExitPlanHandler(getSession: () => AgentSession | undefined) {
     const session = getSession();
     if (!session) return { approved: false };
 
+    if (session.kind === 'agent' && session.projectId && session.worktreeId) {
+      const { reviewPlanForWorker } = await import('./project-lead-tools');
+      const scope = request.summary.toLowerCase().includes('large') ? 'large'
+        : request.summary.toLowerCase().includes('medium') ? 'medium' : 'small';
+      const review = reviewPlanForWorker(session.projectId, session.worktreeId, request.planContent ?? request.summary, scope);
+      if (review.action === 'approve' || review.action === 'approve-with-note') {
+        emit(session, {
+          type: 'event',
+          event: {
+            kind: 'notice',
+            id: randomUUID(),
+            ts: Date.now(),
+            message: `Project Lead ${review.action}: ${review.reason}`,
+          },
+        });
+        return { approved: true, selectedAction: request.recommendedAction };
+      }
+      if (review.action === 'request-changes') {
+        emit(session, {
+          type: 'event',
+          event: {
+            kind: 'notice',
+            id: randomUUID(),
+            ts: Date.now(),
+            message: `Project Lead requested plan changes: ${review.reason}`,
+          },
+        });
+        return { approved: false };
+      }
+      const requestId = randomUUID();
+      return new Promise<ExitPlanModeResult>((resolve) => {
+        const message: Extract<AgentServerMessage, { type: 'exit_plan_request' }> = {
+          type: 'exit_plan_request',
+          requestId,
+          summary: request.summary,
+          planContent: request.planContent,
+          actions: request.actions,
+          recommended: request.recommendedAction,
+          reviewNote: `Project Lead escalation: ${review.reason}`,
+        };
+        session.pendingPlans.set(requestId, { resolve, message });
+        emit(session, message);
+      });
+    }
+
     const requestId = randomUUID();
     return new Promise<ExitPlanModeResult>((resolve) => {
       const message: Extract<AgentServerMessage, { type: 'exit_plan_request' }> = {
@@ -1078,6 +1200,49 @@ export interface PersistedAgentState {
   cwd?: string;
 }
 
+function createPendingAgentSession(
+  userId: string,
+  projectId: string | null,
+  worktreeId: string | null,
+  kind: AgentSessionKind,
+  cwd: string,
+  model: string,
+  mode: AgentMode,
+  allowAllPermissions: boolean,
+): AgentSession {
+  return {
+    // Replaced with the runtime session id as soon as create/resume resolves.
+    sessionId: `pending:${randomUUID()}`,
+    userId,
+    projectId,
+    worktreeId,
+    kind,
+    cwd,
+    model,
+    mode,
+    status: 'idle',
+    alive: true,
+    transcript: [],
+    subscribers: new Set(),
+    pendingPermissions: new Map(),
+    pendingPlans: new Map(),
+    sdk: undefined as unknown as CopilotSession,
+    unsubscribe: () => {},
+    saveTimer: null,
+    toolReconcileTimer: null,
+    toolReconcileInFlight: false,
+    busyWatchdogTimer: null,
+    busyWatchdogInFlight: false,
+    assistantByMessageId: new Map(),
+    assistantStartTs: new Map(),
+    turnStartTs: null,
+    toolByCallId: new Map(),
+    share: { mode: 'off', steerable: false },
+    usage: emptyAgentUsage(),
+    allowAllPermissions,
+  };
+}
+
 export function persistAgentState(session: AgentSession): void {
   const state: PersistedAgentState = {
     model: session.model,
@@ -1146,6 +1311,40 @@ const TURN_START_EVENTS = new Set([
   'tool.execution_start',
 ]);
 
+const AGENT_RENDERING_INSTRUCTIONS = `
+Format responses for the web Agent tab using Markdown. Use headings, lists, tables, and task lists when they improve clarity.
+Put source code, commands, logs, stack traces, JSON, YAML, XML, and diffs in fenced code blocks with an accurate language tag.
+Use fenced mermaid blocks for flowcharts, sequence diagrams, state machines, ER diagrams, and other visual explanations.
+Use LaTeX delimiters ($...$ or $$...$$) for mathematical notation.
+Use Markdown links for URLs and GitHub issues, pull requests, and commits. Do not emit raw HTML.
+Keep code blocks and tool output focused; avoid excessively large unstructured dumps.
+`;
+
+const WORKTREE_DIGEST_INSTRUCTIONS = `
+When working in a worktree, keep the portfolio dashboard current by calling update_digest
+at meaningful milestones and before becoming idle. Use concise, factual summaries; include
+the files you changed or intend to change in touched_files, and report blocked status rather
+than guessing when you need input.
+`;
+
+const CHIEF_OF_STAFF_INSTRUCTIONS = `
+You are the user's Chief of Staff. Work only from compact project and worktree status
+rollups exposed by your tools. Do not request or reconstruct raw project transcripts.
+Prioritize portfolio sequencing, surface blockers, and hand technical questions to a
+Project Lead through a decision thread. Project Leads send you briefings (via
+list_project_briefings) after significant conversations or decisions; check these to stay
+aware of what is happening in each project without reading its full chat history.
+`;
+
+const PROJECT_LEAD_BASE_INSTRUCTIONS = `
+You are the Project Lead for this project. Review project status, coordinate worktrees, and
+ask for clarification before delegating ambiguous work. At the start of a conversation, call
+get_project_memory to load (and, if needed, bootstrap) your persistent understanding of this
+project's README, recent history, worktrees, and open decisions. After reaching a decision or
+completing a significant review, call brief_chief_of_staff with a short summary so the Chief
+of Staff stays aware of this project's conversation without reading the full transcript.
+`;
+
 export function deriveStatusFromEvents(events: SessionEvent[] | undefined): AgentStatus {
   if (!Array.isArray(events)) return 'idle';
   for (let i = events.length - 1; i >= 0; i -= 1) {
@@ -1157,56 +1356,76 @@ export function deriveStatusFromEvents(events: SessionEvent[] | undefined): Agen
   return 'idle';
 }
 
+/**
+ * The tool set a session is entitled to for its kind/scope. Shared by
+ * `createAgentSession` and `resumeAgentSession` so a session resumed after a
+ * server restart gets back the same tools it was created with — the SDK
+ * negotiates tool availability per-connection, so omitting this on resume
+ * silently strips a session's tools, which is why unresumed sessions can look
+ * "dead" (any turn that needs a tool call stalls or errors).
+ */
+export function buildToolsForKind(
+  kind: AgentSessionKind,
+  projectId: string | null,
+  worktreeId: string | null,
+): Tool<any>[] | undefined {
+  if (kind === 'chief_of_staff') return createChiefOfStaffTools();
+  if (kind === 'project_lead') return projectId ? createProjectLeadTools(projectId) : undefined;
+  if (worktreeId) return [...createWorktreeAgentTools(worktreeId), ...createMergeTools(worktreeId)];
+  return undefined;
+}
+
 export async function createAgentSession(
   userId: string,
   projectId: string | null,
   worktreeId: string | null,
   model = DEFAULT_MODEL,
+  kind: AgentSessionKind = 'agent',
 ): Promise<AgentSession> {
   const client = await getClient();
   const cwd = resolveCwd(projectId, worktreeId);
 
-  // Placeholder holder so the permission handler can reach the session even
-  // though it's created before the SDK session resolves.
-  let sessionRef: AgentSession | undefined;
+  // Created up front so permission/plan callbacks fired during
+  // `createSession` can queue prompts instead of timing out and rejecting.
+  const session = createPendingAgentSession(
+    userId,
+    projectId ?? null,
+    worktreeId ?? null,
+    kind,
+    cwd,
+    model,
+    DEFAULT_MODE,
+    false,
+  );
+  let sessionRef: AgentSession | undefined = session;
+
+  // Project Leads bootstrap (or reuse) a persistent project-memory summary so a fresh
+  // conversation is immediately grounded in the project's README, history, and open work.
+  let projectMemorySummary = '';
+  if (kind === 'project_lead' && projectId) {
+    try {
+      const memory = getOrBootstrapProjectMemory(projectId);
+      projectMemorySummary = `\n\n## Project memory (bootstrapped)\n${memory.summary}`;
+    } catch (err) {
+      console.warn(`[agent-bridge] Failed to bootstrap project memory for ${projectId}:`, err);
+    }
+  }
 
   const sdk = await client.createSession({
     model,
     streaming: true,
     workingDirectory: cwd,
+    systemMessage: {
+      mode: 'append',
+      content: `${AGENT_RENDERING_INSTRUCTIONS}${worktreeId ? WORKTREE_DIGEST_INSTRUCTIONS : ''}${kind === 'project_lead' ? `\n${PROJECT_LEAD_BASE_INSTRUCTIONS}${projectMemorySummary}` : ''}${kind === 'chief_of_staff' ? CHIEF_OF_STAFF_INSTRUCTIONS : ''}`,
+    },
+    tools: buildToolsForKind(kind, projectId, worktreeId),
     onPermissionRequest: makePermissionHandler(() => sessionRef),
     onExitPlanModeRequest: makeExitPlanHandler(() => sessionRef),
   });
 
-  const session: AgentSession = {
-    sessionId: sdk.sessionId,
-    userId,
-    projectId: projectId ?? null,
-    worktreeId: worktreeId ?? null,
-    cwd,
-    model,
-    mode: DEFAULT_MODE,
-    status: 'idle',
-    alive: true,
-    transcript: [],
-    subscribers: new Set(),
-    pendingPermissions: new Map(),
-    pendingPlans: new Map(),
-    sdk,
-    unsubscribe: () => {},
-    saveTimer: null,
-    toolReconcileTimer: null,
-    toolReconcileInFlight: false,
-    busyWatchdogTimer: null,
-    busyWatchdogInFlight: false,
-    assistantByMessageId: new Map(),
-    assistantStartTs: new Map(),
-    toolByCallId: new Map(),
-    share: { mode: 'off', steerable: false },
-    usage: emptyAgentUsage(),
-    allowAllPermissions: false,
-  };
-  sessionRef = session;
+  session.sessionId = sdk.sessionId;
+  session.sdk = sdk;
 
   session.unsubscribe = sdk.on((event) => handleSdkEvent(session, event));
   agentSessions.set(session.sessionId, session);
@@ -1215,7 +1434,7 @@ export async function createAgentSession(
   db.prepare('INSERT OR IGNORE INTO users (id, github_id, role) VALUES (?, ?, ?)').run(userId, userId, 'user');
   db.prepare(
     'INSERT INTO cli_sessions (id, user_id, project_id, worktree_id, copilot_session_id, kind) VALUES (?, ?, ?, ?, ?, ?)',
-  ).run(session.sessionId, userId, projectId ?? null, worktreeId ?? null, session.sessionId, 'agent');
+  ).run(session.sessionId, userId, projectId ?? null, worktreeId ?? null, session.sessionId, kind);
   persistAgentState(session);
 
   console.log(`[agent-bridge] Created agent session ${session.sessionId}, cwd=${cwd}, model=${model}`);
@@ -1225,6 +1444,9 @@ export async function createAgentSession(
 export async function sendAgentMessage(sessionId: string, prompt: string): Promise<void> {
   const session = agentSessions.get(sessionId);
   if (!session || !session.alive) return;
+  // The turn clock starts when the user hands us the prompt, before the SDK
+  // round trip, so queueing and connection time are included in the total.
+  session.turnStartTs = Date.now();
   setStatus(session, 'busy');
   try {
     await session.sdk.send({ prompt, agentMode: session.mode });
@@ -1491,19 +1713,67 @@ export async function resumeAgentSession(userId: string, sessionId: string): Pro
   const existing = agentSessions.get(sessionId);
   if (existing && existing.alive) return existing;
 
+  // Coalesce concurrent resumes of the same id onto one promise so overlapping
+  // connects can never build competing session objects (see `resumeInFlight`).
+  const pending = resumeInFlight.get(sessionId);
+  if (pending) return pending;
+
+  const run = resumeAgentSessionUncached(userId, sessionId).finally(() => {
+    resumeInFlight.delete(sessionId);
+  });
+  resumeInFlight.set(sessionId, run);
+  return run;
+}
+
+async function resumeAgentSessionUncached(
+  userId: string,
+  sessionId: string,
+): Promise<AgentSession | undefined> {
+  // A resume may have completed while we were queued behind another caller.
+  const existing = agentSessions.get(sessionId);
+  if (existing && existing.alive) return existing;
+
   const client = await getClient();
-  let sessionRef: AgentSession | undefined;
 
   // Load persisted state first: a resumed session may re-emit permission
   // prompts immediately, and the handler needs to know whether this session
   // had "allow all" enabled before it was detached.
   const persisted = loadAgentState(sessionId);
+  // The runtime negotiates tool availability per-connection: resuming without
+  // re-declaring the tools a session was created with leaves it with none,
+  // so any turn that needs to call a tool silently stalls or errors — this is
+  // the "dead after a server restart" symptom. Recover the original kind from
+  // `cli_sessions` (not persisted in `PersistedAgentState`) so we can rebuild
+  // the same tool set `createAgentSession` registered.
+  const kindRow = getDb().prepare('SELECT kind FROM cli_sessions WHERE id = ?').get(sessionId) as
+    | { kind?: AgentSessionKind }
+    | undefined;
+  const kind: AgentSessionKind = kindRow?.kind ?? 'agent';
+  const projectId = persisted.projectId ?? null;
+  const worktreeId = persisted.worktreeId ?? null;
+
+  const session = createPendingAgentSession(
+    userId,
+    projectId,
+    worktreeId,
+    kind,
+    persisted.cwd ?? process.cwd(),
+    persisted.model ?? DEFAULT_MODEL,
+    persisted.mode ?? DEFAULT_MODE,
+    persisted.allowAllPermissions ?? false,
+  );
+  // Keep the requested id while resume is in flight so diagnostics stay clear.
+  session.sessionId = sessionId;
+  let sessionRef: AgentSession | undefined = session;
+
+  const tools = buildToolsForKind(kind, projectId, worktreeId);
 
   let sdk;
   try {
     sdk = await client.resumeSession(sessionId, {
       streaming: true,
       continuePendingWork: true,
+      tools,
       onPermissionRequest: makePermissionHandler(() => sessionRef, {
         allowAllPermissions: persisted.allowAllPermissions,
       }),
@@ -1513,6 +1783,9 @@ export async function resumeAgentSession(userId: string, sessionId: string): Pro
     console.error(`[agent-bridge] resumeSession failed for ${sessionId}:`, err);
     return undefined;
   }
+  session.sessionId = sdk.sessionId;
+  session.cwd = sdk.workspacePath ?? session.cwd;
+  session.sdk = sdk;
 
   // Stored transcript, used as a fallback when the runtime cannot replay.
   let transcript: AgentTranscriptEvent[] = [];
@@ -1527,36 +1800,7 @@ export async function resumeAgentSession(userId: string, sessionId: string): Pro
       /* ignore corrupt logs */
     }
   }
-
-  const session: AgentSession = {
-    sessionId: sdk.sessionId,
-    userId,
-    projectId: persisted.projectId ?? null,
-    worktreeId: persisted.worktreeId ?? null,
-    cwd: sdk.workspacePath ?? persisted.cwd ?? process.cwd(),
-    model: persisted.model ?? DEFAULT_MODEL,
-    mode: persisted.mode ?? DEFAULT_MODE,
-    status: 'idle',
-    alive: true,
-    transcript,
-    subscribers: new Set(),
-    pendingPermissions: new Map(),
-    pendingPlans: new Map(),
-    sdk,
-    unsubscribe: () => {},
-    saveTimer: null,
-    toolReconcileTimer: null,
-    toolReconcileInFlight: false,
-    busyWatchdogTimer: null,
-    busyWatchdogInFlight: false,
-    assistantByMessageId: new Map(),
-    assistantStartTs: new Map(),
-    toolByCallId: new Map(),
-    share: { mode: 'off', steerable: false },
-    usage: emptyAgentUsage(),
-    allowAllPermissions: persisted.allowAllPermissions ?? false,
-  };
-  sessionRef = session;
+  session.transcript = transcript;
 
   // The runtime's own event log is the source of truth: while we were detached
   // it kept recording (finishing a turn, or shutting the session down), so our
@@ -1575,6 +1819,7 @@ export async function resumeAgentSession(userId: string, sessionId: string): Pro
     session.transcript = [];
     session.assistantByMessageId.clear();
     session.assistantStartTs.clear();
+    session.turnStartTs = null;
     session.toolByCallId.clear();
     // Rebuilt from the log below. Token counts cannot be recovered (the SDK
     // marks `assistant.usage` ephemeral) but the durable usage checkpoints do

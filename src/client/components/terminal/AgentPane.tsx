@@ -1,8 +1,7 @@
 'use client';
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import RichMarkdown from '@/components/markdown/RichMarkdown';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import {
@@ -12,6 +11,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from '@/components/ui/dropdown-menu';
 import {
   Send,
   Square,
@@ -26,7 +31,6 @@ import {
   Rocket,
   SlidersHorizontal,
   Brain,
-  Cog,
   Share2,
   Copy,
   ExternalLink,
@@ -52,7 +56,7 @@ import type {
 } from '@/types';
 
 interface Props {
-  projectId: string;
+  projectId?: string;
   worktreeId?: string;
   sessionId?: string;
   active: boolean;
@@ -61,6 +65,7 @@ interface Props {
   fontSize?: number;
   onSessionId?: (sessionId: string) => void;
   onStatusChange?: (status: string) => void;
+  sessionKind?: 'agent' | 'project_lead' | 'chief_of_staff';
 }
 
 interface PermissionPrompt {
@@ -76,6 +81,7 @@ interface ExitPlanPrompt {
   planContent?: string;
   actions: string[];
   recommended: string;
+  reviewNote?: string;
 }
 
 const MODE_ORDER: AgentMode[] = ['interactive', 'plan', 'autopilot'];
@@ -125,14 +131,13 @@ const KIND_LABEL: Record<AgentSlashCommand['kind'], string> = {
 /**
  * Transcript entry kinds the user can show/hide from the Agent tab. `user`,
  * `assistant` and `error` are core conversation and always shown; the rest are
- * "extra" output types (tool calls, model reasoning, system notices).
+ * "extra" output types (tool calls, model reasoning, notices).
  */
-type FilterableKind = 'tool' | 'reasoning' | 'system' | 'notice';
+type FilterableKind = 'tool' | 'reasoning' | 'notice';
 
 const FILTERABLE_KINDS: { kind: FilterableKind; label: string }[] = [
   { kind: 'tool', label: 'Tool calls' },
   { kind: 'reasoning', label: 'Reasoning' },
-  { kind: 'system', label: 'System messages' },
   { kind: 'notice', label: 'Notices' },
 ];
 
@@ -154,7 +159,6 @@ const ESCAPE_CONFIRM_MS = 3_000;
 const DEFAULT_VISIBILITY: Visibility = {
   tool: true,
   reasoning: true,
-  system: true,
   notice: true,
   toolOutput: true,
 };
@@ -280,6 +284,18 @@ function formatAiu(nanoAiu: number): string {
   return aiu.toFixed(aiu < 1 ? 4 : 2);
 }
 
+function isDarkHexColor(color: string): boolean {
+  const match = color.trim().match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (!match) return true;
+  const hex = match[1].length === 3
+    ? match[1].split('').map((c) => c + c).join('')
+    : match[1];
+  const r = Number.parseInt(hex.slice(0, 2), 16);
+  const g = Number.parseInt(hex.slice(2, 4), 16);
+  const b = Number.parseInt(hex.slice(4, 6), 16);
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) < 140;
+}
+
 function loadVisibility(): Visibility {
   try {
     const raw = localStorage.getItem(VISIBILITY_LS_KEY);
@@ -288,7 +304,6 @@ function loadVisibility(): Visibility {
     return {
       tool: parsed.tool ?? true,
       reasoning: parsed.reasoning ?? true,
-      system: parsed.system ?? true,
       notice: parsed.notice ?? true,
       toolOutput: parsed.toolOutput ?? true,
     };
@@ -307,9 +322,16 @@ export default function AgentPane({
   fontSize = 13,
   onSessionId,
   onStatusChange,
+  sessionKind = 'agent',
 }: Props) {
   const [events, setEvents] = useState<AgentTranscriptEvent[]>([]);
   const [status, setStatus] = useState<AgentStatus>('idle');
+  /**
+   * Wall-clock start of the in-flight turn. Set optimistically the moment the
+   * user submits so the progress timer covers the full request → completion
+   * round trip, then reconciled from the server's authoritative value.
+   */
+  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const [model, setModel] = useState('auto');
   const [mode, setMode] = useState<AgentMode>('interactive');
   const [permissions, setPermissions] = useState<PermissionPrompt[]>([]);
@@ -394,17 +416,18 @@ export default function AgentPane({
           setModel(msg.model);
           setMode(msg.mode);
           setStatus(msg.status);
+          setTurnStartedAt(msg.status === 'busy' ? (msg.turnStartedAt ?? Date.now()) : null);
           setConnError(null);
           break;
         case 'replay':
-          setEvents(msg.events);
+          setEvents(msg.events.filter((e) => e.kind !== 'system'));
           // A replay is a fresh render of the whole conversation (first
           // connect, reconnect, or a manual refresh) — always land at the end.
           atBottomRef.current = true;
           setAtBottom(true);
           break;
         case 'event':
-          upsert(msg.event);
+          if (msg.event.kind !== 'system') upsert(msg.event);
           break;
         case 'assistant_delta':
           applyDelta(msg.id, msg.delta, 'assistant');
@@ -414,6 +437,11 @@ export default function AgentPane({
           break;
         case 'status':
           setStatus(msg.status);
+          // Keep an optimistic local start time if the server has not sent one
+          // yet — never restart the clock mid-turn.
+          setTurnStartedAt((prev) =>
+            msg.status === 'busy' ? (msg.turnStartedAt ?? prev ?? Date.now()) : null,
+          );
           break;
         case 'model':
           setModel(msg.model);
@@ -493,6 +521,7 @@ export default function AgentPane({
     sessionId,
     forceNew: !sessionId,
     model,
+    kind: sessionKind,
     onMessage: handleMessage,
     onReady: onSessionId,
   });
@@ -584,11 +613,39 @@ export default function AgentPane({
   // so a long-running tool never looks like the agent has hung.
   const renderItems = useMemo(() => {
     const items: RenderItem[] = [];
-    for (const e of events) {
+    const renderedReasoningIds = new Set<string>();
+    
+    for (let i = 0; i < events.length; i++) {
+      const e = events[i];
+      
       if (e.kind === 'assistant') {
+        // Reason appears before the message it explains (thinking happens first).
+        // If there's reasoning immediately before this assistant message that hasn't
+        // been rendered yet, render it first.
+        if (i > 0 && events[i - 1].kind === 'reasoning' && !renderedReasoningIds.has(events[i - 1].id)) {
+          const reasoning = events[i - 1];
+          items.push({ type: 'event', key: reasoning.id, event: reasoning });
+          renderedReasoningIds.add(reasoning.id);
+        }
+        
         if (e.content.trim().length > 0) items.push({ type: 'event', key: e.id, event: e });
         continue;
       }
+      
+      // Skip reasoning events that come right before an assistant (handled above)
+      if (e.kind === 'reasoning') {
+        if (i + 1 < events.length && events[i + 1].kind === 'assistant' && !renderedReasoningIds.has(e.id)) {
+          // This will be handled by the assistant case above, so skip it here
+          continue;
+        }
+        // Reasoning that doesn't immediately precede an assistant still renders normally
+        if (!renderedReasoningIds.has(e.id)) {
+          items.push({ type: 'event', key: e.id, event: e });
+          renderedReasoningIds.add(e.id);
+        }
+        continue;
+      }
+      
       // The final "task complete" summary is the agent's closing statement, not
       // incidental tool chatter — it always renders in full, whatever the tool
       // filters say.
@@ -604,7 +661,7 @@ export default function AgentPane({
       }
       // Reasoning is never dropped: unchecking it collapses the entry to a
       // brain badge (handled by ReasoningItem) rather than hiding it.
-      if ((e.kind === 'tool' || e.kind === 'system' || e.kind === 'notice') && !visibility[e.kind]) {
+      if ((e.kind === 'tool' || e.kind === 'notice') && !visibility[e.kind]) {
         continue;
       }
       items.push({ type: 'event', key: e.id, event: e });
@@ -686,7 +743,7 @@ export default function AgentPane({
     () =>
       events.filter((e) => {
         if (e.kind === 'tool') return !visibility.tool || (!visibility.toolOutput && Boolean(e.output));
-        return e.kind === 'reasoning' || e.kind === 'system' || e.kind === 'notice' ? !visibility[e.kind] : false;
+        return e.kind === 'reasoning' || e.kind === 'notice' ? !visibility[e.kind] : false;
       }).length,
     [events, visibility],
   );
@@ -930,6 +987,7 @@ export default function AgentPane({
       return;
     }
     send({ type: 'send', prompt: trimmed });
+    setTurnStartedAt(Date.now());
     setInput('');
     atBottomRef.current = true;
   };
@@ -1000,6 +1058,13 @@ export default function AgentPane({
     return undefined;
   }, [events]);
   const busy = status === 'busy' || Boolean(activeTool) || permissions.length > 0 || exitPlans.length > 0;
+
+  // `busy` can also be driven by a running tool or a pending prompt with no
+  // status message of its own — anchor the turn clock in those cases too, and
+  // release it the moment the turn completes.
+  useEffect(() => {
+    setTurnStartedAt((prev) => (busy ? (prev ?? Date.now()) : null));
+  }, [busy]);
 
   // --- Escape-to-stop (terminal-style double press) ------------------------
   const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1701,6 +1766,7 @@ export default function AgentPane({
             <div className="flex items-center gap-1.5 text-sm font-medium">
               <ClipboardList className="h-4 w-4 text-sky-500" /> Plan ready
             </div>
+            {p.reviewNote && <div className="text-xs text-amber-600">{p.reviewNote}</div>}
             {p.summary && <div className="text-xs whitespace-pre-wrap break-words">{p.summary}</div>}
             {p.planContent && (
               <pre
@@ -1753,6 +1819,15 @@ export default function AgentPane({
 
       {/* Composer */}
       <div className="border-t p-2 shrink-0" style={{ borderColor: appearance.border }}>
+        {busy && (
+          <TurnProgress
+            appearance={appearance}
+            label={statusLabel}
+            startedAt={turnStartedAt}
+            toolName={activeTool?.toolName}
+            toolProgress={activeTool?.progress}
+          />
+        )}
         {subcommandPrompt && (
           <div
             data-testid="subcommand-menu"
@@ -1970,46 +2045,14 @@ const TranscriptItem = memo(function TranscriptItem({
   }
 
   if (event.kind === 'assistant') {
-    return (
-      <div className="flex flex-col items-start gap-0.5">
-        <span
-          className="text-[10px] uppercase tracking-wide px-1 flex items-center gap-1"
-          style={{ color: MODE_META.interactive.color }}
-        >
-          <MessageSquare className="h-3 w-3" />
-          Copilot
-          <EntryTime ts={event.ts} durationMs={event.durationMs} />
-        </span>
-        <div
-          className="max-w-[85%] rounded-2xl rounded-bl-sm px-4 py-2 overflow-hidden prose prose-sm dark:prose-invert max-w-none"
-          style={{ backgroundColor: appearance.surface, color: appearance.fg }}
-        >
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{event.content || '…'}</ReactMarkdown>
-        </div>
-      </div>
-    );
+    return <AssistantItem event={event} appearance={appearance} />;
   }
 
   if (event.kind === 'reasoning') {
     return <ReasoningItem event={event} appearance={appearance} expanded={showReasoning} />;
   }
 
-  if (event.kind === 'system') {
-    return (
-      <details className="text-xs" style={{ color: appearance.muted }}>
-        <summary className="cursor-pointer select-none flex items-center gap-1">
-          <Cog className="h-3 w-3" />
-          System message
-        </summary>
-        <div
-          className="mt-1 whitespace-pre-wrap break-words pl-2 border-l font-mono"
-          style={{ borderColor: appearance.border, fontSize: codeSize }}
-        >
-          {event.content}
-        </div>
-      </details>
-    );
-  }
+  if (event.kind === 'system') return null;
 
   if (event.kind === 'tool') {
     if (isTaskComplete(event.toolName)) {
@@ -2034,6 +2077,92 @@ const TranscriptItem = memo(function TranscriptItem({
     </div>
   );
 });
+
+/**
+ * A single Copilot reply. Extracted from `TranscriptItem` so it can own a ref to
+ * the rendered markdown (for "copy as text") and the copy-menu state without
+ * tripping the rules of hooks in `TranscriptItem`'s branching render.
+ */
+const AssistantItem = memo(function AssistantItem({
+  event,
+  appearance,
+}: {
+  event: Extract<AgentTranscriptEvent, { kind: 'assistant' }>;
+  appearance: Appearance;
+}) {
+  const contentRef = useRef<HTMLDivElement>(null);
+  return (
+    <div className="group flex flex-col items-start gap-0.5">
+      <span
+        className="text-[10px] uppercase tracking-wide px-1 flex items-center gap-1 w-full"
+        style={{ color: MODE_META.interactive.color }}
+      >
+        <MessageSquare className="h-3 w-3" />
+        Copilot
+        <EntryTime ts={event.ts} durationMs={event.durationMs} />
+        {event.content && (
+          <AssistantCopyMenu markdown={event.content} contentRef={contentRef} appearance={appearance} />
+        )}
+      </span>
+      <div
+        ref={contentRef}
+        className="max-w-[85%] rounded-2xl rounded-bl-sm px-4 py-2 overflow-hidden prose prose-sm dark:prose-invert max-w-none"
+        style={{ backgroundColor: appearance.surface, color: appearance.fg }}
+      >
+        <RichMarkdown content={event.content || '…'} darkMode={isDarkHexColor(appearance.bg)} />
+      </div>
+    </div>
+  );
+});
+
+/**
+ * Copy control for a Copilot reply. "Markdown" copies the raw source verbatim;
+ * "text" copies the rendered `innerText` (what the user actually sees, with the
+ * markdown syntax stripped) and falls back to the source if the DOM node is
+ * unavailable.
+ */
+function AssistantCopyMenu({
+  markdown,
+  contentRef,
+  appearance,
+}: {
+  markdown: string;
+  contentRef: React.RefObject<HTMLDivElement | null>;
+  appearance: Appearance;
+}) {
+  const [copied, setCopied] = useState<'text' | 'markdown' | null>(null);
+
+  const copy = (kind: 'text' | 'markdown') => {
+    const value =
+      kind === 'markdown' ? markdown : (contentRef.current?.innerText?.trim() || markdown);
+    if (!navigator.clipboard) return;
+    void navigator.clipboard.writeText(value).then(() => {
+      setCopied(kind);
+      window.setTimeout(() => setCopied(null), 1_500);
+    });
+  };
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        data-testid="assistant-copy-button"
+        title="Copy response"
+        className="ml-auto flex items-center rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100 data-[popup-open]:opacity-100"
+        style={{ color: appearance.muted }}
+      >
+        {copied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-[10rem]">
+        <DropdownMenuItem data-testid="assistant-copy-text" onClick={() => copy('text')}>
+          Copy as text
+        </DropdownMenuItem>
+        <DropdownMenuItem data-testid="assistant-copy-markdown" onClick={() => copy('markdown')}>
+          Copy as Markdown
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
 
 /**
  * Reasoning trace.
@@ -2120,7 +2249,6 @@ const TaskCompleteItem = memo(function TaskCompleteItem({
     const fromArgs = typeof record?.summary === 'string' ? record.summary : undefined;
     return (fromArgs || event.output || '').trim();
   }, [event.args, event.output]);
-
   return (
     <div className="flex flex-col items-start gap-0.5">
       <span
@@ -2135,7 +2263,7 @@ const TaskCompleteItem = memo(function TaskCompleteItem({
         className="max-w-[85%] rounded-2xl rounded-bl-sm px-4 py-2 overflow-hidden border border-emerald-500/40 prose prose-sm dark:prose-invert"
         style={{ backgroundColor: appearance.surface, color: appearance.fg }}
       >
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{summary || 'Task complete.'}</ReactMarkdown>
+        <RichMarkdown content={summary || 'Task complete.'} darkMode={isDarkHexColor(appearance.bg)} />
       </div>
     </div>
   );
@@ -2509,10 +2637,84 @@ function ToolDetailDialog({
 
 
 function formatElapsed(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return `${minutes}m ${remainder}s`;
+  const safe = Math.max(0, Math.floor(seconds));
+  if (safe < 60) return `${safe}s`;
+  const minutes = Math.floor(safe / 60);
+  const remainder = safe % 60;
+  return `${minutes}m ${String(remainder).padStart(2, '0')}s`;
+}
+
+/**
+ * Live counter for the in-flight turn. Ticks once a second from `startedAt`,
+ * which is the moment the user submitted the request.
+ */
+function useElapsedSeconds(startedAt: number | null): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (startedAt === null) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [startedAt]);
+  if (startedAt === null) return 0;
+  return Math.max(0, Math.floor((now - startedAt) / 1_000));
+}
+
+/**
+ * Progress banner shown above the composer for as long as the agent is working.
+ * It reports what the agent is doing plus how long the user has been waiting,
+ * measured from their own request rather than from the model's first token.
+ */
+function TurnProgress({
+  appearance,
+  label,
+  startedAt,
+  toolName,
+  toolProgress,
+}: {
+  appearance: Appearance;
+  label: string;
+  startedAt: number | null;
+  toolName?: string;
+  toolProgress?: string;
+}) {
+  const seconds = useElapsedSeconds(startedAt);
+  const detail = toolProgress || (toolName ? `${toolName}…` : '');
+
+  return (
+    <div
+      data-testid="agent-turn-progress"
+      role="status"
+      aria-live="polite"
+      className="mb-1 rounded-md border overflow-hidden"
+      style={{ borderColor: appearance.border, backgroundColor: appearance.surface }}
+    >
+      <div className="flex items-center gap-1.5 px-2 py-1 text-[11px]">
+        <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0 text-amber-600" />
+        <span className="font-semibold shrink-0" style={{ color: appearance.fg }}>
+          {label}
+        </span>
+        {detail && (
+          <span className="truncate" style={{ color: appearance.muted }}>
+            {detail}
+          </span>
+        )}
+        <span
+          data-testid="agent-turn-elapsed"
+          className="ml-auto shrink-0 tabular-nums"
+          style={{ color: appearance.muted }}
+          title="Elapsed since you sent this request"
+        >
+          {formatElapsed(seconds)}
+        </span>
+      </div>
+      {/* Indeterminate bar — the runtime reports no percentage, so this conveys
+          liveness rather than a completion ratio. */}
+      <div className="h-0.5 w-full overflow-hidden" style={{ backgroundColor: appearance.surfaceStrong }}>
+        <div className="h-full w-1/3 animate-agent-progress" style={{ backgroundColor: appearance.accent }} />
+      </div>
+    </div>
+  );
 }
 
 /** Short wall-clock label for a transcript entry, e.g. `14:32`. */
@@ -2525,11 +2727,12 @@ function formatFullTime(ts: number): string {
   return new Date(ts).toLocaleString();
 }
 
+/**
+ * Durations are always reported in minutes/seconds so the agent chat reads the
+ * same way everywhere — sub-second work simply rounds to `0s`.
+ */
 function formatDurationMs(ms: number): string {
-  if (ms < 1_000) return `${Math.max(0, Math.round(ms))}ms`;
-  const seconds = ms / 1_000;
-  if (seconds < 10) return `${seconds.toFixed(1)}s`;
-  return formatElapsed(Math.round(seconds));
+  return formatElapsed(Math.round(Math.max(0, ms) / 1_000));
 }
 
 /**
@@ -2545,4 +2748,3 @@ function EntryTime({ ts, durationMs }: { ts: number; durationMs?: number }) {
     </span>
   );
 }
-

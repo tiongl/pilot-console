@@ -5,13 +5,15 @@ import { useTheme, THEMES, type ThemeId } from '../lib/theme-context';
 import { useSplit, type SplitContent } from '../lib/split-context';
 import { isValidSplitLayout } from '../lib/project-split-context';
 import { Button } from '../components/ui/button';
-import { Plus, LogOut, FolderOpen, Pin, Palette, Settings, ChevronRight, ChevronDown, GitBranch, Trash2, Clock, Zap, Wrench, Columns2 } from 'lucide-react';
+import { Plus, LogOut, FolderOpen, Pin, Palette, Settings, ChevronRight, ChevronDown, GitBranch, Trash2, Clock, Zap, Wrench, Columns2, Home } from 'lucide-react';
 import { SkillCatalog, InstalledSkillsPanel } from '../pages/ProjectSkillsPage';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { PilotConsoleLogo } from '../components/PilotConsoleLogo';
 import { useAutomation } from '../lib/automation-context';
+import CoSStatusWidget from '../components/cos/CoSStatusWidget';
+import FloatingLeadChat from '../components/cos/FloatingLeadChat';
 
 const ProjectLayout = lazy(() => import('./ProjectLayout'));
 const WorktreeLayout = lazy(() => import('./WorktreeLayout'));
@@ -788,6 +790,16 @@ export default function DashboardLayout() {
         </div>
         <div className="border-t mx-3 mb-2" />
 
+        <Link
+          to="/"
+          className={`mb-2 flex items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors ${
+            location.pathname === '/' ? 'bg-accent text-accent-foreground font-medium' : 'hover:bg-accent hover:text-accent-foreground'
+          }`}
+        >
+          <Home className="h-4 w-4" />
+          <span>Chief of Staff</span>
+        </Link>
+
         {/* Projects section — top half */}
         <div className="flex items-center justify-between px-3 mb-1">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Projects</span>
@@ -1003,6 +1015,8 @@ export default function DashboardLayout() {
           <Outlet />
         </main>
       )}
+      <CoSStatusWidget />
+      <FloatingLeadChat projects={projects.map((p) => ({ id: p.id, name: p.name }))} />
 
       <Dialog open={showSkillsDialog} onOpenChange={setShowSkillsDialog}>
         <DialogContent className="sm:max-w-2xl max-h-[80vh] flex flex-col">
