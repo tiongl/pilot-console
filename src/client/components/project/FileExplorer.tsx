@@ -1,10 +1,11 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo, useRef, useId, lazy, Suspense } from 'react';
-import { Folder, File, ChevronRight, ChevronDown, ChevronLeft, X, Copy, Check, Image as ImageIcon, Eye, Code, Minus, Plus, WrapText, Hash, Search, Pencil, Save, Undo2, FilePlus, Maximize2, RefreshCw } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo, useRef, useId, lazy, Suspense, type PointerEvent as ReactPointerEvent } from 'react';
+import { Folder, File, ChevronRight, ChevronDown, ChevronLeft, X, Copy, Check, Image as ImageIcon, Eye, Code, Minus, Plus, WrapText, Hash, Search, Pencil, Save, Undo2, FilePlus, Maximize2, RefreshCw, FolderOpen } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { toast } from 'sonner';
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter';
 import ts from 'react-syntax-highlighter/dist/esm/languages/hljs/typescript';
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript';
@@ -158,7 +159,7 @@ function resolveMarkdownFileHref(currentPath: string, href: string): string | nu
   return parts.join('/');
 }
 
-function buildFileApiUrl(projectId: string, endpoint: 'files' | 'files-search' | 'file' | 'file-raw', params: Record<string, string | undefined>, worktreeId?: string): string {
+function buildFileApiUrl(projectId: string, endpoint: 'files' | 'files-search' | 'file' | 'file-raw' | 'file-reveal', params: Record<string, string | undefined>, worktreeId?: string): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined) search.set(key, value);
@@ -228,10 +229,21 @@ function ImageViewer({ projectId, worktreeId, filePath }: { projectId: string; w
   );
 }
 
+const MERMAID_MIN_SCALE = 0.2;
+const MERMAID_MAX_SCALE = 8;
+
 function MermaidDiagram({ chart, darkMode }: { chart: string; darkMode: boolean }) {
   const id = useId().replace(/:/g, '');
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const frameRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const fittedViewRef = useRef({ scale: 1, x: 0, y: 0 });
+  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -257,6 +269,141 @@ function MermaidDiagram({ chart, darkMode }: { chart: string; darkMode: boolean 
     return () => { cancelled = true; };
   }, [chart, darkMode, id]);
 
+  // A re-render invalidates any pan/zoom the user had applied.
+  useEffect(() => { setView({ scale: 1, x: 0, y: 0 }); }, [chart]);
+
+  // Mermaid emits `width="100%"` plus an inline `max-width`, so the rendered
+  // box depends on layout context. The viewBox is the diagram's true size.
+  const naturalSize = useMemo(() => {
+    if (!svg) return null;
+    const match = svg.match(/viewBox="([-\d.eE+\s]+)"/);
+    if (!match) return null;
+    const parts = match[1].trim().split(/\s+/).map(Number);
+    if (parts.length !== 4 || !(parts[2] > 0) || !(parts[3] > 0)) return null;
+    return { width: parts[2], height: parts[3] };
+  }, [svg]);
+
+  /**
+   * Scale the diagram — up or down — until it fills the frame, and centre it.
+   */
+  const fit = useCallback(() => {
+    const frame = frameRef.current;
+    const content = contentRef.current;
+    if (!frame || !content) return;
+    const current = viewRef.current.scale || 1;
+    const rect = content.getBoundingClientRect();
+    const naturalWidth = naturalSize?.width ?? rect.width / current;
+    const naturalHeight = naturalSize?.height ?? rect.height / current;
+    if (!naturalWidth || !naturalHeight || !frame.clientWidth || !frame.clientHeight) return;
+    // Mermaid sizes an SVG to its own content, which is often far smaller than
+    // the frame — so fitting must be free to enlarge, not just shrink.
+    const padding = 24;
+    const scale = Math.min(
+      MERMAID_MAX_SCALE,
+      Math.max(
+        MERMAID_MIN_SCALE,
+        Math.min(
+          Math.max(1, frame.clientWidth - padding) / naturalWidth,
+          Math.max(1, frame.clientHeight - padding) / naturalHeight,
+        ),
+      ),
+    );
+    const fitted = {
+      scale,
+      x: Math.max(0, (frame.clientWidth - naturalWidth * scale) / 2),
+      y: Math.max(0, (frame.clientHeight - naturalHeight * scale) / 2),
+    };
+    fittedViewRef.current = fitted;
+    setView(fitted);
+  }, [naturalSize]);
+
+  // Fit once the SVG lands, and again when the frame resizes (e.g. fullscreen).
+  useEffect(() => {
+    if (!svg) return;
+    const raf = requestAnimationFrame(fit);
+    return () => cancelAnimationFrame(raf);
+  }, [svg, fit]);
+
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame || !svg || typeof ResizeObserver === 'undefined') return;
+    let first = true;
+    const observer = new ResizeObserver(() => {
+      // Skip the initial synchronous callback; the effect above already fit.
+      if (first) { first = false; return; }
+      fit();
+    });
+    observer.observe(frame);
+    return () => observer.disconnect();
+  }, [svg, fit]);
+
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(document.fullscreenElement === frameRef.current);
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+
+  /** Zoom about a fixed point so the content under the cursor stays put. */
+  const zoomAt = useCallback((factor: number, clientX?: number, clientY?: number) => {
+    const frame = frameRef.current;
+    setView((prev) => {
+      const scale = Math.min(MERMAID_MAX_SCALE, Math.max(MERMAID_MIN_SCALE, prev.scale * factor));
+      if (scale === prev.scale) return prev;
+      const rect = frame?.getBoundingClientRect();
+      const anchorX = clientX !== undefined && rect ? clientX - rect.left : (rect?.width ?? 0) / 2;
+      const anchorY = clientY !== undefined && rect ? clientY - rect.top : (rect?.height ?? 0) / 2;
+      const ratio = scale / prev.scale;
+      return {
+        scale,
+        x: anchorX - (anchorX - prev.x) * ratio,
+        y: anchorY - (anchorY - prev.y) * ratio,
+      };
+    });
+  }, []);
+
+  // Wheel zoom must be a non-passive native listener: React's onWheel is
+  // registered passively, so preventDefault() there is ignored and the page
+  // scrolls anyway.
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame || !svg) return;
+    const onWheel = (e: WheelEvent) => {
+      // Plain wheel keeps scrolling the document; only Ctrl/⌘ + wheel zooms.
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX, e.clientY);
+    };
+    frame.addEventListener('wheel', onWheel, { passive: false });
+    return () => frame.removeEventListener('wheel', onWheel);
+  }, [svg, zoomAt]);
+
+  const onPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    dragRef.current = { pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, originX: viewRef.current.x, originY: viewRef.current.y };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }, []);
+
+  const onPointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    setView((prev) => ({
+      ...prev,
+      x: drag.originX + (e.clientX - drag.startX),
+      y: drag.originY + (e.clientY - drag.startY),
+    }));
+  }, []);
+
+  const endDrag = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    if (dragRef.current?.pointerId !== e.pointerId) return;
+    dragRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement === frameRef.current) void document.exitFullscreen();
+    else void frameRef.current?.requestFullscreen();
+  }, []);
+
   if (error) {
     return (
       <pre className="mb-3 overflow-x-auto rounded bg-[#2d2d2d] p-3 text-xs text-red-300">
@@ -269,12 +416,103 @@ function MermaidDiagram({ chart, darkMode }: { chart: string; darkMode: boolean 
     return <div className="mb-3 rounded border border-border p-4 text-sm text-muted-foreground">Rendering Mermaid diagram...</div>;
   }
 
+  const fitted = fittedViewRef.current;
+  const zoomed =
+    Math.abs(view.scale - fitted.scale) > 0.001 ||
+    Math.abs(view.x - fitted.x) > 0.5 ||
+    Math.abs(view.y - fitted.y) > 0.5;
+
   return (
     <div
-      className="mb-3 overflow-auto rounded border border-border bg-background p-4 [&_svg]:mx-auto [&_svg]:max-w-full"
-      dangerouslySetInnerHTML={{ __html: svg }}
-    />
+      ref={frameRef}
+      data-testid="mermaid-diagram"
+      className={`group relative mb-3 overflow-hidden rounded border border-border bg-background ${isFullscreen ? 'h-screen w-screen' : 'h-[60vh] min-h-[240px]'}`}
+    >
+      <div
+        className="h-full w-full cursor-grab touch-none active:cursor-grabbing"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onDoubleClick={fit}
+      >
+        <div
+          ref={contentRef}
+          className="inline-block origin-top-left [&_svg]:block [&_svg]:h-full [&_svg]:w-full [&_svg]:max-w-none"
+          style={{
+            transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
+            width: naturalSize ? `${naturalSize.width}px` : undefined,
+            height: naturalSize ? `${naturalSize.height}px` : undefined,
+          }}
+          dangerouslySetInnerHTML={{ __html: svg }}
+        />
+      </div>
+
+      <div className="absolute right-2 top-2 flex items-center gap-1 rounded border border-border bg-background/90 p-0.5 opacity-0 shadow-sm transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+        <Button variant="ghost" size="icon" className="h-6 w-6" title="Zoom out" aria-label="Zoom out"
+          onClick={() => zoomAt(1 / 1.25)}>
+          <Minus className="h-3.5 w-3.5" />
+        </Button>
+        <span className="min-w-[4ch] text-center text-[10px] tabular-nums text-muted-foreground">
+          {Math.round(view.scale * 100)}%
+        </span>
+        <Button variant="ghost" size="icon" className="h-6 w-6" title="Zoom in" aria-label="Zoom in"
+          onClick={() => zoomAt(1.25)}>
+          <Plus className="h-3.5 w-3.5" />
+        </Button>
+        <Button variant="ghost" size="icon" className="h-6 w-6" title="Fit to view (or double-click)" aria-label="Fit diagram to view"
+          onClick={fit} disabled={!zoomed}>
+          <RefreshCw className="h-3.5 w-3.5" />
+        </Button>
+        <Button variant="ghost" size="icon" className="h-6 w-6" title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen diagram'} aria-label="Toggle diagram fullscreen"
+          onClick={toggleFullscreen}>
+          <Maximize2 className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+
+      <div className="pointer-events-none absolute bottom-1.5 left-2 text-[10px] text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100">
+        Drag to pan · Ctrl/⌘ + scroll to zoom · double-click to fit
+      </div>
+    </div>
   );
+}
+
+/**
+ * Per-project (and per-worktree) explorer state that should survive the
+ * component being unmounted — switching routes, reopening the project, or
+ * reloading the page.
+ */
+const EXPLORER_STATE_VERSION = 1;
+
+interface PersistedExplorerState {
+  version: number;
+  openPath?: string;
+  expandedDirs?: string[];
+}
+
+function explorerStateKey(projectId: string, worktreeId?: string): string {
+  return `pilot-console-file-explorer:${projectId}${worktreeId ? `:${worktreeId}` : ''}`;
+}
+
+function loadExplorerState(projectId: string, worktreeId?: string): PersistedExplorerState | null {
+  try {
+    const raw = localStorage.getItem(explorerStateKey(projectId, worktreeId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PersistedExplorerState;
+    if (parsed?.version !== EXPLORER_STATE_VERSION) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveExplorerState(projectId: string, worktreeId: string | undefined, state: Omit<PersistedExplorerState, 'version'>): void {
+  try {
+    localStorage.setItem(
+      explorerStateKey(projectId, worktreeId),
+      JSON.stringify({ version: EXPLORER_STATE_VERSION, ...state }),
+    );
+  } catch { /* quota exceeded — ignore */ }
 }
 
 export default function FileExplorer({ projectId, worktreeId, onClose, embedded }: { projectId: string; worktreeId?: string; onClose?: () => void; embedded?: boolean }) {
@@ -296,6 +534,7 @@ export default function FileExplorer({ projectId, worktreeId, onClose, embedded 
   const [editContent, setEditContent] = useState('');
   const [originalContent, setOriginalContent] = useState('');
   const [saving, setSaving] = useState(false);
+  const [revealingFile, setRevealingFile] = useState(false);
   const [saveError, setSaveError] = useState('');
   const [newFilePrompt, setNewFilePrompt] = useState(false);
   const [newFilePath, setNewFilePath] = useState('');
@@ -472,8 +711,47 @@ export default function FileExplorer({ projectId, worktreeId, onClose, embedded 
     return true;
   }, [projectId, restoreMarkdownScrollAfterRender, worktreeId]);
 
-  const canGoBack = viewerHistory.index > 0;
-  const canGoForward = viewerHistory.index >= 0 && viewerHistory.index < viewerHistory.entries.length - 1;
+  // Restore the previously open file and expanded folders. The tab itself keeps
+  // this component mounted, but changing route/project/worktree — or reloading
+  // — does not, so the state has to come back from storage.
+  const restoredKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const key = explorerStateKey(projectId, worktreeId);
+    if (restoredKeyRef.current === key) return;
+    restoredKeyRef.current = key;
+
+    const saved = loadExplorerState(projectId, worktreeId);
+    if (!saved) return;
+
+    let cancelled = false;
+    (async () => {
+      const dirs = saved.expandedDirs ?? [];
+      if (dirs.length > 0) {
+        const loaded = await Promise.all(dirs.map(async (p) => [p, await fetchDir(p)] as const));
+        if (cancelled) return;
+        setDirContents((prev) => {
+          const next = new Map(prev);
+          for (const [p, items] of loaded) next.set(p, items);
+          return next;
+        });
+        setExpandedDirs(new Set(dirs));
+      }
+      if (saved.openPath && !cancelled) await openFile(saved.openPath);
+    })();
+
+    return () => { cancelled = true; };
+  }, [fetchDir, openFile, projectId, worktreeId]);
+
+  useEffect(() => {
+    // Wait for the restore pass so an empty initial state cannot overwrite it.
+    if (restoredKeyRef.current !== explorerStateKey(projectId, worktreeId)) return;
+    saveExplorerState(projectId, worktreeId, {
+      openPath: viewer?.path,
+      expandedDirs: Array.from(expandedDirs),
+    });
+  }, [expandedDirs, projectId, viewer?.path, worktreeId]);
+
+  const canGoBack = viewerHistory.index > 0;  const canGoForward = viewerHistory.index >= 0 && viewerHistory.index < viewerHistory.entries.length - 1;
 
   const navigateViewerHistory = useCallback(async (delta: -1 | 1) => {
     rememberCurrentMarkdownScroll();
@@ -496,6 +774,27 @@ export default function FileExplorer({ projectId, worktreeId, onClose, embedded 
       setTimeout(() => setCopied(false), 1500);
     }
   }, [viewer]);
+
+  const revealFileInSystem = useCallback(async () => {
+    if (!viewer || revealingFile) return;
+    setRevealingFile(true);
+    try {
+      const res = await fetch(buildFileApiUrl(projectId, 'file-reveal', { path: viewer.path }, worktreeId), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: viewer.path }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error((data as { error?: string }).error || 'Failed to open file location');
+      }
+      toast.success('Opened file location');
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setRevealingFile(false);
+    }
+  }, [projectId, revealingFile, viewer, worktreeId]);
 
   const canEdit = viewer && viewer.content !== null && !viewer.binary && !viewer.truncated && !isImageFile(viewer.path);
 
@@ -874,6 +1173,18 @@ export default function FileExplorer({ projectId, worktreeId, onClose, embedded 
                   {viewer.content && !isEditing && (
                     <Button variant="ghost" size="icon" className="h-7 w-7" onClick={copyContent} title="Copy file content">
                       {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                    </Button>
+                  )}
+                  {viewer && !viewer.loading && !isEditing && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={revealFileInSystem}
+                      disabled={revealingFile}
+                      title="Show file in file system"
+                    >
+                      <FolderOpen className="h-4 w-4" />
                     </Button>
                   )}
                   {/* Edit toggle */}

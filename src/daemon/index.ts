@@ -22,6 +22,7 @@ import {
   type SessionInfo,
   type SessionMeta,
 } from './protocol';
+import { getHostedRuntime, killHostedRuntime } from './runtime-host';
 import path from 'path';
 import os from 'os';
 
@@ -176,6 +177,8 @@ function handleCommand(socket: net.Socket, cmd: DaemonCommand) {
       return handlePeek(socket, cmd);
     case 'runOnce':
       return handleRunOnce(socket, cmd);
+    case 'runtimeInfo':
+      return handleRuntimeInfo(socket, cmd);
   }
 }
 
@@ -366,6 +369,21 @@ function handlePeek(socket: net.Socket, cmd: DaemonCommand & { cmd: 'peek' }) {
     alive: session.alive,
     exitCode: session.exitCode,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Hosted Copilot SDK runtime
+// ---------------------------------------------------------------------------
+
+async function handleRuntimeInfo(socket: net.Socket, cmd: DaemonCommand & { cmd: 'runtimeInfo' }) {
+  try {
+    const runtime = await getHostedRuntime(cmd.restart === true);
+    send(socket, { type: 'runtimeInfo', reqId: cmd.reqId, runtime });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[daemon] runtimeInfo failed:', message);
+    send(socket, { type: 'error', reqId: cmd.reqId, error: message });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -613,6 +631,7 @@ function start() {
   // Graceful shutdown: kill all sessions, clean up socket
   const shutdown = () => {
     console.log('[daemon] Shutting down...');
+    killHostedRuntime();
     for (const s of sessions.values()) {
       if (s.alive) {
         try { s.proc.kill(); } catch { /* ok */ }

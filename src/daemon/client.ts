@@ -24,6 +24,7 @@ import {
   type PeekedResp,
   type RunOnceCompleteResp,
   type SessionMeta,
+  type RuntimeDescriptor,
 } from './protocol';
 import { traceStart } from '../server/perf-monitor';
 
@@ -436,6 +437,24 @@ export class DaemonClient {
     });
     if (resp.type === 'error') throw new Error(resp.error);
     return resp as PeekedResp;
+  }
+
+  /**
+   * Connection descriptor for the daemon-hosted Copilot SDK runtime. The
+   * daemon starts the runtime on first request and owns it for its lifetime,
+   * so agent sessions outlive UI-server restarts. Pass `restart` to force a
+   * fresh runtime (e.g. after the previous one died).
+   */
+  async runtimeInfo(restart = false): Promise<RuntimeDescriptor> {
+    await this.ensureConnected();
+    const resp = await this.request({
+      cmd: 'runtimeInfo',
+      reqId: this.nextReqId(),
+      restart,
+    });
+    if (resp.type === 'error') throw new Error(resp.error);
+    if (resp.type !== 'runtimeInfo') throw new Error('Unexpected response to runtimeInfo');
+    return resp.runtime;
   }
 
   /** Subscribe to output from a session */

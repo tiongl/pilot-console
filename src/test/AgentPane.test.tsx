@@ -6,14 +6,16 @@ import type { AgentServerMessage } from '@/types';
 // expose the mocked `send` so we can assert client → server messages.
 const hooked = vi.hoisted(() => ({
   onMessage: undefined as ((msg: AgentServerMessage) => void) | undefined,
+  lastOptions: null as { onMessage?: (msg: AgentServerMessage) => void; forceNew?: boolean } | null,
   send: vi.fn(),
   reset: vi.fn(),
   switchTo: vi.fn(),
 }));
 
 vi.mock('@/hooks/useAgentSocket', () => ({
-  useAgentSocket: (opts: { onMessage?: (msg: AgentServerMessage) => void }) => {
+  useAgentSocket: (opts: { onMessage?: (msg: AgentServerMessage) => void; forceNew?: boolean }) => {
     hooked.onMessage = opts.onMessage;
+    hooked.lastOptions = opts;
     return { state: 'open' as const, send: hooked.send, reset: hooked.reset, switchTo: hooked.switchTo };
   },
 }));
@@ -28,12 +30,25 @@ function emit(msg: AgentServerMessage) {
 
 describe('AgentPane', () => {
   beforeEach(() => {
+    // The View filters persist to localStorage, so reset them or a test that
+    // toggles a filter leaks that choice into every later test.
+    localStorage.clear();
     hooked.send.mockClear();
     hooked.reset.mockClear();
     hooked.switchTo.mockClear();
     hooked.onMessage = undefined;
+    hooked.lastOptions = null;
     global.fetch = vi.fn(() =>
-      Promise.resolve({ json: () => Promise.resolve({ models: [{ id: 'auto', name: 'Auto' }] }) }),
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            models: [
+              { id: 'auto', name: 'Auto' },
+              { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5' },
+            ],
+          }),
+      }),
     ) as unknown as typeof fetch;
   });
 
@@ -64,13 +79,62 @@ describe('AgentPane', () => {
     expect(screen.getByText('Hi there')).toBeTruthy();
   });
 
+  it('hides an assistant entry that has no text', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'user', id: 'u1', ts: 1, content: 'Hello agent' },
+        { kind: 'assistant', id: 'a1', ts: 2, content: '' },
+      ],
+    });
+    await waitFor(() => expect(screen.getByText('Hello agent')).toBeTruthy());
+    expect(screen.queryByText('Copilot')).toBeNull();
+  });
+
+  it('requests a brand-new agent session when the tab has no session id', () => {    renderPane();
+    expect(hooked.lastOptions?.forceNew).toBe(true);
+  });
+
+  it('does not force a new session when resuming an existing tab session', () => {
+    render(<AgentPane projectId="p1" active sessionId="sess-current" />);
+    expect(hooked.lastOptions?.forceNew).toBe(false);
+  });
+
   it('renders a tool activity card with the tool name', async () => {
     renderPane();
     emit({
       type: 'event',
-      event: { kind: 'tool', id: 't1', ts: 1, toolCallId: 'c1', toolName: 'bash', status: 'running' },
+      event: {
+        kind: 'tool',
+        id: 't1',
+        ts: Date.now(),
+        toolCallId: 'c1',
+        toolName: 'bash',
+        status: 'running',
+        progress: 'Launching command',
+      },
     });
     await waitFor(() => expect(screen.getByText('bash')).toBeTruthy());
+    expect(screen.getAllByText('Launching command')).toHaveLength(2);
+    expect(screen.getByTestId('tool-progress-c1')).toHaveTextContent('Running for 0s');
+  });
+
+  it('keeps Stop available while a tool is running even if session status says idle', async () => {
+    renderPane();
+    emit({
+      type: 'event',
+      event: {
+        kind: 'tool',
+        id: 't1',
+        ts: Date.now(),
+        toolCallId: 'c1',
+        toolName: 'apply_patch',
+        status: 'running',
+      },
+    });
+    fireEvent.click(await screen.findByTitle('Stop'));
+    expect(hooked.send).toHaveBeenCalledWith({ type: 'cancel' });
   });
 
   it('sends a message when the composer submits', async () => {
@@ -99,8 +163,83 @@ describe('AgentPane', () => {
     });
   });
 
-  it('cycles the agent mode via the bottom indicator and notifies the server', async () => {
+  it('does not duplicate a permission prompt when reconnect state is replayed', async () => {
     renderPane();
+    const request = {
+      type: 'permission_request',
+      requestId: 'r1',
+      title: 'Run shell command',
+      detail: 'ls -la',
+      canSession: true,
+    } as const;
+    emit(request);
+    emit(request);
+    await waitFor(() => expect(screen.getAllByText('Run shell command')).toHaveLength(1));
+  });
+
+  it('offers "Allow everything" on a prompt and stops asking afterwards', async () => {
+    renderPane();
+    emit({
+      type: 'permission_request',
+      requestId: 'r1',
+      title: 'Run shell command',
+      detail: 'ls -la',
+      canSession: false,
+    });
+    await waitFor(() => expect(screen.getByText('Run shell command')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('permission-allow-everything'));
+    expect(hooked.send).toHaveBeenCalledWith({
+      type: 'permission_response',
+      requestId: 'r1',
+      decision: 'approve-all',
+    });
+    await waitFor(() => expect(screen.queryByText('Run shell command')).toBeNull());
+    expect(screen.getByTestId('agent-allow-all-toggle').textContent).toContain('on');
+  });
+
+  it('toggles allow-all from the bottom bar and reflects the server state', async () => {
+    renderPane();
+    const toggle = screen.getByTestId('agent-allow-all-toggle');
+    expect(toggle.textContent).toContain('off');
+    fireEvent.click(toggle);
+    expect(hooked.send).toHaveBeenCalledWith({ type: 'set_allow_all', enabled: true });
+    await waitFor(() => expect(screen.getByTestId('agent-allow-all-toggle').textContent).toContain('on'));
+
+    emit({ type: 'allow_all', enabled: false });
+    await waitFor(() => expect(screen.getByTestId('agent-allow-all-toggle').textContent).toContain('off'));
+  });
+
+  it('requires a second Escape to stop a running turn', async () => {
+    renderPane();
+    emit({ type: 'status', status: 'busy' });
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.getByTestId('agent-stop-confirm')).toBeTruthy());
+    expect(hooked.send).not.toHaveBeenCalledWith({ type: 'cancel' });
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(hooked.send).toHaveBeenCalledWith({ type: 'cancel' }));
+    expect(screen.queryByTestId('agent-stop-confirm')).toBeNull();
+  });
+
+  it('ignores Escape when the agent is idle', async () => {
+    renderPane();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByTestId('agent-stop-confirm')).toBeNull();
+    expect(hooked.send).not.toHaveBeenCalledWith({ type: 'cancel' });
+  });
+
+  it('lets the user keep the turn running after arming the stop', async () => {
+    renderPane();
+    emit({ type: 'status', status: 'busy' });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.getByTestId('agent-stop-confirm')).toBeTruthy());
+    fireEvent.click(screen.getByText('keep running'));
+    await waitFor(() => expect(screen.queryByTestId('agent-stop-confirm')).toBeNull());
+    expect(hooked.send).not.toHaveBeenCalledWith({ type: 'cancel' });
+  });
+
+  it('cycles the agent mode via the bottom indicator and notifies the server', async () => {    renderPane();
     // Ready defaults to interactive; clicking the indicator cycles to plan.
     const indicator = screen.getByTestId('agent-mode-indicator');
     expect(indicator.textContent).toContain('Interactive');
@@ -166,6 +305,13 @@ describe('AgentPane', () => {
     fireEvent.change(textarea, { target: { value: '/stop' } });
     fireEvent.keyDown(textarea, { key: 'Enter' });
     await waitFor(() => expect(hooked.send).toHaveBeenCalledWith({ type: 'cancel' }));
+  });
+
+  it('sends cancel from the stop button while the agent is busy', async () => {
+    renderPane();
+    emit({ type: 'status', status: 'busy' });
+    fireEvent.click(await screen.findByTitle('Stop'));
+    expect(hooked.send).toHaveBeenCalledWith({ type: 'cancel' });
   });
 
   it('runs /clear to start a new session', async () => {
@@ -306,9 +452,134 @@ describe('AgentPane', () => {
     const toolToggle = await screen.findByLabelText('Tool calls');
     fireEvent.click(toolToggle);
 
-    await waitFor(() => expect(screen.queryByText('bash')).toBeNull());
+    // The expanded tool card is gone; only a compact badge remains.
+    await waitFor(() => expect(screen.queryByTestId('tool-progress-c1')).toBeNull());
+    expect(screen.getByTestId('tool-badge-c1')).toBeTruthy();
     // The assistant message stays visible.
     expect(screen.getByText('Working on it')).toBeTruthy();
+  });
+
+  it('collapses hidden tool calls into mini badges that name the tool on hover', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'tool', id: 't1', ts: 1, toolCallId: 'c1', toolName: 'bash', status: 'success', output: 'ok' },
+        { kind: 'tool', id: 't2', ts: 2, toolCallId: 'c2', toolName: 'view', status: 'running' },
+      ],
+    });
+    await waitFor(() => expect(screen.getByText('bash')).toBeTruthy());
+
+    fireEvent.click(screen.getByTitle('Show/hide output types'));
+    fireEvent.click(await screen.findByLabelText('Tool calls'));
+
+    // Both calls collapse into a single strip of badges, in transcript order.
+    const strip = await screen.findByTestId('tool-badges');
+    expect(strip.children).toHaveLength(2);
+    expect(screen.getByTestId('tool-badge-c1')).toHaveAttribute('title', 'bash\nClick for details');
+    expect(screen.getByTestId('tool-badge-c2')).toHaveAttribute('title', 'view — running…\nClick for details');
+    // The transcript is not treated as empty just because tools are hidden.
+    expect(screen.queryByText(/All output is hidden/)).toBeNull();
+  });
+
+  it('labels badges with the tool name and duration, keeping call detail on hover', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        {
+          kind: 'tool',
+          id: 't1',
+          ts: 1,
+          toolCallId: 'c1',
+          toolName: 'powershell',
+          status: 'success',
+          output: 'ok',
+          durationMs: 2_500,
+          args: { command: 'npm run build', description: 'Build the project' },
+        },
+      ],
+    });
+    await waitFor(() => expect(screen.getByText('powershell')).toBeTruthy());
+
+    fireEvent.click(screen.getByTitle('Show/hide output types'));
+    fireEvent.click(await screen.findByLabelText('Tool calls'));
+
+    const badge = await screen.findByTestId('tool-badge-c1');
+    expect(badge.textContent).toContain('powershell');
+    expect(badge.textContent).not.toContain('Build the project');
+    expect(badge.textContent).toContain('2.5s');
+    // Shell tools are indistinguishable by name alone, so a short command
+    // prefix rides along on the badge face.
+    expect(badge.textContent).toContain('npm run bu…');
+    // The specific call detail lives in the hover tooltip, not the badge face.
+    expect(badge).toHaveAttribute('title', 'powershell — Build the project\nClick for details');
+  });
+
+  it('opens a tool badge in a detail dialog when clicked', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        {
+          kind: 'tool',
+          id: 't1',
+          ts: 1,
+          toolCallId: 'c1',
+          toolName: 'powershell',
+          status: 'success',
+          output: 'build succeeded',
+          durationMs: 1_200,
+          args: { command: 'npm run build', description: 'Build the project' },
+        },
+      ],
+    });
+    await waitFor(() => expect(screen.getByText('powershell')).toBeTruthy());
+
+    fireEvent.click(screen.getByTitle('Show/hide output types'));
+    fireEvent.click(await screen.findByLabelText('Tool calls'));
+    expect(screen.queryByTestId('tool-detail-dialog')).toBeNull();
+
+    fireEvent.click(await screen.findByTestId('tool-badge-c1'));
+
+    const dialog = await screen.findByTestId('tool-detail-dialog');
+    expect(dialog.textContent).toContain('Build the project');
+    expect(dialog.textContent).toContain('npm run build');
+    expect(await screen.findByTestId('tool-detail-output')).toHaveTextContent('build succeeded');
+  });
+
+  it('hides only the tool result body when the "Tool output" sub-filter is unchecked', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'tool', id: 't1', ts: 1, toolCallId: 'c1', toolName: 'bash', status: 'success', output: 'secret out' },
+      ],
+    });
+    await waitFor(() => expect(screen.getByText('bash')).toBeTruthy());
+    // Completed tool cards start collapsed — expand to reveal the output.
+    fireEvent.click(screen.getByText('bash'));
+    expect(screen.getByText('secret out')).toBeTruthy();
+
+    fireEvent.click(screen.getByTitle('Show/hide output types'));
+    fireEvent.click(await screen.findByTestId('filter-tool-output'));
+
+    await waitFor(() => expect(screen.queryByText('secret out')).toBeNull());
+    // The call itself is still listed.
+    expect(screen.getByText('bash')).toBeTruthy();
+    expect(screen.getByTestId('tool-output-hidden-c1')).toBeTruthy();
+  });
+
+  it('disables the "Tool output" sub-filter while tool calls are hidden', async () => {
+    renderPane();
+    fireEvent.click(screen.getByTitle('Show/hide output types'));
+    const outputToggle = await screen.findByTestId('filter-tool-output');
+    expect(outputToggle).not.toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText('Tool calls'));
+
+    await waitFor(() => expect(screen.getByTestId('filter-tool-output')).toBeDisabled());
+    expect(screen.getByTestId('filter-tool-output')).not.toBeChecked();
   });
 
   it('renders a system message entry with a "System message" indicator', async () => {
@@ -406,5 +677,227 @@ describe('AgentPane', () => {
     // A "show earlier" control reveals the next window.
     fireEvent.click(screen.getByText(/earlier of \d+ hidden/i));
     await waitFor(() => expect(screen.getByText('message 100')).toBeTruthy());
+  });
+
+  it('shows the token/credit usage badge in the header', async () => {
+    renderPane();
+    emit({
+      type: 'usage',
+      usage: {
+        inputTokens: 12_500,
+        outputTokens: 2_500,
+        cachedTokens: 0,
+        reasoningTokens: 0,
+        requests: 3,
+        premiumRequests: 3,
+        nanoAiu: 4_200_000_000,
+      },
+    });
+
+    const badge = await screen.findByTestId('agent-usage-button');
+    // 15,000 total tokens, and the premium-request multiplier.
+    expect(badge.textContent).toContain('15.0k');
+    expect(badge.textContent).toContain('3.00×');
+
+    fireEvent.click(badge);
+    const panel = await screen.findByTestId('agent-usage-panel');
+    expect(panel.textContent).toContain('Model calls');
+    expect(panel.textContent).toContain('4.20');
+  });
+
+  it('offers a jump-to-bottom control once the user scrolls up', async () => {
+    const { container } = renderPane();
+    emit({
+      type: 'replay',
+      events: [{ kind: 'assistant', id: 'a1', ts: 1, content: 'First reply' }],
+    });
+    await waitFor(() => expect(screen.getByText('First reply')).toBeTruthy());
+
+    // A replay always lands at the bottom, so the affordance stays hidden.
+    expect(screen.queryByTestId('agent-jump-to-bottom')).toBeNull();
+
+    const scroller = container.querySelector('.overflow-y-auto') as HTMLElement;
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 2_000 });
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 });
+    scroller.scrollTop = 0;
+    fireEvent.scroll(scroller);
+
+    const jump = await screen.findByTestId('agent-jump-to-bottom');
+    fireEvent.click(jump);
+    expect(scroller.scrollTop).toBe(2_000);
+    await waitFor(() => expect(screen.queryByTestId('agent-jump-to-bottom')).toBeNull());
+  });
+
+  it('searches the conversation and reports the match count', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'user', id: 'u1', ts: 1, content: 'please fix the parser' },
+        { kind: 'assistant', id: 'a1', ts: 2, content: 'The parser is fixed' },
+        { kind: 'assistant', id: 'a2', ts: 3, content: 'Anything else?' },
+      ],
+    });
+    await waitFor(() => expect(screen.getByText('Anything else?')).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId('agent-search-toggle'));
+    fireEvent.change(await screen.findByTestId('agent-search-input'), { target: { value: 'parser' } });
+
+    await waitFor(() => expect(screen.getByTestId('agent-search-count').textContent).toBe('1 of 2'));
+    fireEvent.click(screen.getByTestId('agent-search-next'));
+    expect(screen.getByTestId('agent-search-count').textContent).toBe('2 of 2');
+
+    fireEvent.change(screen.getByTestId('agent-search-input'), { target: { value: 'nothing here' } });
+    await waitFor(() => expect(screen.getByTestId('agent-search-count').textContent).toBe('No matches'));
+  });
+
+  it('always renders task_complete expanded, even when tool calls are hidden', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'tool', id: 't1', ts: 1, toolCallId: 'c1', toolName: 'bash', status: 'success', output: 'ok' },
+        {
+          kind: 'tool',
+          id: 't2',
+          ts: 2,
+          toolCallId: 'c2',
+          toolName: 'task_complete',
+          status: 'success',
+          args: { summary: 'Shipped the parser fix.' },
+        },
+      ],
+    });
+    await waitFor(() => expect(screen.getByText('Shipped the parser fix.')).toBeTruthy());
+
+    fireEvent.click(screen.getByTitle('Show/hide output types'));
+    fireEvent.click(await screen.findByLabelText('Tool calls'));
+
+    // The ordinary tool call collapses to a badge, the summary stays readable.
+    await waitFor(() => expect(screen.getByTestId('tool-badge-c1')).toBeTruthy());
+    expect(screen.queryByTestId('tool-badge-c2')).toBeNull();
+    expect(screen.getByTestId('task-complete-c2').textContent).toContain('Shipped the parser fix.');
+  });
+
+  it('keeps reasoning expanded by default and collapses it to a badge when unchecked', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'reasoning', id: 'r1', ts: 1, content: 'Weighing the two parser strategies' },
+        { kind: 'assistant', id: 'a1', ts: 2, content: 'Done' },
+      ],
+    });
+
+    // Expanded by default: the trace text is on screen without any interaction.
+    await waitFor(() => expect(screen.getByText('Weighing the two parser strategies')).toBeTruthy());
+    expect(screen.queryByTestId('agent-reasoning-badge')).toBeNull();
+
+    fireEvent.click(screen.getByTitle('Show/hide output types'));
+    fireEvent.click(await screen.findByLabelText('Reasoning'));
+
+    // Unchecking collapses it to a brain badge rather than removing it.
+    const badge = await screen.findByTestId('agent-reasoning-badge');
+    expect(screen.queryByText('Weighing the two parser strategies')).toBeNull();
+
+    // The badge still expands on click.
+    fireEvent.click(badge);
+    expect(screen.getByText('Weighing the two parser strategies')).toBeTruthy();
+  });
+
+  it('outlines the conversation and jumps back into the transcript on click', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'user', id: 'u1', ts: 1, content: 'Please fix the parser' },
+        { kind: 'assistant', id: 'a1', ts: 2, content: 'Let me look into that' },
+        { kind: 'tool', id: 't1', ts: 3, toolCallId: 'c1', toolName: 'bash', status: 'success', output: 'ok' },
+        { kind: 'assistant', id: 'a2', ts: 4, content: 'The parser is fixed now' },
+        { kind: 'user', id: 'u2', ts: 5, content: 'Thanks, ship it' },
+      ],
+    });
+    await waitFor(() => expect(screen.getByText('Thanks, ship it')).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId('agent-outline-toggle'));
+    const list = await screen.findByTestId('agent-outline');
+
+    // Both requests plus only the *final* response of the first turn.
+    expect(list.children).toHaveLength(3);
+    expect(list.textContent).toContain('Please fix the parser');
+    expect(list.textContent).toContain('The parser is fixed now');
+    expect(list.textContent).not.toContain('Let me look into that');
+    // Tool calls never appear in the outline.
+    expect(screen.queryByTestId('tool-badge-c1')).toBeNull();
+
+    // Picking a row leaves the outline and returns to the full transcript.
+    fireEvent.click(screen.getByTestId('outline-item-a2'));
+    await waitFor(() => expect(screen.queryByTestId('agent-outline')).toBeNull());
+    expect(screen.getByText('Let me look into that')).toBeTruthy();
+    expect(screen.getByTestId('agent-outline-toggle')).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('prefers a task_complete summary over the assistant message before it', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'user', id: 'u1', ts: 1, content: 'Do the thing' },
+        { kind: 'assistant', id: 'a1', ts: 2, content: 'Working on it' },
+        {
+          kind: 'tool',
+          id: 't1',
+          ts: 3,
+          toolCallId: 'c1',
+          toolName: 'task_complete',
+          status: 'success',
+          args: { summary: 'Did the thing.' },
+        },
+      ],
+    });
+    await waitFor(() => expect(screen.getByText('Did the thing.')).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId('agent-outline-toggle'));
+    const list = await screen.findByTestId('agent-outline');
+    expect(list.children).toHaveLength(2);
+    expect(list.textContent).toContain('Did the thing.');
+    expect(list.textContent).not.toContain('Working on it');
+  });
+
+  it('refetches the model list when the first response is degraded', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          json: () => Promise.resolve({ models: [{ id: 'auto', name: 'Auto' }], degraded: true }),
+        })
+        .mockResolvedValue({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              models: [
+                { id: 'auto', name: 'Auto' },
+                { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5' },
+              ],
+            }),
+        });
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      renderPane();
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_100);
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      // A healthy second response ends the retry loop.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

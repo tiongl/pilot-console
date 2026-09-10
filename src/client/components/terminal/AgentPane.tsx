@@ -1,10 +1,17 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, memo, type KeyboardEvent } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import {
   Send,
   Square,
@@ -23,6 +30,11 @@ import {
   Share2,
   Copy,
   ExternalLink,
+  ArrowDown,
+  Search,
+  ChevronUp,
+  Coins,
+  ListTree,
 } from 'lucide-react';
 import { useAgentSocket } from '@/hooks/useAgentSocket';
 import { getThemeByName } from '@/lib/terminal-themes';
@@ -36,6 +48,7 @@ import type {
   AgentShareStatus,
   AgentStatus,
   AgentTranscriptEvent,
+  AgentUsage,
 } from '@/types';
 
 interface Props {
@@ -130,11 +143,149 @@ const FILTERABLE_KINDS: { kind: FilterableKind; label: string }[] = [
   { kind: 'notice', label: 'Notices' },
 ];
 
-type Visibility = Record<FilterableKind, boolean>;
+/**
+ * `toolOutput` is a sub-filter of `tool`: it hides just the result body of a
+ * tool call while the call itself (name, args, status) stays visible. Hiding
+ * `tool` implicitly hides the output too, since the whole entry is collapsed.
+ */
+type Visibility = Record<FilterableKind, boolean> & { toolOutput: boolean };
 
-const DEFAULT_VISIBILITY: Visibility = { tool: true, reasoning: true, system: true, notice: true };
+/** A transcript row: either one entry, or a run of collapsed tool calls. */
+type RenderItem =
+  | { type: 'event'; key: string; event: AgentTranscriptEvent }
+  | { type: 'tool-badges'; key: string; tools: Extract<AgentTranscriptEvent, { kind: 'tool' }>[] };
+
+/** How long the first Escape stays "armed" before the stop prompt expires. */
+const ESCAPE_CONFIRM_MS = 3_000;
+
+const DEFAULT_VISIBILITY: Visibility = {
+  tool: true,
+  reasoning: true,
+  system: true,
+  notice: true,
+  toolOutput: true,
+};
 
 const VISIBILITY_LS_KEY = 'pilot-console-agent-visibility';
+
+/**
+ * The runtime's task-completion tool. Its "argument" is the agent's closing
+ * summary for the turn, so it is prose we always want to read — never a
+ * collapsed badge.
+ */
+function isTaskComplete(toolName: string): boolean {
+  return toolName === 'task_complete' || toolName === 'taskComplete';
+}
+
+/** The agent's closing summary text carried by a `task_complete` call. */
+function taskCompleteSummary(event: Extract<AgentTranscriptEvent, { kind: 'tool' }>): string {
+  const record = parseToolArgs(event.args);
+  const fromArgs = typeof record?.summary === 'string' ? record.summary : undefined;
+  return (fromArgs || event.output || '').trim();
+}
+
+/** One row in the conversation outline. */
+interface OutlineItem {
+  /** Matches the `RenderItem` key of the underlying transcript row. */
+  key: string;
+  role: 'user' | 'assistant';
+  text: string;
+  ts: number;
+}
+
+/**
+ * Reduce a transcript to its skeleton: every user request, and the *final*
+ * assistant response of the turn it started.
+ *
+ * Intermediate assistant chatter ("let me check…") is dropped — only the last
+ * response before the next request survives, which is what makes the outline a
+ * readable table of contents rather than a shorter transcript. A
+ * `task_complete` summary supersedes the assistant message before it, since it
+ * is the agent's actual closing word on the turn.
+ */
+function buildOutline(events: AgentTranscriptEvent[]): OutlineItem[] {
+  const items: OutlineItem[] = [];
+  let pending: OutlineItem | null = null;
+  const flush = () => {
+    if (pending) items.push(pending);
+    pending = null;
+  };
+
+  for (const e of events) {
+    if (e.kind === 'user') {
+      flush();
+      items.push({ key: e.id, role: 'user', text: e.content, ts: e.ts });
+    } else if (e.kind === 'assistant' && e.content.trim()) {
+      pending = { key: e.id, role: 'assistant', text: e.content, ts: e.ts };
+    } else if (e.kind === 'tool' && isTaskComplete(e.toolName)) {
+      const text = taskCompleteSummary(e);
+      if (text) pending = { key: e.id, role: 'assistant', text, ts: e.ts };
+    }
+  }
+  flush();
+  return items;
+}
+
+/** First meaningful line of a message, trimmed for a one-line outline row. */
+function outlinePreview(text: string): string {
+  const line = text
+    .split('\n')
+    .map((l) => l.replace(/^[#>\-*\s]+/, '').trim())
+    .find((l) => l.length > 0);
+  const clean = (line ?? text).trim();
+  return clean.length > 140 ? `${clean.slice(0, 139)}…` : clean;
+}
+
+/** Lowercased haystack for in-transcript search. */
+function searchableText(event: AgentTranscriptEvent): string {
+  const parts: string[] = [];
+  switch (event.kind) {
+    case 'user':
+    case 'assistant':
+    case 'reasoning':
+    case 'system':
+      parts.push(event.content);
+      break;
+    case 'tool':
+      parts.push(event.toolName, event.output ?? '', event.progress ?? '');
+      if (event.args !== undefined) {
+        try {
+          parts.push(typeof event.args === 'string' ? event.args : JSON.stringify(event.args));
+        } catch {
+          /* unserializable args are simply not searchable */
+        }
+      }
+      break;
+    default:
+      parts.push(event.message);
+      break;
+  }
+  return parts.join('\n').toLowerCase();
+}
+
+/** Escape a value for use inside a CSS attribute selector. */
+function cssEscape(value: string): string {
+  const fn = (globalThis as { CSS?: { escape?: (v: string) => string } }).CSS?.escape;
+  return fn ? fn(value) : value.replace(/["\\]/g, '\\$&');
+}
+
+/** Compact token counts: 1234 → "1.2k", 1234567 → "1.2M". */
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(Math.round(n));
+}
+
+/**
+ * Nano-AI units → a readable AIU figure. CAPI bills in nano-units (1e-9), so
+ * even a long session lands in the small-fraction range.
+ */
+function formatAiu(nanoAiu: number): string {
+  const aiu = nanoAiu / 1e9;
+  if (aiu === 0) return '0';
+  if (aiu < 0.001) return aiu.toExponential(1);
+  return aiu.toFixed(aiu < 1 ? 4 : 2);
+}
 
 function loadVisibility(): Visibility {
   try {
@@ -146,6 +297,7 @@ function loadVisibility(): Visibility {
       reasoning: parsed.reasoning ?? true,
       system: parsed.system ?? true,
       notice: parsed.notice ?? true,
+      toolOutput: parsed.toolOutput ?? true,
     };
   } catch {
     return { ...DEFAULT_VISIBILITY };
@@ -190,9 +342,29 @@ export default function AgentPane({
   const [shareStatus, setShareStatus] = useState<AgentShareStatus>({ mode: 'off', steerable: false });
   const [shareOpen, setShareOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  // "Allow everything": the session auto-approves every permission request.
+  const [allowAll, setAllowAll] = useState(false);
+  // Terminal-style stop confirmation: the first Escape arms it, a second
+  // Escape (within the window) actually cancels the turn.
+  const [stopArmed, setStopArmed] = useState(false);
+  // Accumulated token/billing usage for this session.
+  const [usage, setUsage] = useState<AgentUsage | null>(null);
+  const [usageOpen, setUsageOpen] = useState(false);
+  // In-transcript search.
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchIndex, setSearchIndex] = useState(0);
+  // Outline mode: just the requests and the final response of each turn.
+  const [outline, setOutline] = useState(false);
+  // Row the user jumped to from the outline, highlighted until they scroll on.
+  const [jumpKey, setJumpKey] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
+  // Drives the jump-to-bottom affordance. `atBottomRef` is deliberately a ref
+  // (it is read inside scroll handlers on every frame); this mirrors it into
+  // render state only when the answer actually changes.
+  const [atBottom, setAtBottom] = useState(true);
 
   // Upsert a transcript entry by id (matching the server's semantics).
   const upsert = useCallback((event: AgentTranscriptEvent) => {
@@ -240,6 +412,10 @@ export default function AgentPane({
           break;
         case 'replay':
           setEvents(msg.events);
+          // A replay is a fresh render of the whole conversation (first
+          // connect, reconnect, or a manual refresh) — always land at the end.
+          atBottomRef.current = true;
+          setAtBottom(true);
           break;
         case 'event':
           upsert(msg.event);
@@ -274,26 +450,45 @@ export default function AgentPane({
         case 'share_status':
           setShareStatus(msg.status);
           break;
+        case 'usage':
+          setUsage(msg.usage);
+          break;
+        case 'allow_all':
+          setAllowAll(msg.enabled);
+          break;
         case 'permission_request':
-          setPermissions((prev) => [
-            ...prev,
-            { requestId: msg.requestId, title: msg.title, detail: msg.detail, canSession: msg.canSession },
-          ]);
+          setPermissions((prev) => {
+            const prompt = {
+              requestId: msg.requestId,
+              title: msg.title,
+              detail: msg.detail,
+              canSession: msg.canSession,
+            };
+            const idx = prev.findIndex((item) => item.requestId === msg.requestId);
+            if (idx < 0) return [...prev, prompt];
+            const next = prev.slice();
+            next[idx] = prompt;
+            return next;
+          });
           break;
         case 'permission_resolved':
           setPermissions((prev) => prev.filter((p) => p.requestId !== msg.requestId));
           break;
         case 'exit_plan_request':
-          setExitPlans((prev) => [
-            ...prev,
-            {
+          setExitPlans((prev) => {
+            const prompt = {
               requestId: msg.requestId,
               summary: msg.summary,
               planContent: msg.planContent,
               actions: msg.actions,
               recommended: msg.recommended,
-            },
-          ]);
+            };
+            const idx = prev.findIndex((item) => item.requestId === msg.requestId);
+            if (idx < 0) return [...prev, prompt];
+            const next = prev.slice();
+            next[idx] = prompt;
+            return next;
+          });
           break;
         case 'exit_plan_resolved':
           setExitPlans((prev) => prev.filter((p) => p.requestId !== msg.requestId));
@@ -306,10 +501,11 @@ export default function AgentPane({
     [upsert, applyDelta],
   );
 
-  const { state, send, reset, switchTo } = useAgentSocket({
+  const { state, send, reset, switchTo, reconnect } = useAgentSocket({
     projectId,
     worktreeId,
     sessionId,
+    forceNew: !sessionId,
     model,
     onMessage: handleMessage,
     onReady: onSessionId,
@@ -321,17 +517,36 @@ export default function AgentPane({
     onStatusChange?.(s);
   }, [state, status, onStatusChange]);
 
-  // Fetch available models once for the picker.
+  // Fetch available models for the picker. The runtime starts lazily, so the
+  // first request can land before it is ready and come back with only the
+  // placeholder "Auto" — retry with backoff instead of leaving the picker
+  // stuck there for the life of the tab.
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/agent/models')
-      .then((r) => r.json())
-      .then((data) => {
-        if (!cancelled && Array.isArray(data.models) && data.models.length) setModels(data.models);
-      })
-      .catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const load = (attempt: number) => {
+      fetch('/api/agent/models')
+        .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+        .then(({ ok, data }) => {
+          if (cancelled) return;
+          const list = Array.isArray(data?.models) ? (data.models as AgentModelOption[]) : [];
+          if (list.length) setModels(list);
+          const degraded = !ok || data?.degraded || list.length <= 1;
+          if (degraded && attempt < 5) {
+            timer = setTimeout(() => load(attempt + 1), Math.min(8_000, 1_000 * 2 ** attempt));
+          }
+        })
+        .catch(() => {
+          if (cancelled || attempt >= 5) return;
+          timer = setTimeout(() => load(attempt + 1), Math.min(8_000, 1_000 * 2 ** attempt));
+        });
+    };
+
+    load(0);
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
   }, []);
 
@@ -342,10 +557,19 @@ export default function AgentPane({
     }
   }, [events, visibility, permissions, exitPlans]);
 
+  const scrollToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    atBottomRef.current = true;
+    setAtBottom(true);
+    if (el) el.scrollTop = el.scrollHeight;
+  }, []);
+
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    atBottomRef.current = bottom;
+    setAtBottom((prev) => (prev === bottom ? prev : bottom));
   };
 
   // Persist visibility preferences across sessions/reloads.
@@ -357,7 +581,7 @@ export default function AgentPane({
     }
   }, [visibility]);
 
-  const toggleVisibility = useCallback((kind: FilterableKind) => {
+  const toggleVisibility = useCallback((kind: FilterableKind | 'toolOutput') => {
     setVisibility((prev) => ({ ...prev, [kind]: !prev[kind] }));
   }, []);
 
@@ -367,41 +591,150 @@ export default function AgentPane({
     setTimeout(() => setCopied(false), 1500);
   }, []);
 
-  // Drop empty assistant bubbles: the SDK opens an assistant "message" for
-  // turns that end up containing only tool calls (or produce no text), which
-  // would otherwise render as a stray "…" bubble. Also covers such entries
-  // already persisted in older sessions on replay.
-  const nonEmptyEvents = useMemo(
-    () => events.filter((e) => !(e.kind === 'assistant' && !e.content.trim())),
-    [events],
-  );
-  // Transcript filtered by the current visibility preferences.
-  const visibleEvents = useMemo(
-    () =>
-      nonEmptyEvents.filter((e) =>
-        e.kind === 'tool' || e.kind === 'reasoning' || e.kind === 'system' || e.kind === 'notice'
-          ? visibility[e.kind]
-          : true,
-      ),
-    [nonEmptyEvents, visibility],
-  );
-  const hiddenCount = nonEmptyEvents.length - visibleEvents.length;
-  const anyHidden = FILTERABLE_KINDS.some((f) => !visibility[f.kind]);
+  // Transcript filtered by the current visibility preferences. Assistant
+  // entries with no text are dropped so a turn that produced only tool calls
+  // never renders a stray placeholder bubble. Hidden tool calls are not
+  // dropped outright — consecutive ones collapse into a strip of mini badges
+  // so a long-running tool never looks like the agent has hung.
+  const renderItems = useMemo(() => {
+    const items: RenderItem[] = [];
+    for (const e of events) {
+      if (e.kind === 'assistant') {
+        if (e.content.trim().length > 0) items.push({ type: 'event', key: e.id, event: e });
+        continue;
+      }
+      // The final "task complete" summary is the agent's closing statement, not
+      // incidental tool chatter — it always renders in full, whatever the tool
+      // filters say.
+      if (e.kind === 'tool' && isTaskComplete(e.toolName)) {
+        items.push({ type: 'event', key: e.id, event: e });
+        continue;
+      }
+      if (e.kind === 'tool' && !visibility.tool) {
+        const last = items[items.length - 1];
+        if (last && last.type === 'tool-badges') last.tools.push(e);
+        else items.push({ type: 'tool-badges', key: `badges:${e.id}`, tools: [e] });
+        continue;
+      }
+      // Reasoning is never dropped: unchecking it collapses the entry to a
+      // brain badge (handled by ReasoningItem) rather than hiding it.
+      if ((e.kind === 'tool' || e.kind === 'system' || e.kind === 'notice') && !visibility[e.kind]) {
+        continue;
+      }
+      items.push({ type: 'event', key: e.id, event: e });
+    }
+    return items;
+  }, [events, visibility]);
 
   // Only render the most recent `renderLimit` items to bound DOM size; older
   // items stay in state (and scroll history) but are revealed on demand.
   const [renderLimit, setRenderLimit] = useState(RENDER_WINDOW);
-  const windowedEvents =
-    visibleEvents.length > renderLimit ? visibleEvents.slice(-renderLimit) : visibleEvents;
-  const earlierCount = visibleEvents.length - windowedEvents.length;
+  const windowedItems =
+    renderItems.length > renderLimit ? renderItems.slice(-renderLimit) : renderItems;
+  const earlierCount = renderItems.length - windowedItems.length;
 
-  const respond = (requestId: string, decision: 'approve-once' | 'approve-for-session' | 'reject') => {
+  // --- Outline -------------------------------------------------------------
+  const outlineItems = useMemo(() => buildOutline(events), [events]);
+
+  /**
+   * Leave the outline and land on the row the user picked. The scroll cannot
+   * happen here — the transcript is not mounted until the outline is off — so
+   * it is deferred to an effect keyed on `jumpKey`.
+   */
+  const jumpToOutlineItem = useCallback((key: string) => {
+    setOutline(false);
+    setJumpKey(key);
+  }, []);
+
+  useEffect(() => {
+    if (outline || !jumpKey || !scrollRef.current) return;
+    const el = scrollRef.current.querySelector(`[data-entry-key="${cssEscape(jumpKey)}"]`);
+    if (!el) return;
+    el.scrollIntoView({ block: 'center' });
+    // The row is no longer the "latest", so suppress the auto-scroll that would
+    // otherwise yank the user back down on the next streamed token.
+    atBottomRef.current = false;
+    setAtBottom(false);
+    const timer = setTimeout(() => setJumpKey(null), 2_000);
+    return () => clearTimeout(timer);
+  }, [outline, jumpKey, renderItems]);
+
+  // --- In-transcript search ------------------------------------------------
+  // Matching is done over the *rendered* rows so hidden output is never a
+  // phantom hit, and navigation scrolls the matching row into view.
+  const searchMatches = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return [] as string[];
+    return renderItems
+      .filter((item) =>
+        item.type === 'event'
+          ? searchableText(item.event).includes(q)
+          : item.tools.some((t) => searchableText(t).includes(q)),
+      )
+      .map((item) => item.key);
+  }, [renderItems, searchQuery]);
+
+  const activeMatchKey = searchMatches.length ? searchMatches[searchIndex % searchMatches.length] : null;
+
+  useEffect(() => {
+    setSearchIndex(0);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    if (!activeMatchKey || !scrollRef.current) return;
+    const el = scrollRef.current.querySelector(`[data-entry-key="${cssEscape(activeMatchKey)}"]`);
+    el?.scrollIntoView({ block: 'center' });
+  }, [activeMatchKey]);
+
+  const stepSearch = useCallback(
+    (delta: number) => {
+      setSearchIndex((prev) => {
+        const total = searchMatches.length;
+        if (total === 0) return 0;
+        return (prev + delta + total) % total;
+      });
+    },
+    [searchMatches.length],
+  );
+
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    setSearchQuery('');
+    setSearchIndex(0);
+  }, []);
+
+  const hiddenCount = useMemo(
+    () =>
+      events.filter((e) => {
+        if (e.kind === 'tool') return !visibility.tool || (!visibility.toolOutput && Boolean(e.output));
+        return e.kind === 'reasoning' || e.kind === 'system' || e.kind === 'notice' ? !visibility[e.kind] : false;
+      }).length,
+    [events, visibility],
+  );
+  const anyHidden = FILTERABLE_KINDS.some((f) => !visibility[f.kind]) || !visibility.toolOutput;
+
+  const respond = (
+    requestId: string,
+    decision: 'approve-once' | 'approve-for-session' | 'approve-all' | 'reject',
+  ) => {
     send({ type: 'permission_response', requestId, decision });
+    if (decision === 'approve-all') {
+      // Optimistic: the server also broadcasts `allow_all` and drains the queue.
+      setAllowAll(true);
+      setPermissions([]);
+      return;
+    }
     setPermissions((prev) => prev.filter((p) => p.requestId !== requestId));
   };
 
-  const changeModel = (m: string) => {
-    setModel(m);
+  /** Toggle session-wide auto-approval, independent of the agent mode. */
+  const toggleAllowAll = (enabled: boolean) => {
+    setAllowAll(enabled);
+    if (enabled) setPermissions([]);
+    send({ type: 'set_allow_all', enabled });
+  };
+
+  const changeModel = (m: string) => {    setModel(m);
     send({ type: 'set_model', model: m });
   };
 
@@ -664,12 +997,96 @@ export default function AgentPane({
     return () => document.removeEventListener('keydown', onKey, true);
   }, [active, cycleMode]);
 
-  const busy = status === 'busy';
+  // Ctrl/⌘+F opens the in-transcript search, matching the browser's own
+  // find-in-page muscle memory (which cannot see virtualized/collapsed rows).
+  useEffect(() => {
+    if (!active) return;
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key.toLowerCase() === 'f' && (e.ctrlKey || e.metaKey) && !e.altKey) {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
+  }, [active]);
+
+  const activeTool = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i];
+      if (event.kind === 'tool' && event.status === 'running') {
+        return event as Extract<AgentTranscriptEvent, { kind: 'tool' }>;
+      }
+    }
+    return undefined;
+  }, [events]);
+  const busy = status === 'busy' || Boolean(activeTool) || permissions.length > 0 || exitPlans.length > 0;
+
+  // --- Escape-to-stop (terminal-style double press) ------------------------
+  const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const disarmStop = useCallback(() => {
+    if (stopTimerRef.current) {
+      clearTimeout(stopTimerRef.current);
+      stopTimerRef.current = null;
+    }
+    setStopArmed(false);
+  }, []);
+
+  const confirmStop = useCallback(() => {
+    disarmStop();
+    send({ type: 'cancel' });
+    pushNotice('Stopped by user.');
+  }, [disarmStop, send, pushNotice]);
+
+  const armStop = useCallback(() => {
+    if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+    setStopArmed(true);
+    stopTimerRef.current = setTimeout(() => {
+      stopTimerRef.current = null;
+      setStopArmed(false);
+    }, ESCAPE_CONFIRM_MS);
+  }, []);
+
+  // Nothing to stop once the turn ends — drop the pending confirmation.
+  useEffect(() => {
+    if (!busy) disarmStop();
+  }, [busy, disarmStop]);
+
+  useEffect(() => () => {
+    if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+  }, []);
+
+  const anyOverlayOpen =
+    Boolean(subcommandPrompt) ||
+    Boolean(sessionList) ||
+    Boolean(diffPanel) ||
+    filterOpen ||
+    shareOpen ||
+    slashMatches.length > 0;
+
+  useEffect(() => {
+    if (!active) return;
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      // Overlays and the slash menu own Escape while they are open.
+      if (anyOverlayOpen) return;
+      if (!busy) return;
+      e.preventDefault();
+      if (stopArmed) confirmStop();
+      else armStop();
+    };
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
+  }, [active, anyOverlayOpen, busy, stopArmed, armStop, confirmStop]);
 
   const statusLabel = useMemo(() => {
     if (state !== 'open') return state === 'connecting' ? 'connecting…' : 'disconnected';
+    if (permissions.length > 0) return 'waiting for permission…';
+    if (exitPlans.length > 0) return 'waiting for plan decision…';
+    if (activeTool) return `${activeTool.toolName} running…`;
     return busy ? 'working…' : 'ready';
-  }, [state, busy]);
+  }, [state, busy, activeTool, permissions.length, exitPlans.length]);
 
   // Resolve appearance from the per-project terminal theme + font settings so
   // the agent chat matches the look of the terminal tabs.
@@ -798,15 +1215,96 @@ export default function AgentPane({
         className="flex items-center gap-2 px-3 py-1.5 border-b shrink-0"
         style={{ borderColor: appearance.border, backgroundColor: appearance.surface }}
       >
-        <span className="text-xs font-semibold">Copilot Agent</span>
+        <span className="text-xs font-semibold shrink-0">Copilot Agent</span>
         <span
-          className={`text-[10px] px-1.5 py-0.5 rounded ${
+          className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${
             busy ? 'bg-amber-500/15 text-amber-600' : 'bg-emerald-500/15 text-emerald-600'
           }`}
         >
           {statusLabel}
         </span>
+        {(state === 'closed' || state === 'error') && (
+          <button
+            type="button"
+            onClick={reconnect}
+            data-testid="agent-reconnect"
+            title="Reconnect to this session. Agent sessions keep running while the server is unavailable."
+            className="text-[10px] px-1.5 py-0.5 rounded border shrink-0"
+            style={{ borderColor: appearance.border }}
+          >
+            Reconnect
+          </button>
+        )}
         <div className="flex-1" />
+        {/* Search the conversation */}
+        <button
+          type="button"
+          onClick={() => (searchOpen ? closeSearch() : setSearchOpen(true))}
+          data-testid="agent-search-toggle"
+          title="Search this conversation (Ctrl+F)"
+          className="flex items-center h-6 px-1.5 rounded border shrink-0"
+          style={{ borderColor: appearance.border, color: searchOpen ? appearance.fg : appearance.muted }}
+        >
+          <Search className="h-3 w-3" />
+        </button>
+        {/* Token + credit usage */}
+        {usage && usage.requests > 0 && (
+          <div className="relative shrink-0">
+            <button
+              type="button"
+              onClick={() => setUsageOpen((o) => !o)}
+              data-testid="agent-usage-button"
+              title="Token and credit usage for this session"
+              className="flex items-center gap-1 h-6 px-1.5 rounded border text-[10px] tabular-nums"
+              style={{ borderColor: appearance.border, color: appearance.muted }}
+            >
+              <Coins className="h-3 w-3" />
+              <span>{formatTokens(usage.inputTokens + usage.outputTokens)}</span>
+              {usage.premiumRequests > 0 && <span>· {usage.premiumRequests.toFixed(2)}×</span>}
+            </button>
+            {usageOpen && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setUsageOpen(false)} />
+                <div
+                  data-testid="agent-usage-panel"
+                  className="absolute right-0 mt-1 z-20 w-64 rounded-md border shadow-xl p-2 space-y-1 text-[11px]"
+                  style={{
+                    borderColor: appearance.border,
+                    backgroundColor: appearance.overlay,
+                    color: appearance.fg,
+                  }}
+                >
+                  <div className="text-[10px] uppercase tracking-wide" style={{ color: appearance.muted }}>
+                    Session usage
+                  </div>
+                  <UsageRow label="Model calls" value={String(usage.requests)} />
+                  <UsageRow label="Input tokens" value={formatTokens(usage.inputTokens)} />
+                  <UsageRow label="Output tokens" value={formatTokens(usage.outputTokens)} />
+                  {usage.reasoningTokens > 0 && (
+                    <UsageRow label="Reasoning tokens" value={formatTokens(usage.reasoningTokens)} />
+                  )}
+                  {usage.cachedTokens > 0 && (
+                    <UsageRow label="Cached tokens" value={formatTokens(usage.cachedTokens)} />
+                  )}
+                  {usage.premiumRequests > 0 && (
+                    <UsageRow label="Premium requests" value={usage.premiumRequests.toFixed(2)} />
+                  )}
+                  {usage.nanoAiu > 0 && <UsageRow label="Cost (AIU)" value={formatAiu(usage.nanoAiu)} />}
+                  {usage.contextTokens !== undefined && usage.contextLimit ? (
+                    <UsageRow
+                      label="Context"
+                      value={`${formatTokens(usage.contextTokens)} / ${formatTokens(usage.contextLimit)}`}
+                    />
+                  ) : null}
+                  <p className="pt-1 leading-snug" style={{ color: appearance.muted }}>
+                    Estimated from the runtime&apos;s per-call usage reports. Token counts cover this
+                    connection only; costs resume from the session&apos;s durable checkpoints.
+                  </p>
+                </div>
+              </>
+            )}
+          </div>
+        )}
         {/* GitHub session sharing */}
         <div className="relative">
           <button
@@ -920,6 +1418,21 @@ export default function AgentPane({
             </>
           )}
         </div>
+        <button
+          type="button"
+          onClick={() => setOutline((o) => !o)}
+          data-testid="agent-outline-toggle"
+          aria-pressed={outline}
+          title="Outline — just the requests and each turn's final response"
+          className="flex items-center gap-1 h-6 px-1.5 rounded border text-[10px] shrink-0"
+          style={{
+            borderColor: outline ? appearance.accent : appearance.border,
+            color: outline ? appearance.accent : appearance.muted,
+          }}
+        >
+          <ListTree className="h-3 w-3" />
+          <span>Outline</span>
+        </button>
         <div className="relative">
           <button
             type="button"
@@ -957,18 +1470,39 @@ export default function AgentPane({
                   Show output types
                 </div>
                 {FILTERABLE_KINDS.map((f) => (
-                  <label
-                    key={f.kind}
-                    className="flex items-center gap-2 px-2 py-1 text-xs cursor-pointer hover:bg-black/5 dark:hover:bg-white/5"
-                    style={{ color: appearance.fg }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={visibility[f.kind]}
-                      onChange={() => toggleVisibility(f.kind)}
-                    />
-                    <span>{f.label}</span>
-                  </label>
+                  <div key={f.kind}>
+                    <label
+                      className="flex items-center gap-2 px-2 py-1 text-xs cursor-pointer hover:bg-black/5 dark:hover:bg-white/5"
+                      style={{ color: appearance.fg }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={visibility[f.kind]}
+                        onChange={() => toggleVisibility(f.kind)}
+                      />
+                      <span>{f.label}</span>
+                    </label>
+                    {f.kind === 'tool' && (
+                      <label
+                        className="flex items-center gap-2 pl-6 pr-2 py-1 text-xs cursor-pointer hover:bg-black/5 dark:hover:bg-white/5"
+                        style={{ color: visibility.tool ? appearance.fg : appearance.muted }}
+                        title={
+                          visibility.tool
+                            ? 'Show the result body of each tool call'
+                            : 'Tool calls are hidden, so their output is hidden too'
+                        }
+                      >
+                        <input
+                          type="checkbox"
+                          data-testid="filter-tool-output"
+                          checked={visibility.tool && visibility.toolOutput}
+                          disabled={!visibility.tool}
+                          onChange={() => toggleVisibility('toolOutput')}
+                        />
+                        <span>Tool output</span>
+                      </label>
+                    )}
+                  </div>
                 ))}
               </div>
             </>
@@ -995,19 +1529,115 @@ export default function AgentPane({
         <div className="px-3 py-1.5 text-xs bg-destructive/10 text-destructive border-b">{connError}</div>
       )}
 
+      {searchOpen && (
+        <div
+          data-testid="agent-search-bar"
+          className="flex items-center gap-2 px-3 py-1.5 border-b shrink-0"
+          style={{ borderColor: appearance.border, backgroundColor: appearance.surface }}
+        >
+          <Search className="h-3 w-3 shrink-0" style={{ color: appearance.muted }} />
+          <input
+            autoFocus
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                stepSearch(e.shiftKey ? -1 : 1);
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                closeSearch();
+              }
+            }}
+            placeholder="Search this conversation"
+            data-testid="agent-search-input"
+            className="flex-1 min-w-0 bg-transparent outline-none text-xs"
+            style={{ color: appearance.fg }}
+          />
+          <span
+            className="text-[10px] tabular-nums shrink-0"
+            data-testid="agent-search-count"
+            style={{ color: appearance.muted }}
+          >
+            {searchQuery.trim()
+              ? searchMatches.length
+                ? `${(searchIndex % searchMatches.length) + 1} of ${searchMatches.length}`
+                : 'No matches'
+              : ''}
+          </span>
+          <button
+            type="button"
+            onClick={() => stepSearch(-1)}
+            disabled={searchMatches.length === 0}
+            data-testid="agent-search-prev"
+            title="Previous match (Shift+Enter)"
+            className="shrink-0 disabled:opacity-40"
+          >
+            <ChevronUp className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => stepSearch(1)}
+            disabled={searchMatches.length === 0}
+            data-testid="agent-search-next"
+            title="Next match (Enter)"
+            className="shrink-0 disabled:opacity-40"
+          >
+            <ChevronDown className="h-3.5 w-3.5" />
+          </button>
+          <button type="button" onClick={closeSearch} data-testid="agent-search-close" title="Close search"
+            className="shrink-0">
+            <XIcon className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* Transcript */}
+      <div className="relative flex-1 min-h-0 flex">
       <div
         ref={scrollRef}
         onScroll={onScroll}
         className="flex-1 overflow-y-auto px-3 py-3 space-y-3"
         style={{ fontSize }}
       >
-        {nonEmptyEvents.length === 0 && (
+        {outline ? (
+          <div data-testid="agent-outline" className="space-y-1">
+            {outlineItems.length === 0 ? (
+              <div className="text-center pt-10 text-xs" style={{ color: appearance.muted }}>
+                Nothing to outline yet.
+              </div>
+            ) : (
+              outlineItems.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  data-testid={`outline-item-${item.key}`}
+                  onClick={() => jumpToOutlineItem(item.key)}
+                  title="Jump to this message"
+                  className="flex w-full items-baseline gap-2 rounded px-2 py-1.5 text-left hover:bg-black/5 dark:hover:bg-white/5"
+                >
+                  <span
+                    className="text-[10px] uppercase tracking-wide shrink-0 w-14"
+                    style={{ color: item.role === 'user' ? appearance.accent : MODE_META.interactive.color }}
+                  >
+                    {item.role === 'user' ? 'You' : 'Copilot'}
+                  </span>
+                  <span className="flex-1 min-w-0 truncate text-xs" style={{ color: appearance.fg }}>
+                    {outlinePreview(item.text)}
+                  </span>
+                  <EntryTime ts={item.ts} />
+                </button>
+              ))
+            )}
+          </div>
+        ) : (
+          <>
+        {events.length === 0 && (
           <div className="text-center pt-10" style={{ color: appearance.muted }}>
             Start a conversation with the Copilot agent.
           </div>
         )}
-        {nonEmptyEvents.length > 0 && visibleEvents.length === 0 && (
+        {events.length > 0 && renderItems.length === 0 && (
           <div className="text-center pt-10 text-xs" style={{ color: appearance.muted }}>
             All output is hidden by the current filters.
           </div>
@@ -1024,9 +1654,36 @@ export default function AgentPane({
             </button>
           </div>
         )}
-        {windowedEvents.map((e) => (
-          <TranscriptItem key={e.id} event={e} appearance={appearance} codeSize={codeSize} />
-        ))}
+        {windowedItems.map((item) => {
+          const isMatch = searchMatches.includes(item.key);
+          return (
+            <div
+              key={item.key}
+              data-entry-key={item.key}
+              className={
+                item.key === jumpKey
+                  ? 'rounded-lg ring-2 ring-sky-500/70'
+                  : item.key === activeMatchKey
+                    ? 'rounded-lg ring-2 ring-amber-500/70'
+                    : isMatch
+                      ? 'rounded-lg ring-1 ring-amber-500/30'
+                      : undefined
+              }
+            >
+              {item.type === 'event' ? (
+                <TranscriptItem
+                  event={item.event}
+                  appearance={appearance}
+                  codeSize={codeSize}
+                  showToolOutput={visibility.toolOutput}
+                  showReasoning={visibility.reasoning}
+                />
+              ) : (
+                <ToolBadgeStrip tools={item.tools} appearance={appearance} codeSize={codeSize} />
+              )}
+            </div>
+          );
+        })}
 
         {/* Pending permission prompts */}
         {permissions.map((p) => (
@@ -1054,6 +1711,16 @@ export default function AgentPane({
                   Allow for session
                 </Button>
               )}
+              <Button
+                size="sm"
+                variant="secondary"
+                className="h-7"
+                data-testid="permission-allow-everything"
+                title="Approve this and every future request in this session"
+                onClick={() => respond(p.requestId, 'approve-all')}
+              >
+                Allow everything
+              </Button>
               <Button size="sm" variant="ghost" className="h-7 gap-1" onClick={() => respond(p.requestId, 'reject')}>
                 <XIcon className="h-3.5 w-3.5" /> Deny
               </Button>
@@ -1094,6 +1761,27 @@ export default function AgentPane({
             </div>
           </div>
         ))}
+          </>
+        )}
+      </div>
+
+        {!atBottom && !outline && (
+          <button
+            type="button"
+            onClick={scrollToBottom}
+            data-testid="agent-jump-to-bottom"
+            title="Jump to the latest message"
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1 h-7 px-3 rounded-full border shadow-lg text-[11px] font-medium"
+            style={{
+              borderColor: appearance.accent,
+              backgroundColor: appearance.accent,
+              color: appearance.bg,
+            }}
+          >
+            <ArrowDown className="h-3.5 w-3.5" />
+            Jump to latest
+          </button>
+        )}
       </div>
 
       {/* Composer */}
@@ -1199,27 +1887,70 @@ export default function AgentPane({
         </div>
       </div>
 
-      {/* Mode indicator (bottom, like the CLI). Click or Shift+Tab to cycle. */}
-      <button
-        type="button"
-        onClick={cycleMode}
-        data-testid="agent-mode-indicator"
-        className="flex items-center gap-1.5 px-3 py-1 border-t text-[11px] shrink-0 select-none"
-        style={{ borderColor: appearance.border, backgroundColor: appearance.surface }}
-        title="Cycle agent mode (Shift+Tab)"
-      >
-        {(() => {
-          const Icon = MODE_META[mode].icon;
-          return <Icon className="h-3.5 w-3.5" style={{ color: MODE_META[mode].color }} />;
-        })()}
-        <span className="font-semibold" style={{ color: MODE_META[mode].color }}>
-          {MODE_META[mode].label}
-        </span>
-        <span style={{ color: appearance.muted }}>mode</span>
-        <span className="ml-auto" style={{ color: appearance.muted }}>
-          shift+tab to change
-        </span>
-      </button>
+      {/* Mode indicator (bottom, like the CLI). Click or Shift+Tab to cycle.
+          While a stop is armed, this row hosts the Esc-again confirmation. */}
+      {stopArmed ? (
+        <div
+          data-testid="agent-stop-confirm"
+          className="flex items-center gap-1.5 px-3 py-1 border-t text-[11px] shrink-0 select-none"
+          style={{ borderColor: appearance.border, backgroundColor: appearance.surface }}
+        >
+          <Square className="h-3.5 w-3.5 text-destructive" />
+          <span className="font-semibold text-destructive">Press Esc again to stop</span>
+          <span style={{ color: appearance.muted }}>the current turn</span>
+          <button
+            type="button"
+            className="ml-auto underline"
+            style={{ color: appearance.muted }}
+            onClick={disarmStop}
+          >
+            keep running
+          </button>
+        </div>
+      ) : (
+        <div
+          className="flex items-center border-t shrink-0 text-[11px] select-none"
+          style={{ borderColor: appearance.border, backgroundColor: appearance.surface }}
+        >
+          <button
+            type="button"
+            onClick={cycleMode}
+            data-testid="agent-mode-indicator"
+            className="flex items-center gap-1.5 px-3 py-1 flex-1 min-w-0"
+            title="Cycle agent mode (Shift+Tab)"
+          >
+            {(() => {
+              const Icon = MODE_META[mode].icon;
+              return <Icon className="h-3.5 w-3.5" style={{ color: MODE_META[mode].color }} />;
+            })()}
+            <span className="font-semibold" style={{ color: MODE_META[mode].color }}>
+              {MODE_META[mode].label}
+            </span>
+            <span style={{ color: appearance.muted }}>mode</span>
+            <span className="ml-auto truncate" style={{ color: appearance.muted }}>
+              {busy ? 'esc to stop · ' : ''}shift+tab to change
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => toggleAllowAll(!allowAll)}
+            data-testid="agent-allow-all-toggle"
+            className="px-3 py-1 shrink-0 border-l"
+            style={{
+              borderColor: appearance.border,
+              color: allowAll ? MODE_META.autopilot.color : appearance.muted,
+              fontWeight: allowAll ? 600 : 400,
+            }}
+            title={
+              allowAll
+                ? 'Every permission request is auto-approved. Click to start asking again.'
+                : 'Approve every permission request for this session without prompting.'
+            }
+          >
+            {allowAll ? 'allow all: on' : 'allow all: off'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1235,20 +1966,31 @@ interface Appearance {
   muted: string;
 }
 
+// Memoized: the transcript can hold thousands of entries in a long session and
+// the parent re-renders on every composer keystroke. Without this, each
+// keystroke would re-render (and re-parse the markdown of) the whole history.
 const TranscriptItem = memo(function TranscriptItem({
   event,
   appearance,
   codeSize,
+  showToolOutput,
+  showReasoning,
 }: {
   event: AgentTranscriptEvent;
   appearance: Appearance;
   codeSize: number;
+  showToolOutput: boolean;
+  showReasoning: boolean;
 }) {
   if (event.kind === 'user') {
     return (
       <div className="flex flex-col items-end gap-0.5">
-        <span className="text-[10px] uppercase tracking-wide px-1" style={{ color: appearance.muted }}>
+        <span
+          className="text-[10px] uppercase tracking-wide px-1 flex items-center gap-1"
+          style={{ color: appearance.muted }}
+        >
           You
+          <EntryTime ts={event.ts} />
         </span>
         <div
           className="max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2 whitespace-pre-wrap break-words"
@@ -1269,6 +2011,7 @@ const TranscriptItem = memo(function TranscriptItem({
         >
           <MessageSquare className="h-3 w-3" />
           Copilot
+          <EntryTime ts={event.ts} durationMs={event.durationMs} />
         </span>
         <div
           className="max-w-[85%] rounded-2xl rounded-bl-sm px-4 py-2 overflow-hidden prose prose-sm dark:prose-invert max-w-none"
@@ -1281,17 +2024,7 @@ const TranscriptItem = memo(function TranscriptItem({
   }
 
   if (event.kind === 'reasoning') {
-    return (
-      <details className="text-xs" style={{ color: appearance.muted }}>
-        <summary className="cursor-pointer select-none flex items-center gap-1">
-          <Brain className="h-3 w-3" />
-          Reasoning
-        </summary>
-        <div className="mt-1 whitespace-pre-wrap break-words pl-2 border-l" style={{ borderColor: appearance.border }}>
-          {event.content}
-        </div>
-      </details>
-    );
+    return <ReasoningItem event={event} appearance={appearance} expanded={showReasoning} />;
   }
 
   if (event.kind === 'system') {
@@ -1312,7 +2045,10 @@ const TranscriptItem = memo(function TranscriptItem({
   }
 
   if (event.kind === 'tool') {
-    return <ToolItem event={event} appearance={appearance} codeSize={codeSize} />;
+    if (isTaskComplete(event.toolName)) {
+      return <TaskCompleteItem event={event} appearance={appearance} />;
+    }
+    return <ToolItem event={event} appearance={appearance} codeSize={codeSize} showOutput={showToolOutput} />;
   }
 
   if (event.kind === 'error') {
@@ -1332,16 +2068,134 @@ const TranscriptItem = memo(function TranscriptItem({
   );
 });
 
+/**
+ * Reasoning trace.
+ *
+ * Expanded by default. Unchecking "Reasoning" in the View menu does not hide it
+ * outright — it collapses to a brain badge the user can still click to read.
+ */
+const ReasoningItem = memo(function ReasoningItem({
+  event,
+  appearance,
+  expanded,
+}: {
+  event: Extract<AgentTranscriptEvent, { kind: 'reasoning' }>;
+  appearance: Appearance;
+  expanded: boolean;
+}) {
+  const [open, setOpen] = useState(expanded);
+  useEffect(() => {
+    setOpen(expanded);
+  }, [expanded]);
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        data-testid="agent-reasoning-badge"
+        title="Reasoning"
+        onClick={() => setOpen(true)}
+        className="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] w-fit"
+        style={{ color: appearance.muted, borderColor: appearance.border }}
+      >
+        <Brain className="h-3 w-3" />
+      </button>
+    );
+  }
+
+  return (
+    <div className="text-xs" style={{ color: appearance.muted }}>
+      <button
+        type="button"
+        onClick={() => setOpen(false)}
+        className="cursor-pointer select-none flex items-center gap-1"
+      >
+        <Brain className="h-3 w-3" />
+        Reasoning
+      </button>
+      <div
+        className="mt-1 whitespace-pre-wrap break-words pl-2 border-l"
+        style={{ borderColor: appearance.border }}
+      >
+        {event.content}
+      </div>
+    </div>
+  );
+});
+
+/** One label/value line in the usage popover. */
+function UsageRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-2">
+      <span className="opacity-70">{label}</span>
+      <span className="tabular-nums font-medium">{value}</span>
+    </div>
+  );
+}
+
+/**
+ * The agent's closing summary, rendered as prose.
+ *
+ * `task_complete` arrives as a tool call, but its payload is the agent's final
+ * word on the turn — collapsing it behind a badge hides the one thing the user
+ * most wants to read, so it always renders expanded regardless of the tool
+ * visibility filters.
+ */
+const TaskCompleteItem = memo(function TaskCompleteItem({
+  event,
+  appearance,
+}: {
+  event: Extract<AgentTranscriptEvent, { kind: 'tool' }>;
+  appearance: Appearance;
+}) {
+  const summary = useMemo(() => {
+    const record = parseToolArgs(event.args);
+    const fromArgs = typeof record?.summary === 'string' ? record.summary : undefined;
+    return (fromArgs || event.output || '').trim();
+  }, [event.args, event.output]);
+
+  return (
+    <div className="flex flex-col items-start gap-0.5">
+      <span
+        className="text-[10px] uppercase tracking-wide px-1 flex items-center gap-1 text-emerald-600"
+      >
+        <Check className="h-3 w-3" />
+        Task complete
+        <EntryTime ts={event.ts} durationMs={event.durationMs} />
+      </span>
+      <div
+        data-testid={`task-complete-${event.toolCallId}`}
+        className="max-w-[85%] rounded-2xl rounded-bl-sm px-4 py-2 overflow-hidden border border-emerald-500/40 prose prose-sm dark:prose-invert"
+        style={{ backgroundColor: appearance.surface, color: appearance.fg }}
+      >
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{summary || 'Task complete.'}</ReactMarkdown>
+      </div>
+    </div>
+  );
+});
+
 const ToolItem = memo(function ToolItem({
   event,
   appearance,
   codeSize,
+  showOutput,
 }: {
   event: Extract<AgentTranscriptEvent, { kind: 'tool' }>;
   appearance: Appearance;
   codeSize: number;
+  showOutput: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(event.status === 'running');
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (event.status !== 'running') return;
+    setOpen(true);
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [event.status]);
+
   const argsText = useMemo(() => {
     if (event.args === undefined) return '';
     try {
@@ -1350,6 +2204,9 @@ const ToolItem = memo(function ToolItem({
       return String(event.args);
     }
   }, [event.args]);
+  const elapsedSeconds = Math.max(0, Math.floor((now - event.ts) / 1_000));
+  const elapsed = formatElapsed(elapsedSeconds);
+  const toolDetail = useMemo(() => describeToolCall(event.toolName, event.args), [event.toolName, event.args]);
 
   const statusIcon =
     event.status === 'running' ? (
@@ -1372,7 +2229,26 @@ const ToolItem = memo(function ToolItem({
         {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
         <Wrench className="h-3.5 w-3.5" style={{ color: appearance.muted }} />
         <span className="font-semibold">{event.toolName}</span>
+        {toolDetail && (
+          <span className="truncate" style={{ color: appearance.muted }}>
+            {toolDetail}
+          </span>
+        )}
+        {event.status === 'running' && (
+          <span className="truncate shrink-0" style={{ color: appearance.muted }}>
+            {event.progress || `running ${elapsed}`}
+          </span>
+        )}
         <div className="flex-1" />
+        {event.status !== 'running' && event.durationMs !== undefined && (
+          <span
+            className="text-[10px] tabular-nums"
+            style={{ color: appearance.muted }}
+            title={`Started ${formatFullTime(event.ts)}`}
+          >
+            {formatDurationMs(event.durationMs)}
+          </span>
+        )}
         {statusIcon}
       </button>
       {open && (
@@ -1385,7 +2261,20 @@ const ToolItem = memo(function ToolItem({
               {argsText}
             </pre>
           )}
-          {event.output && (
+          {event.status === 'running' && (
+            <div
+              data-testid={`tool-progress-${event.toolCallId}`}
+              className="rounded p-1.5 font-sans"
+              style={{ backgroundColor: appearance.surfaceStrong, color: appearance.muted }}
+            >
+              <div>{event.progress || 'Waiting for the tool to return output…'}</div>
+              <div className="mt-0.5 text-[10px]">
+                Running for {elapsed}
+                {elapsedSeconds >= 10 ? ' · Use Stop below to cancel this turn.' : ''}
+              </div>
+            </div>
+          )}
+          {event.output && showOutput && (
             <pre
               className="whitespace-pre-wrap break-words rounded p-1.5 max-h-64 overflow-auto"
               style={{ backgroundColor: appearance.surfaceStrong, fontSize: codeSize }}
@@ -1393,8 +2282,300 @@ const ToolItem = memo(function ToolItem({
               {event.output}
             </pre>
           )}
+          {event.output && !showOutput && (
+            <div
+              data-testid={`tool-output-hidden-${event.toolCallId}`}
+              className="rounded p-1.5 font-sans text-[10px]"
+              style={{ backgroundColor: appearance.surfaceStrong, color: appearance.muted }}
+            >
+              Output hidden by the View filter.
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 });
+
+/**
+ * A short, specific detail for a tool call — what this particular invocation is
+ * doing. Returns undefined when the arguments say nothing useful.
+ *
+ * This is only ever shown *alongside* the tool name, never instead of it: a
+ * bare "src/shared/agent-bridge.ts" badge tells you nothing about whether the
+ * file was read, written, or searched.
+ */
+function describeToolCall(toolName: string, args: unknown): string | undefined {
+  const record = parseToolArgs(args);
+  if (!record) return undefined;
+  const candidates = [
+    record.description,
+    record.query,
+    record.command,
+    record.pattern,
+    record.path,
+    record.file_path,
+    record.filePath,
+    record.url,
+    record.prompt,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    const label = firstLine(candidate);
+    if (label && label !== toolName) return label;
+  }
+  return undefined;
+}
+
+/**
+ * Shell tools ("powershell", "bash", …) all look identical on a badge, so the
+ * name alone is useless in a long run. Append a short prefix of the actual
+ * command so the strip reads "powershell npx tsc…" instead of five "powershell".
+ */
+const SHELL_TOOL_NAMES = new Set([
+  'powershell',
+  'pwsh',
+  'bash',
+  'sh',
+  'zsh',
+  'shell',
+  'cmd',
+  'terminal',
+  'run_in_terminal',
+  'execute_command',
+]);
+
+const SHELL_SUFFIX_MAX = 10;
+
+function shellCommandSuffix(toolName: string, args: unknown): string | undefined {
+  if (!SHELL_TOOL_NAMES.has(toolName.trim().toLowerCase())) return undefined;
+  const record = parseToolArgs(args);
+  if (!record) return undefined;
+  const raw = record.command ?? record.script ?? record.cmd ?? record.description;
+  if (typeof raw !== 'string') return undefined;
+  const line = raw.trim().split('\n')[0]?.trim() ?? '';
+  if (!line) return undefined;
+  return line.length <= SHELL_SUFFIX_MAX ? line : `${line.slice(0, SHELL_SUFFIX_MAX)}…`;
+}
+
+function parseToolArgs(args: unknown): Record<string, unknown> | undefined {
+  if (args && typeof args === 'object' && !Array.isArray(args)) return args as Record<string, unknown>;
+  if (typeof args === 'string') {
+    try {
+      const parsed = JSON.parse(args);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Not JSON — the raw string is the best label we have.
+      const label = firstLine(args);
+      return label ? { description: label } : undefined;
+    }
+  }
+  return undefined;
+}
+
+const MAX_TOOL_LABEL = 64;
+
+function firstLine(value: string): string {
+  const line = value.trim().split('\n')[0]?.trim() ?? '';
+  if (line.length <= MAX_TOOL_LABEL) return line;
+  return `${line.slice(0, MAX_TOOL_LABEL - 1)}…`;
+}
+
+/**
+ * Compact stand-in for tool calls when the "Tool calls" filter is off. Each
+ * call keeps a badge so in-flight work stays visible (otherwise a long tool
+ * call looks like the agent has hung), labelled with what it is actually doing
+ * and how long it took. Clicking a badge opens the full call in a dialog.
+ */
+const ToolBadgeStrip = memo(function ToolBadgeStrip({
+  tools,
+  appearance,
+  codeSize,
+}: {
+  tools: Extract<AgentTranscriptEvent, { kind: 'tool' }>[];
+  appearance: Appearance;
+  codeSize: number;
+}) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const hasRunning = tools.some((t) => t.status === 'running');
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!hasRunning) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [hasRunning]);
+
+  const selected = tools.find((t) => t.toolCallId === selectedId) ?? null;
+
+  return (
+    <div data-testid="tool-badges" className="flex flex-wrap items-center gap-1">
+      {tools.map((t) => {
+        const detail = describeToolCall(t.toolName, t.args);
+        const cmd = shellCommandSuffix(t.toolName, t.args);
+        const timing =
+          t.status === 'running'
+            ? formatElapsed(Math.max(0, Math.floor((now - t.ts) / 1_000)))
+            : t.durationMs !== undefined
+              ? formatDurationMs(t.durationMs)
+              : '';
+        return (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setSelectedId(t.toolCallId)}
+            data-testid={`tool-badge-${t.toolCallId}`}
+            title={`${t.toolName}${detail ? ` — ${detail}` : ''}${
+              t.status === 'running' ? ' — running…' : t.status === 'error' ? ' — failed' : ''
+            }\nClick for details`}
+            className="inline-flex items-center gap-1 h-5 px-1.5 rounded border text-[10px] leading-none hover:opacity-80"
+            style={{ borderColor: appearance.border, backgroundColor: appearance.surface }}
+          >
+            {t.status === 'running' ? (
+              <Loader2 className="h-3 w-3 shrink-0 animate-spin text-amber-600" />
+            ) : t.status === 'error' ? (
+              <XIcon className="h-3 w-3 shrink-0 text-destructive" />
+            ) : (
+              <Wrench className="h-3 w-3 shrink-0" style={{ color: appearance.muted }} />
+            )}
+            <span className="font-semibold" style={{ color: appearance.fg }}>
+              {t.toolName}
+            </span>
+            {cmd && (
+              <span className="font-mono shrink-0" style={{ color: appearance.muted }}>
+                {cmd}
+              </span>
+            )}
+            {timing && (
+              <span className="tabular-nums shrink-0" style={{ color: appearance.muted }}>
+                {timing}
+              </span>
+            )}
+          </button>
+        );
+      })}
+      <ToolDetailDialog
+        tool={selected}
+        appearance={appearance}
+        codeSize={codeSize}
+        onClose={() => setSelectedId(null)}
+      />
+    </div>
+  );
+});
+
+/** Full detail of a single tool call, opened from a collapsed tool badge. */
+function ToolDetailDialog({
+  tool,
+  appearance,
+  codeSize,
+  onClose,
+}: {
+  tool: Extract<AgentTranscriptEvent, { kind: 'tool' }> | null;
+  appearance: Appearance;
+  codeSize: number;
+  onClose: () => void;
+}) {
+  const argsText = useMemo(() => {
+    if (!tool || tool.args === undefined) return '';
+    try {
+      return typeof tool.args === 'string' ? tool.args : JSON.stringify(tool.args, null, 2);
+    } catch {
+      return String(tool.args);
+    }
+  }, [tool]);
+
+  if (!tool) return null;
+  const detail = describeToolCall(tool.toolName, tool.args);
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent
+        className="sm:max-w-2xl max-h-[85vh] overflow-hidden grid-rows-[auto_minmax(0,1fr)]"
+        data-testid="tool-detail-dialog"
+      >
+        <DialogHeader className="min-w-0">
+          <DialogTitle className="flex items-center gap-2 text-sm">
+            <Wrench className="h-4 w-4 shrink-0" />
+            <span className="truncate">{tool.toolName}</span>
+          </DialogTitle>
+          <DialogDescription className="break-words line-clamp-2">{detail ?? 'Tool call'}</DialogDescription>
+        </DialogHeader>
+        <div className="text-xs space-y-2 min-w-0 overflow-y-auto">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
+            <span>Status: {tool.status}</span>
+            <span title={formatFullTime(tool.ts)}>Started {formatClock(tool.ts)}</span>
+            {tool.durationMs !== undefined && <span>Took {formatDurationMs(tool.durationMs)}</span>}
+          </div>
+          {tool.progress && <div className="text-muted-foreground break-words">{tool.progress}</div>}
+          {argsText && (
+            <div className="min-w-0">
+              <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Arguments</div>
+              <pre
+                className="whitespace-pre-wrap break-all rounded p-2 max-h-52 overflow-auto font-mono"
+                style={{ backgroundColor: appearance.surfaceStrong, fontSize: codeSize }}
+              >
+                {argsText}
+              </pre>
+            </div>
+          )}
+          {tool.output && (
+            <div className="min-w-0">
+              <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Output</div>
+              <pre
+                data-testid="tool-detail-output"
+                className="whitespace-pre-wrap break-all rounded p-2 max-h-80 overflow-auto font-mono"
+                style={{ backgroundColor: appearance.surfaceStrong, fontSize: codeSize }}
+              >
+                {tool.output}
+              </pre>
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes}m ${remainder}s`;
+}
+
+/** Short wall-clock label for a transcript entry, e.g. `14:32`. */
+function formatClock(ts: number): string {
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+/** Full date+time, used as the hover title behind the short clock label. */
+function formatFullTime(ts: number): string {
+  return new Date(ts).toLocaleString();
+}
+
+function formatDurationMs(ms: number): string {
+  if (ms < 1_000) return `${Math.max(0, Math.round(ms))}ms`;
+  const seconds = ms / 1_000;
+  if (seconds < 10) return `${seconds.toFixed(1)}s`;
+  return formatElapsed(Math.round(seconds));
+}
+
+/**
+ * Wall-clock stamp shown next to a message's author label. Values come from the
+ * runtime's own event timestamps, so a replayed session shows when it actually
+ * happened rather than when it was reloaded.
+ */
+function EntryTime({ ts, durationMs }: { ts: number; durationMs?: number }) {
+  return (
+    <span title={formatFullTime(ts)} className="tabular-nums opacity-70">
+      {formatClock(ts)}
+      {durationMs !== undefined && durationMs > 0 ? ` · ${formatDurationMs(durationMs)}` : ''}
+    </span>
+  );
+}
+

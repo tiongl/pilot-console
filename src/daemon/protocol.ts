@@ -23,6 +23,13 @@ export const DAEMON_SECRET_PATH = path.join(os.homedir(), '.pilot-console', 'dae
 export const DAEMON_PID_PATH = path.join(os.homedir(), '.pilot-console', 'daemon.pid');
 export const DAEMON_LOCK_PATH = path.join(os.homedir(), '.pilot-console', 'daemon.lock');
 
+/**
+ * Descriptor for the daemon-hosted Copilot SDK runtime. Written so tooling can
+ * discover the runtime without speaking the NDJSON protocol; the authoritative
+ * source is still the `runtimeInfo` command.
+ */
+export const DAEMON_RUNTIME_PATH = path.join(os.homedir(), '.pilot-console', 'agent-runtime.json');
+
 // ---------------------------------------------------------------------------
 // Client → Daemon commands
 // ---------------------------------------------------------------------------
@@ -111,6 +118,18 @@ export interface PeekCmd {
   sessionId: string;
 }
 
+/**
+ * Ask the daemon for its hosted Copilot SDK runtime. The runtime is started
+ * lazily on the first call and then owned by the daemon for its lifetime, so
+ * agent sessions survive UI-server restarts.
+ */
+export interface RuntimeInfoCmd {
+  cmd: 'runtimeInfo';
+  reqId: string;
+  /** When true, restart the runtime even if one is already running. */
+  restart?: boolean;
+}
+
 export type DaemonCommand =
   | CreateCmd
   | WriteCmd
@@ -121,7 +140,8 @@ export type DaemonCommand =
   | DetachCmd
   | AuthCmd
   | RunOnceCmd
-  | PeekCmd;
+  | PeekCmd
+  | RuntimeInfoCmd;
 
 // ---------------------------------------------------------------------------
 // Daemon → Client responses
@@ -223,6 +243,24 @@ export interface RunOnceCompleteResp {
   totalBytes: number;
 }
 
+/** Connection descriptor for the daemon-hosted Copilot SDK runtime. */
+export interface RuntimeDescriptor {
+  /** Loopback host the runtime listens on. */
+  host: string;
+  port: number;
+  /** Shared secret the SDK must present when attaching. */
+  connectionToken: string;
+  /** Daemon pid that owns the runtime — lets clients detect a daemon restart. */
+  daemonPid: number;
+  startedAt: number;
+}
+
+export interface RuntimeInfoResp {
+  type: 'runtimeInfo';
+  reqId: string;
+  runtime: RuntimeDescriptor;
+}
+
 export type DaemonResponse =
   | CreatedResp
   | OutputResp
@@ -235,7 +273,8 @@ export type DaemonResponse =
   | ErrorResp
   | OkResp
   | RunOnceOutputResp
-  | RunOnceCompleteResp;
+  | RunOnceCompleteResp
+  | RuntimeInfoResp;
 
 // ---------------------------------------------------------------------------
 // Helpers

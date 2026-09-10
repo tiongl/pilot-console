@@ -4,6 +4,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { getDb } from './db';
 import { getProjectById, getWorktreeById } from './project-store';
+import { getDaemonClient } from '../daemon/client';
 import type {
   AgentServerMessage,
   AgentStatus,
@@ -14,6 +15,7 @@ import type {
   AgentSessionSummary,
   AgentShareMode,
   AgentShareStatus,
+  AgentUsage,
 } from './types';
 import type {
   CopilotClient as CopilotClientType,
@@ -27,6 +29,9 @@ import type {
 
 const MAX_TRANSCRIPT_EVENTS = 5_000;
 const SAVE_DEBOUNCE_MS = 1_500;
+const TOOL_RECONCILE_MS = 5_000;
+/** How often a busy session double-checks liveness against the runtime. */
+const BUSY_WATCHDOG_MS = 15_000;
 const DEFAULT_MODEL = 'auto';
 const DEFAULT_MODE: AgentMode = 'interactive';
 const MAX_DIFF_CHARS = 200_000;
@@ -60,10 +65,12 @@ export type AgentSubscriber = (msg: AgentServerMessage) => void;
 
 interface PendingPermission {
   resolve: (result: PermissionRequestResult) => void;
+  message: Extract<AgentServerMessage, { type: 'permission_request' }>;
 }
 
 interface PendingPlan {
   resolve: (result: ExitPlanModeResult) => void;
+  message: Extract<AgentServerMessage, { type: 'exit_plan_request' }>;
 }
 
 export interface AgentSession {
@@ -83,32 +90,92 @@ export interface AgentSession {
   sdk: CopilotSession;
   unsubscribe: () => void;
   saveTimer: ReturnType<typeof setTimeout> | null;
+  toolReconcileTimer: ReturnType<typeof setInterval> | null;
+  toolReconcileInFlight: boolean;
+  /** Liveness poll that runs for as long as the session reports `busy`. */
+  busyWatchdogTimer: ReturnType<typeof setInterval> | null;
+  busyWatchdogInFlight: boolean;
   /** Maps SDK messageId → transcript entry id for streaming assistant messages */
   assistantByMessageId: Map<string, string>;
+  /** Maps SDK messageId → `message_start` time, used to derive reply duration. */
+  assistantStartTs: Map<string, number>;
   /** Maps SDK toolCallId → transcript entry id for tool activity */
   toolByCallId: Map<string, string>;
   /** Current GitHub session-sharing state (remote-control mode). */
   share: AgentShareStatus;
+  /** Accumulated token/billing usage across every model call in the session. */
+  usage: AgentUsage;
+  /** When true, every permission request is auto-approved without prompting. */
+  allowAllPermissions: boolean;
 }
 
 const agentSessions = new Map<string, AgentSession>();
 
 // ---------------------------------------------------------------------------
 // Shared Copilot SDK client (lazy singleton)
+//
+// The runtime process is hosted by the session daemon, so agent sessions keep
+// running across UI-server restarts. We attach to it with
+// `RuntimeConnection.forUri`, which explicitly does not spawn a process — and
+// therefore `client.stop()` never terminates it. If the daemon is unavailable
+// we fall back to spawning an in-process runtime so agent mode still works
+// (at the cost of the old restart-kills-sessions behaviour).
 // ---------------------------------------------------------------------------
 
 let clientPromise: Promise<CopilotClientType> | null = null;
 let modelsCache: AgentModelOption[] | null = null;
+let modelsPromise: Promise<AgentModelOption[]> | null = null;
+/** True when the current client spawned its own runtime (daemon unavailable). */
+let clientOwnsRuntime = true;
+
+export function isRuntimeHostedByDaemon(): boolean {
+  return clientPromise !== null && !clientOwnsRuntime;
+}
+
+async function connectHostedRuntime(restart = false): Promise<CopilotClientType | null> {
+  const { CopilotClient, RuntimeConnection } = await import('@github/copilot-sdk');
+  let descriptor;
+  try {
+    descriptor = await getDaemonClient().runtimeInfo(restart);
+  } catch (err) {
+    console.error('[agent-bridge] daemon-hosted runtime unavailable:', err);
+    return null;
+  }
+  const client = new CopilotClient({
+    connection: RuntimeConnection.forUri(`${descriptor.host}:${descriptor.port}`, {
+      connectionToken: descriptor.connectionToken,
+    }),
+  });
+  try {
+    await client.start();
+  } catch (err) {
+    console.error('[agent-bridge] failed to attach to the daemon-hosted runtime:', err);
+    return null;
+  }
+  console.log(`[agent-bridge] Attached to daemon-hosted runtime at ${descriptor.host}:${descriptor.port}`);
+  return client;
+}
+
+async function spawnLocalRuntime(): Promise<CopilotClientType> {
+  // Imported lazily so environments without the SDK installed can still
+  // load the rest of the server (terminal modes) without crashing.
+  const { CopilotClient } = await import('@github/copilot-sdk');
+  const client = new CopilotClient();
+  await client.start();
+  console.warn('[agent-bridge] Using an in-process runtime — sessions will not survive a server restart.');
+  return client;
+}
 
 async function getClient(): Promise<CopilotClientType> {
   if (!clientPromise) {
     clientPromise = (async () => {
-      // Imported lazily so environments without the SDK installed can still
-      // load the rest of the server (terminal modes) without crashing.
-      const { CopilotClient } = await import('@github/copilot-sdk');
-      const client = new CopilotClient();
-      await client.start();
-      return client;
+      const hosted = await connectHostedRuntime();
+      if (hosted) {
+        clientOwnsRuntime = false;
+        return hosted;
+      }
+      clientOwnsRuntime = true;
+      return spawnLocalRuntime();
     })().catch((err) => {
       // Reset so a later attempt can retry after a transient failure.
       clientPromise = null;
@@ -118,13 +185,69 @@ async function getClient(): Promise<CopilotClientType> {
   return clientPromise;
 }
 
-/** List available models for the agent-mode model picker (cached). */
+/**
+ * Drop the cached client and reattach, asking the daemon for a fresh runtime.
+ * Used when the descriptor went stale (daemon restarted, runtime died).
+ */
+export async function reconnectAgentRuntime(): Promise<void> {
+  const previous = clientPromise;
+  clientPromise = null;
+  modelsCache = null;
+  modelsPromise = null;
+  if (previous) {
+    try {
+      const client = await previous;
+      await client.stop();
+    } catch {
+      /* the old runtime is already gone */
+    }
+  }
+  clientPromise = (async () => {
+    const hosted = await connectHostedRuntime(true);
+    if (hosted) {
+      clientOwnsRuntime = false;
+      return hosted;
+    }
+    clientOwnsRuntime = true;
+    return spawnLocalRuntime();
+  })().catch((err) => {
+    clientPromise = null;
+    throw err;
+  });
+  await clientPromise;
+}
+
+/**
+ * List available models for the agent-mode model picker (cached).
+ *
+ * An empty result is treated as a failure rather than cached: it means the
+ * runtime answered before it was ready, and caching it would leave every tab
+ * stuck with only "Auto" until the server restarted. Concurrent callers share
+ * one in-flight request so opening several tabs does not fan out.
+ */
 export async function listAgentModels(): Promise<AgentModelOption[]> {
   if (modelsCache) return modelsCache;
-  const client = await getClient();
-  const models = await client.listModels();
-  modelsCache = models.map((m) => ({ id: m.id, name: m.name || m.id }));
-  return modelsCache;
+  if (modelsPromise) return modelsPromise;
+
+  modelsPromise = (async () => {
+    const client = await getClient();
+    const models = await client.listModels();
+    const options = models.map((m) => ({ id: m.id, name: m.name || m.id }));
+    if (options.length === 0) throw new Error('runtime returned no models');
+    // The SDK does not advertise the implicit default, but it is a valid
+    // selection and is what a fresh session starts on.
+    if (!options.some((m) => m.id === DEFAULT_MODEL)) {
+      options.unshift({ id: DEFAULT_MODEL, name: 'Auto' });
+    }
+    modelsCache = options;
+    return options;
+  })();
+
+  try {
+    return await modelsPromise;
+  } finally {
+    modelsPromise = null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +272,45 @@ function safeExists(p: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Strip trailing separators and normalize slashes/case for cwd comparison. */
+function normalizeCwd(p: string): string {
+  const slashed = p.replace(/\\/g, '/').replace(/\/+$/, '');
+  return process.platform === 'win32' ? slashed.toLowerCase() : slashed;
+}
+
+/**
+ * True when `sessionCwd` is `root` or lives underneath it.
+ *
+ * The runtime's own `session.list` filter compares `context.cwd` byte-for-byte,
+ * which silently drops history whenever the recorded path differs only in
+ * slash direction or drive-letter case, and always drops sessions started in a
+ * subdirectory of the repo. Matching here instead keeps the /resume switcher in
+ * step with the project session history panel, which has always used
+ * prefix-with-boundary matching.
+ */
+export function cwdMatches(sessionCwd: string | undefined, root: string): boolean {
+  if (!sessionCwd) return false;
+  const a = normalizeCwd(sessionCwd);
+  const b = normalizeCwd(root);
+  return a === b || a.startsWith(`${b}/`);
+}
+
+/**
+ * Every session recorded for `cwd` (or a subdirectory of it), newest first.
+ *
+ * Deliberately lists unfiltered and filters locally: the runtime's server-side
+ * cwd filter is both stricter than we want and measurably slower than fetching
+ * the whole list (~95ms unfiltered vs ~256ms filtered against a 1000-session
+ * store), so there is nothing to gain by pushing the predicate down.
+ */
+async function listSessionMetasForCwd(
+  client: CopilotClientType,
+  cwd: string,
+): Promise<Awaited<ReturnType<CopilotClientType['listSessions']>>> {
+  const metas = await client.listSessions();
+  return metas.filter((m) => cwdMatches(m.context?.workingDirectory, cwd));
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +372,107 @@ function setStatus(session: AgentSession, status: AgentStatus): void {
   if (session.status === status) return;
   session.status = status;
   emit(session, { type: 'status', status });
+  if (status === 'busy') ensureBusyWatchdog(session);
+  else stopBusyWatchdog(session);
+}
+
+// ---------------------------------------------------------------------------
+// Busy watchdog
+//
+// `busy` is normally cleared by a `session.idle` / `assistant.idle` / `abort` /
+// `session.error` event. If one of those is missed — the socket dropped, the
+// turn finished while we were detached, or the runtime lost the session — the
+// UI shows a spinner forever and the agent looks hung. While a session is busy
+// we therefore poll the runtime's own event log and settle the status from it.
+// ---------------------------------------------------------------------------
+
+function stopBusyWatchdog(session: AgentSession): void {
+  if (!session.busyWatchdogTimer) return;
+  clearInterval(session.busyWatchdogTimer);
+  session.busyWatchdogTimer = null;
+}
+
+function ensureBusyWatchdog(session: AgentSession): void {
+  if (session.busyWatchdogTimer || !session.sdk || typeof session.sdk.getEvents !== 'function') return;
+  session.busyWatchdogTimer = setInterval(() => {
+    void checkBusyLiveness(session);
+  }, BUSY_WATCHDOG_MS);
+}
+
+export async function checkBusyLiveness(session: AgentSession): Promise<void> {
+  if (!session.alive || session.status !== 'busy' || session.busyWatchdogInFlight) return;
+  session.busyWatchdogInFlight = true;
+  try {
+    const events = await session.sdk.getEvents();
+    reconcileToolTranscript(session, events);
+    if (deriveStatusFromEvents(events) === 'idle') {
+      finalizeRunningTools(session, 'Tool ended without returning a completion result.');
+      setStatus(session, 'idle');
+      upsertEvent(session, {
+        kind: 'notice',
+        id: `notice:watchdog:${Date.now()}`,
+        ts: Date.now(),
+        message: 'The turn ended without a completion event; status recovered from the runtime.',
+      });
+    }
+  } catch (err) {
+    // The runtime no longer knows this session (it died, or the daemon
+    // restarted). Leaving the user staring at a spinner is the worst outcome.
+    console.error(`[agent-bridge] busy watchdog failed for ${session.sessionId}:`, err);
+    finalizeRunningTools(session, 'Lost contact with the agent runtime.');
+    setStatus(session, 'idle');
+    upsertEvent(session, {
+      kind: 'error',
+      id: `error:watchdog:${Date.now()}`,
+      ts: Date.now(),
+      message: 'Lost contact with the agent runtime. Reconnect or start a new session to continue.',
+    });
+  } finally {
+    session.busyWatchdogInFlight = false;
+  }
+}
+
+function runningTools(session: AgentSession) {
+  return session.transcript.filter(
+    (event): event is Extract<AgentTranscriptEvent, { kind: 'tool' }> =>
+      event.kind === 'tool' && event.status === 'running',
+  );
+}
+
+function stopToolReconciliation(session: AgentSession): void {
+  if (!session.toolReconcileTimer) return;
+  clearInterval(session.toolReconcileTimer);
+  session.toolReconcileTimer = null;
+}
+
+function ensureToolReconciliation(session: AgentSession): void {
+  if (
+    session.toolReconcileTimer ||
+    runningTools(session).length === 0 ||
+    !session.sdk ||
+    typeof session.sdk.getEvents !== 'function'
+  ) {
+    return;
+  }
+  session.toolReconcileTimer = setInterval(() => {
+    void reconcileAgentTools(session);
+  }, TOOL_RECONCILE_MS);
+}
+
+async function reconcileAgentTools(session: AgentSession): Promise<void> {
+  if (!session.alive || session.toolReconcileInFlight || runningTools(session).length === 0) {
+    if (runningTools(session).length === 0) stopToolReconciliation(session);
+    return;
+  }
+  session.toolReconcileInFlight = true;
+  try {
+    reconcileToolTranscript(session, await session.sdk.getEvents());
+  } catch (err) {
+    console.error(`[agent-bridge] tool reconciliation failed for ${session.sessionId}:`, err);
+  } finally {
+    session.toolReconcileInFlight = false;
+    if (runningTools(session).length === 0) stopToolReconciliation(session);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -217,14 +480,58 @@ function setStatus(session: AgentSession, status: AgentStatus): void {
 // ---------------------------------------------------------------------------
 
 /**
+ * The wall-clock time an event actually happened, as recorded by the runtime.
+ *
+ * Every SDK event carries an ISO 8601 `timestamp`. Using it rather than
+ * `Date.now()` matters for replay: rebuilding a week-old session from the
+ * persisted log would otherwise stamp every bubble with the current time.
+ */
+export function eventTs(event: SessionEvent): number {
+  const raw = (event as unknown as { timestamp?: string | number | Date }).timestamp;
+  if (raw instanceof Date) {
+    const t = raw.getTime();
+    if (!Number.isNaN(t)) return t;
+  } else if (typeof raw === 'number' && Number.isFinite(raw)) {
+    return raw;
+  } else if (typeof raw === 'string') {
+    const t = Date.parse(raw);
+    if (!Number.isNaN(t)) return t;
+  }
+  return Date.now();
+}
+
+/** A finite number, or 0 — usage fields are all optional in the SDK payloads. */
+function num(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+/** A zeroed usage accumulator for a fresh (or reset) session. */
+export function emptyAgentUsage(): AgentUsage {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedTokens: 0,
+    reasoningTokens: 0,
+    requests: 0,
+    premiumRequests: 0,
+    nanoAiu: 0,
+  };
+}
+
+function emitUsage(session: AgentSession): void {
+  emit(session, { type: 'usage', usage: { ...session.usage } });
+}
+
+/**
  * Normalize a raw SDK `SessionEvent` into transcript entries + subscriber
  * broadcasts. Exported for unit testing of the event-mapping logic.
  */
 export function handleSdkEvent(session: AgentSession, event: SessionEvent): void {
+  const ts = eventTs(event);
   switch (event.type) {
     case 'user.message': {
       const content = (event.data as { content?: string }).content ?? '';
-      upsertEvent(session, { kind: 'user', id: event.id, ts: Date.now(), content });
+      upsertEvent(session, { kind: 'user', id: event.id, ts, content });
       break;
     }
     case 'assistant.turn_start': {
@@ -232,40 +539,58 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
       break;
     }
     case 'assistant.message_start': {
+      // Only remember the id mapping. The transcript entry is created lazily by
+      // the first delta (or the final message) so turns that produce no text
+      // — tool-only turns, for example — never leave an empty bubble behind.
       const messageId = (event.data as { messageId: string }).messageId;
-      const entryId = `assistant:${messageId}`;
-      session.assistantByMessageId.set(messageId, entryId);
-      upsertEvent(session, { kind: 'assistant', id: entryId, ts: Date.now(), content: '' });
+      session.assistantByMessageId.set(messageId, `assistant:${messageId}`);
+      // Remember when generation began so the final message can report how long
+      // it took, including time-to-first-token.
+      session.assistantStartTs.set(messageId, ts);
       break;
     }
     case 'assistant.message_delta': {
       const data = event.data as { messageId: string; deltaContent: string };
       const entryId = session.assistantByMessageId.get(data.messageId) ?? `assistant:${data.messageId}`;
-      if (!session.assistantByMessageId.has(data.messageId)) {
-        session.assistantByMessageId.set(data.messageId, entryId);
-        upsertEvent(session, { kind: 'assistant', id: entryId, ts: Date.now(), content: '' });
-      }
+      session.assistantByMessageId.set(data.messageId, entryId);
       // Apply delta to the buffered entry so replay reflects streamed text.
       const entry = session.transcript.find((e) => e.id === entryId);
-      if (entry && entry.kind === 'assistant') entry.content += data.deltaContent;
-      emit(session, { type: 'assistant_delta', id: entryId, delta: data.deltaContent });
+      if (entry && entry.kind === 'assistant') {
+        entry.content += data.deltaContent;
+        emit(session, { type: 'assistant_delta', id: entryId, delta: data.deltaContent });
+      } else {
+        const startTs = session.assistantStartTs.get(data.messageId) ?? ts;
+        upsertEvent(session, { kind: 'assistant', id: entryId, ts: startTs, content: data.deltaContent });
+      }
       break;
     }
     case 'assistant.message': {
       const data = event.data as { messageId?: string; content?: string };
       const messageId = data.messageId;
       const entryId = (messageId && session.assistantByMessageId.get(messageId)) || `assistant:${messageId ?? event.id}`;
-      upsertEvent(session, { kind: 'assistant', id: entryId, ts: Date.now(), content: data.content ?? '' });
+      const content = data.content ?? '';
+      // Never create an empty bubble, and never clobber streamed text with an
+      // empty final payload.
+      if (!content) break;
+      const startTs = (messageId ? session.assistantStartTs.get(messageId) : undefined) ?? ts;
+      if (messageId) session.assistantStartTs.delete(messageId);
+      upsertEvent(session, {
+        kind: 'assistant',
+        id: entryId,
+        ts: startTs,
+        content,
+        durationMs: Math.max(0, ts - startTs),
+      });
       break;
     }
     case 'assistant.reasoning': {
       const content = (event.data as { content?: string }).content ?? '';
-      if (content) upsertEvent(session, { kind: 'reasoning', id: `reasoning:${event.id}`, ts: Date.now(), content });
+      if (content) upsertEvent(session, { kind: 'reasoning', id: `reasoning:${event.id}`, ts, content });
       break;
     }
     case 'system.message': {
       const content = (event.data as { content?: string }).content ?? '';
-      if (content) upsertEvent(session, { kind: 'system', id: `system:${event.id}`, ts: Date.now(), content });
+      if (content) upsertEvent(session, { kind: 'system', id: `system:${event.id}`, ts, content });
       break;
     }
     case 'tool.execution_start': {
@@ -275,12 +600,13 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
       upsertEvent(session, {
         kind: 'tool',
         id: entryId,
-        ts: Date.now(),
+        ts,
         toolCallId: data.toolCallId,
         toolName: data.toolName,
         args: clampArgs(data.arguments),
         status: 'running',
       });
+      ensureToolReconciliation(session);
       break;
     }
     case 'tool.execution_partial_result': {
@@ -294,11 +620,22 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
       }
       break;
     }
+    case 'tool.execution_progress': {
+      const data = event.data as { toolCallId: string; progressMessage: string };
+      const entryId = session.toolByCallId.get(data.toolCallId);
+      if (entryId) {
+        const entry = session.transcript.find((item) => item.id === entryId);
+        if (entry && entry.kind === 'tool') {
+          upsertEvent(session, { ...entry, progress: data.progressMessage });
+        }
+      }
+      break;
+    }
     case 'tool.execution_complete': {
       const data = event.data as {
         toolCallId: string;
         success: boolean;
-        result?: { content?: string } | string;
+        result?: { content?: string; detailedContent?: string } | string;
         error?: { message?: string };
       };
       const entryId = session.toolByCallId.get(data.toolCallId) ?? `tool:${data.toolCallId}`;
@@ -307,28 +644,74 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
       const resultText =
         typeof data.result === 'string'
           ? data.result
-          : (data.result?.content ?? data.error?.message ?? prior?.output);
+          : (data.result?.detailedContent ?? data.result?.content ?? data.error?.message ?? prior?.output);
       upsertEvent(session, {
         kind: 'tool',
         id: entryId,
-        ts: Date.now(),
+        ts: prior?.ts ?? ts,
         toolCallId: data.toolCallId,
         toolName: prior?.toolName ?? 'tool',
         args: prior?.args,
         status: data.success ? 'success' : 'error',
         output: resultText === undefined ? undefined : clampText(resultText, MAX_TOOL_OUTPUT_CHARS),
+        durationMs: prior ? Math.max(0, ts - prior.ts) : undefined,
       });
+      if (runningTools(session).length === 0) stopToolReconciliation(session);
       break;
     }
     case 'session.error': {
       const message = (event.data as { message?: string }).message ?? 'Unknown error';
-      upsertEvent(session, { kind: 'error', id: `error:${event.id}`, ts: Date.now(), message });
+      upsertEvent(session, { kind: 'error', id: `error:${event.id}`, ts, message });
       setStatus(session, 'idle');
       break;
     }
     case 'session.idle':
     case 'assistant.idle': {
+      finalizeRunningTools(session, 'Tool ended without returning a completion result.');
       setStatus(session, 'idle');
+      break;
+    }
+    case 'abort': {
+      finalizeRunningTools(session, 'Tool execution was aborted.');
+      setStatus(session, 'idle');
+      break;
+    }
+    case 'assistant.usage': {
+      const data = event.data as {
+        inputTokens?: number;
+        outputTokens?: number;
+        cacheReadTokens?: number;
+        cacheWriteTokens?: number;
+        reasoningTokens?: number;
+        cost?: number;
+        copilotUsage?: { totalNanoAiu?: number };
+      };
+      const u = session.usage;
+      u.requests += 1;
+      u.inputTokens += num(data.inputTokens);
+      u.outputTokens += num(data.outputTokens);
+      u.cachedTokens += num(data.cacheReadTokens) + num(data.cacheWriteTokens);
+      u.reasoningTokens += num(data.reasoningTokens);
+      u.premiumRequests += num(data.cost);
+      u.nanoAiu += num(data.copilotUsage?.totalNanoAiu);
+      emitUsage(session);
+      break;
+    }
+    case 'session.usage_checkpoint': {
+      // Durable accounting written by the runtime so a resumed session can
+      // recover its session-wide cost. It is absolute, not incremental.
+      const total = num((event.data as { totalNanoAiu?: number }).totalNanoAiu);
+      if (total > session.usage.nanoAiu) {
+        session.usage.nanoAiu = total;
+        emitUsage(session);
+      }
+      break;
+    }
+    case 'session.usage_info': {
+      const data = event.data as { currentTokens?: number; tokenLimit?: number };
+      session.usage.contextTokens = num(data.currentTokens);
+      session.usage.contextLimit = num(data.tokenLimit);
+      emitUsage(session);
       break;
     }
     case 'session.remote_steerable_changed': {
@@ -341,6 +724,96 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
     }
     default:
       break;
+  }
+}
+
+function finalizeRunningTools(session: AgentSession, message: string): void {
+  for (const event of runningTools(session)) {
+    upsertEvent(session, {
+      ...event,
+      status: 'error',
+      output: event.output ? `${event.output}\n${message}` : message,
+    });
+  }
+  stopToolReconciliation(session);
+}
+
+export function reconcileToolTranscript(session: AgentSession, events: SessionEvent[]): void {
+  const snapshots = new Map<
+    string,
+    {
+      partialOutput: string;
+      progress?: string;
+      complete?: SessionEvent;
+      endedWithoutCompletion?: string;
+    }
+  >();
+  const active = new Set<string>();
+
+  for (const event of events) {
+    if (event.type === 'tool.execution_start') {
+      const { toolCallId } = event.data as { toolCallId: string };
+      snapshots.set(toolCallId, { partialOutput: '' });
+      active.add(toolCallId);
+      continue;
+    }
+    if (event.type === 'tool.execution_partial_result') {
+      const data = event.data as { toolCallId: string; partialOutput: string };
+      const snapshot = snapshots.get(data.toolCallId);
+      if (snapshot) snapshot.partialOutput += data.partialOutput;
+      continue;
+    }
+    if (event.type === 'tool.execution_progress') {
+      const data = event.data as { toolCallId: string; progressMessage: string };
+      const snapshot = snapshots.get(data.toolCallId);
+      if (snapshot) snapshot.progress = data.progressMessage;
+      continue;
+    }
+    if (event.type === 'tool.execution_complete') {
+      const { toolCallId } = event.data as { toolCallId: string };
+      const snapshot = snapshots.get(toolCallId);
+      if (snapshot) snapshot.complete = event;
+      active.delete(toolCallId);
+      continue;
+    }
+    if (event.type === 'session.idle' || event.type === 'assistant.idle' || event.type === 'abort') {
+      const reason =
+        event.type === 'abort'
+          ? 'Tool execution was aborted.'
+          : 'Tool ended without returning a completion result.';
+      for (const toolCallId of active) {
+        const snapshot = snapshots.get(toolCallId);
+        if (snapshot) snapshot.endedWithoutCompletion = reason;
+      }
+      active.clear();
+    }
+  }
+
+  for (const tool of runningTools(session)) {
+    const snapshot = snapshots.get(tool.toolCallId);
+    if (!snapshot) continue;
+    if (snapshot.complete) {
+      handleSdkEvent(session, snapshot.complete);
+      continue;
+    }
+    if (snapshot.endedWithoutCompletion) {
+      upsertEvent(session, {
+        ...tool,
+        status: 'error',
+        progress: snapshot.progress,
+        output: snapshot.partialOutput
+          ? `${snapshot.partialOutput}\n${snapshot.endedWithoutCompletion}`
+          : snapshot.endedWithoutCompletion,
+      });
+      continue;
+    }
+    if (tool.output !== snapshot.partialOutput || tool.progress !== snapshot.progress) {
+      upsertEvent(session, {
+        ...tool,
+        progress: snapshot.progress,
+        output: snapshot.partialOutput || undefined,
+      });
+    }
   }
 }
 
@@ -398,17 +871,53 @@ function safeJson(value: unknown): string {
   }
 }
 
-function makePermissionHandler(getSession: () => AgentSession | undefined) {
+/** How long a prompt waits for its session to finish registering. */
+const SESSION_REGISTER_WAIT_MS = 10_000;
+const SESSION_REGISTER_POLL_MS = 25;
+
+/**
+ * Resolve the session for a callback that may fire before the session object
+ * has been assigned (the SDK can deliver events during `createSession` /
+ * `resumeSession`). Returns undefined if it never shows up.
+ */
+async function waitForSession(
+  getSession: () => AgentSession | undefined,
+): Promise<AgentSession | undefined> {
+  const deadline = Date.now() + SESSION_REGISTER_WAIT_MS;
+  let session = getSession();
+  while (!session && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, SESSION_REGISTER_POLL_MS));
+    session = getSession();
+  }
+  return session;
+}
+
+function makePermissionHandler(
+  getSession: () => AgentSession | undefined,
+  fallback?: { allowAllPermissions?: boolean },
+) {
   return async (request: PermissionRequest): Promise<PermissionRequestResult> => {
-    const session = getSession();
-    if (!session) return { kind: 'approve-once' };
-    if (session.mode === 'autopilot') return { kind: 'approve-once' };
+    // A resumed session can re-emit prompts that were pending while nobody was
+    // attached, and those can land before the session object is registered.
+    // Wait briefly rather than blanket-approving work the user never saw.
+    const session = (await waitForSession(getSession)) ?? undefined;
+    if (!session) {
+      return fallback?.allowAllPermissions ? { kind: 'approve-once' } : { kind: 'reject' };
+    }
+    if (autoApprovesPermissions(session)) return { kind: 'approve-once' };
 
     const requestId = randomUUID();
     const { title, detail, canSession } = describePermission(request);
     return new Promise<PermissionRequestResult>((resolve) => {
-      session.pendingPermissions.set(requestId, { resolve });
-      emit(session, { type: 'permission_request', requestId, title, detail, canSession });
+      const message: Extract<AgentServerMessage, { type: 'permission_request' }> = {
+        type: 'permission_request',
+        requestId,
+        title,
+        detail,
+        canSession,
+      };
+      session.pendingPermissions.set(requestId, { resolve, message });
+      emit(session, message);
     });
   };
 }
@@ -425,15 +934,16 @@ function makeExitPlanHandler(getSession: () => AgentSession | undefined) {
 
     const requestId = randomUUID();
     return new Promise<ExitPlanModeResult>((resolve) => {
-      session.pendingPlans.set(requestId, { resolve });
-      emit(session, {
+      const message: Extract<AgentServerMessage, { type: 'exit_plan_request' }> = {
         type: 'exit_plan_request',
         requestId,
         summary: request.summary,
         planContent: request.planContent,
         actions: request.actions,
         recommended: request.recommendedAction,
-      });
+      };
+      session.pendingPlans.set(requestId, { resolve, message });
+      emit(session, message);
     });
   };
 }
@@ -441,17 +951,74 @@ function makeExitPlanHandler(getSession: () => AgentSession | undefined) {
 export function respondToPermission(
   sessionId: string,
   requestId: string,
-  decision: 'approve-once' | 'approve-for-session' | 'reject',
+  decision: 'approve-once' | 'approve-for-session' | 'approve-all' | 'reject',
 ): void {
   const session = agentSessions.get(sessionId);
   if (!session) return;
+  resolvePermission(session, requestId, decision);
+}
+
+/**
+ * Whether a permission request should be approved without asking the user:
+ * either the session is in "allow everything" mode (any agent mode) or the
+ * agent is running auto-pilot.
+ */
+export function autoApprovesPermissions(session: AgentSession): boolean {
+  return session.allowAllPermissions || session.mode === 'autopilot';
+}
+
+/** Session-level permission resolution. Exported for unit testing. */
+export function resolvePermission(
+  session: AgentSession,
+  requestId: string,
+  decision: 'approve-once' | 'approve-for-session' | 'approve-all' | 'reject',
+): void {
   const pending = session.pendingPermissions.get(requestId);
   if (!pending) return;
   session.pendingPermissions.delete(requestId);
+
+  if (decision === 'approve-all') {
+    // Approve this request, then stop prompting for the rest of the session
+    // (which also drains anything else already queued).
+    pending.resolve({ kind: 'approve-once' });
+    emit(session, { type: 'permission_resolved', requestId });
+    applyAllowAll(session, true);
+    return;
+  }
+
   const result: PermissionRequestResult =
     decision === 'reject' ? { kind: 'reject' } : { kind: decision };
   pending.resolve(result);
   emit(session, { type: 'permission_resolved', requestId });
+}
+
+/** Whether the session auto-approves every permission request. */
+export function isAllowAllPermissions(sessionId: string): boolean {
+  return agentSessions.get(sessionId)?.allowAllPermissions ?? false;
+}
+
+/**
+ * Toggle "allow everything" for a session. Enabling it also auto-approves any
+ * prompts that are already waiting so the run isn't left blocked.
+ */
+export function setAllowAllPermissions(sessionId: string, enabled: boolean): void {
+  const session = agentSessions.get(sessionId);
+  if (!session) return;
+  applyAllowAll(session, enabled);
+}
+
+/** Session-level "allow everything" toggle. Exported for unit testing. */
+export function applyAllowAll(session: AgentSession, enabled: boolean): void {
+  session.allowAllPermissions = enabled;
+  if (enabled) {
+    for (const [id, waiting] of [...session.pendingPermissions]) {
+      session.pendingPermissions.delete(id);
+      waiting.resolve({ kind: 'approve-once' });
+      emit(session, { type: 'permission_resolved', requestId: id });
+    }
+  }
+  emit(session, { type: 'allow_all', enabled });
+  persistAgentState(session);
 }
 
 /** Maps an exit-plan action to the mode the session should continue in. */
@@ -483,6 +1050,7 @@ function setMode(session: AgentSession, mode: AgentMode): void {
   if (session.mode === mode) return;
   session.mode = mode;
   emit(session, { type: 'mode', mode });
+  persistAgentState(session);
   // Entering autopilot clears any outstanding permission prompts.
   if (mode === 'autopilot') {
     for (const [requestId, pending] of session.pendingPermissions) {
@@ -520,9 +1088,98 @@ function persistTranscript(session: AgentSession, ended = false): void {
   }
 }
 
+/**
+ * State a resumed session needs but the SDK does not carry for us. Persisted on
+ * every change so a session picked back up after a server restart keeps its
+ * model, mode, workspace and auto-approval setting.
+ */
+export interface PersistedAgentState {
+  model?: string;
+  mode?: AgentMode;
+  projectId?: string | null;
+  worktreeId?: string | null;
+  allowAllPermissions?: boolean;
+  cwd?: string;
+}
+
+export function persistAgentState(session: AgentSession): void {
+  const state: PersistedAgentState = {
+    model: session.model,
+    mode: session.mode,
+    projectId: session.projectId,
+    worktreeId: session.worktreeId,
+    allowAllPermissions: session.allowAllPermissions,
+    cwd: session.cwd,
+  };
+  try {
+    getDb()
+      .prepare('UPDATE cli_sessions SET agent_state = ? WHERE id = ?')
+      .run(JSON.stringify(state), session.sessionId);
+  } catch (err) {
+    console.error(`[agent-bridge] Failed to persist agent state for ${session.sessionId}:`, err);
+  }
+}
+
+export function loadAgentState(sessionId: string): PersistedAgentState {
+  try {
+    const row = getDb().prepare('SELECT agent_state FROM cli_sessions WHERE id = ?').get(sessionId) as
+      | { agent_state?: string }
+      | undefined;
+    if (!row?.agent_state) return {};
+    const parsed = JSON.parse(row.agent_state) as PersistedAgentState;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Session lifecycle
 // ---------------------------------------------------------------------------
+
+/**
+ * Work out whether a resumed session is mid-turn. The SDK event log is ordered,
+ * so the last turn-boundary event wins: anything that starts work implies busy,
+ * anything that ends a turn implies idle. An empty/unavailable log is treated as
+ * idle, matching the previous behaviour.
+ *
+ * Note this reads the *persisted* log from `getEvents()`, which is not the same
+ * as the live event stream: it ends at `assistant.turn_end` and never contains
+ * the `session.idle` / `assistant.idle` markers that the stream emits. Treating
+ * only the streamed markers as terminal would report every completed session as
+ * busy forever.
+ */
+/** Event types that mean "no work in flight". */
+const TURN_END_EVENTS = new Set([
+  'session.idle',
+  'assistant.idle',
+  'assistant.turn_end',
+  'session.error',
+  'session.abort',
+  'abort',
+  // Emitted by the runtime when it tears a session down (for example after its
+  // owning client disconnects). Not in the SDK's typed union, hence the strings.
+  'session.shutdown',
+]);
+
+/** Event types that mean "work has started". */
+const TURN_START_EVENTS = new Set([
+  'user.message',
+  'assistant.turn_start',
+  'assistant.message_start',
+  'tool.execution_start',
+]);
+
+export function deriveStatusFromEvents(events: SessionEvent[] | undefined): AgentStatus {
+  if (!Array.isArray(events)) return 'idle';
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const type = events[i]?.type as string | undefined;
+    if (!type) continue;
+    if (TURN_END_EVENTS.has(type)) return 'idle';
+    if (TURN_START_EVENTS.has(type)) return 'busy';
+  }
+  return 'idle';
+}
 
 export async function createAgentSession(
   userId: string,
@@ -562,9 +1219,16 @@ export async function createAgentSession(
     sdk,
     unsubscribe: () => {},
     saveTimer: null,
+    toolReconcileTimer: null,
+    toolReconcileInFlight: false,
+    busyWatchdogTimer: null,
+    busyWatchdogInFlight: false,
     assistantByMessageId: new Map(),
+    assistantStartTs: new Map(),
     toolByCallId: new Map(),
     share: { mode: 'off', steerable: false },
+    usage: emptyAgentUsage(),
+    allowAllPermissions: false,
   };
   sessionRef = session;
 
@@ -576,6 +1240,7 @@ export async function createAgentSession(
   db.prepare(
     'INSERT INTO cli_sessions (id, user_id, project_id, worktree_id, copilot_session_id, kind) VALUES (?, ?, ?, ?, ?, ?)',
   ).run(session.sessionId, userId, projectId ?? null, worktreeId ?? null, session.sessionId, 'agent');
+  persistAgentState(session);
 
   console.log(`[agent-bridge] Created agent session ${session.sessionId}, cwd=${cwd}, model=${model}`);
   return session;
@@ -597,12 +1262,33 @@ export async function sendAgentMessage(sessionId: string, prompt: string): Promi
 export async function cancelAgent(sessionId: string): Promise<void> {
   const session = agentSessions.get(sessionId);
   if (!session || !session.alive) return;
+
+  for (const [requestId, pending] of session.pendingPermissions) {
+    session.pendingPermissions.delete(requestId);
+    pending.resolve({ kind: 'reject' });
+    emit(session, { type: 'permission_resolved', requestId });
+  }
+  for (const [requestId, pending] of session.pendingPlans) {
+    session.pendingPlans.delete(requestId);
+    pending.resolve({ approved: false });
+    emit(session, { type: 'exit_plan_resolved', requestId });
+  }
+  for (const event of session.transcript) {
+    if (event.kind === 'tool' && event.status === 'running') {
+      upsertEvent(session, {
+        ...event,
+        status: 'error',
+        output: event.output ? `${event.output}\nCancelled by user.` : 'Cancelled by user.',
+      });
+    }
+  }
+  setStatus(session, 'idle');
+
   try {
     await session.sdk.abort();
   } catch (err) {
     console.error(`[agent-bridge] abort failed for ${sessionId}:`, err);
   }
-  setStatus(session, 'idle');
 }
 
 export async function setAgentModel(sessionId: string, model: string): Promise<void> {
@@ -612,6 +1298,7 @@ export async function setAgentModel(sessionId: string, model: string): Promise<v
     await session.sdk.setModel(model);
     session.model = model;
     emit(session, { type: 'model', model });
+    persistAgentState(session);
   } catch (err) {
     console.error(`[agent-bridge] setModel failed for ${sessionId}:`, err);
   }
@@ -770,7 +1457,7 @@ export async function listAgentSessionSummaries(sessionId: string): Promise<Agen
   if (!session) return [];
   try {
     const client = await getClient();
-    const metas = await client.listSessions({ workingDirectory: session.cwd });
+    const metas = await listSessionMetasForCwd(client, session.cwd);
     return metas
       .map((m) => ({
         id: m.sessionId,
@@ -788,10 +1475,42 @@ export async function listAgentSessionSummaries(sessionId: string): Promise<Agen
 }
 
 /**
- * Resume an existing (persisted) agent session, reattaching handlers and
- * restoring the normalized transcript from the DB. Returns the live session, or
- * undefined if it can't be resumed.
+ * Resume the most relevant agent session for a workspace.
+ * Prefers remote/shared sessions when available, then falls back to the newest
+ * session in the same working directory.
  */
+export async function resumeBestAgentSessionForWorkspace(
+  userId: string,
+  projectId: string | null,
+  worktreeId: string | null,
+): Promise<AgentSession | undefined> {
+  const cwd = resolveCwd(projectId, worktreeId);
+  try {
+    const client = await getClient();
+    const metas = await listSessionMetasForCwd(client, cwd);
+    const ordered = [...metas].sort((a, b) => {
+      const aRemote = Boolean(a.isRemote);
+      const bRemote = Boolean(b.isRemote);
+      if (aRemote !== bRemote) return aRemote ? -1 : 1;
+      const aModified = new Date(a.modifiedTime instanceof Date ? a.modifiedTime : new Date(a.modifiedTime)).getTime();
+      const bModified = new Date(b.modifiedTime instanceof Date ? b.modifiedTime : new Date(b.modifiedTime)).getTime();
+      return bModified - aModified;
+    });
+
+    for (const meta of ordered) {
+      if (!meta.sessionId) continue;
+      const session = await resumeAgentSession(userId, meta.sessionId);
+      if (!session) continue;
+      session.projectId = projectId ?? null;
+      session.worktreeId = worktreeId ?? null;
+      session.cwd = cwd;
+      return session;
+    }
+  } catch (err) {
+    console.error(`[agent-bridge] resumeBestAgentSessionForWorkspace failed for cwd=${cwd}:`, err);
+  }
+  return undefined;
+}
 export async function resumeAgentSession(userId: string, sessionId: string): Promise<AgentSession | undefined> {
   const existing = agentSessions.get(sessionId);
   if (existing && existing.alive) return existing;
@@ -799,11 +1518,19 @@ export async function resumeAgentSession(userId: string, sessionId: string): Pro
   const client = await getClient();
   let sessionRef: AgentSession | undefined;
 
+  // Load persisted state first: a resumed session may re-emit permission
+  // prompts immediately, and the handler needs to know whether this session
+  // had "allow all" enabled before it was detached.
+  const persisted = loadAgentState(sessionId);
+
   let sdk;
   try {
     sdk = await client.resumeSession(sessionId, {
       streaming: true,
-      onPermissionRequest: makePermissionHandler(() => sessionRef),
+      continuePendingWork: true,
+      onPermissionRequest: makePermissionHandler(() => sessionRef, {
+        allowAllPermissions: persisted.allowAllPermissions,
+      }),
       onExitPlanModeRequest: makeExitPlanHandler(() => sessionRef),
     });
   } catch (err) {
@@ -811,7 +1538,7 @@ export async function resumeAgentSession(userId: string, sessionId: string): Pro
     return undefined;
   }
 
-  // Restore the persisted transcript so the UI shows prior history.
+  // Stored transcript, used as a fallback when the runtime cannot replay.
   let transcript: AgentTranscriptEvent[] = [];
   const row = getDb().prepare('SELECT output_log FROM cli_sessions WHERE id = ?').get(sessionId) as
     | { output_log?: string }
@@ -828,11 +1555,11 @@ export async function resumeAgentSession(userId: string, sessionId: string): Pro
   const session: AgentSession = {
     sessionId: sdk.sessionId,
     userId,
-    projectId: null,
-    worktreeId: null,
-    cwd: sdk.workspacePath ?? process.cwd(),
-    model: DEFAULT_MODEL,
-    mode: DEFAULT_MODE,
+    projectId: persisted.projectId ?? null,
+    worktreeId: persisted.worktreeId ?? null,
+    cwd: sdk.workspacePath ?? persisted.cwd ?? process.cwd(),
+    model: persisted.model ?? DEFAULT_MODEL,
+    mode: persisted.mode ?? DEFAULT_MODE,
     status: 'idle',
     alive: true,
     transcript,
@@ -842,28 +1569,48 @@ export async function resumeAgentSession(userId: string, sessionId: string): Pro
     sdk,
     unsubscribe: () => {},
     saveTimer: null,
+    toolReconcileTimer: null,
+    toolReconcileInFlight: false,
+    busyWatchdogTimer: null,
+    busyWatchdogInFlight: false,
     assistantByMessageId: new Map(),
+    assistantStartTs: new Map(),
     toolByCallId: new Map(),
     share: { mode: 'off', steerable: false },
+    usage: emptyAgentUsage(),
+    allowAllPermissions: persisted.allowAllPermissions ?? false,
   };
   sessionRef = session;
 
-  // Sessions created outside this console (e.g. the CLI) have no transcript in
-  // our DB. Rebuild it from the SDK's own event log so the UI shows history.
-  if (transcript.length === 0) {
-    try {
-      const past = await (sdk as unknown as { getEvents?: () => Promise<SessionEvent[]> }).getEvents?.();
-      if (Array.isArray(past)) {
-        for (const event of past) handleSdkEvent(session, event);
-      }
-    } catch (err) {
-      console.error(`[agent-bridge] getEvents replay failed for ${sessionId}:`, err);
-    }
-    setStatus(session, 'idle');
+  // The runtime's own event log is the source of truth: while we were detached
+  // it kept recording (finishing a turn, or shutting the session down), so our
+  // stored transcript is at best stale. Rebuild from the log whenever we can
+  // get it, and fall back to the stored copy only if the runtime cannot tell us
+  // (e.g. a session that never completed a turn and so was never written to the
+  // SDK's session store).
+  let replayed: SessionEvent[] | undefined;
+  try {
+    replayed = await (sdk as unknown as { getEvents?: () => Promise<SessionEvent[]> }).getEvents?.();
+  } catch (err) {
+    console.error(`[agent-bridge] getEvents replay failed for ${sessionId}:`, err);
   }
+
+  if (Array.isArray(replayed) && replayed.length > 0) {
+    session.transcript = [];
+    session.assistantByMessageId.clear();
+    session.assistantStartTs.clear();
+    session.toolByCallId.clear();
+    // Rebuilt from the log below. Token counts cannot be recovered (the SDK
+    // marks `assistant.usage` ephemeral) but the durable usage checkpoints do
+    // restore the session-wide cost.
+    session.usage = emptyAgentUsage();
+    for (const event of replayed) handleSdkEvent(session, event);
+  }
+  setStatus(session, deriveStatusFromEvents(replayed));
 
   session.unsubscribe = sdk.on((event) => handleSdkEvent(session, event));
   agentSessions.set(session.sessionId, session);
+  ensureToolReconciliation(session);
 
   // Ensure a DB row exists (older/remote sessions may not have one locally).
   getDb()
@@ -938,6 +1685,12 @@ export function broadcastAgentShareStatus(sessionId: string): void {
   if (session) emit(session, { type: 'share_status', status: { ...session.share } });
 }
 
+/** Accumulated token/billing usage for a session. */
+export function getAgentUsage(sessionId: string): AgentUsage {
+  const session = agentSessions.get(sessionId);
+  return session ? { ...session.usage } : emptyAgentUsage();
+}
+
 /**
  * Share (or unshare) a session with GitHub.
  * - `export` → publish events read-only (appears in the GitHub agents tab).
@@ -996,6 +1749,24 @@ export function getReplay(sessionId: string): AgentTranscriptEvent[] {
   return agentSessions.get(sessionId)?.transcript ?? [];
 }
 
+export async function reconcileAgentSession(sessionId: string): Promise<void> {
+  const session = agentSessions.get(sessionId);
+  if (session) await reconcileAgentTools(session);
+}
+
+export function getPendingAgentMessages(sessionId: string): AgentServerMessage[] {
+  const session = agentSessions.get(sessionId);
+  if (!session) return [];
+  return pendingMessagesForSession(session);
+}
+
+export function pendingMessagesForSession(session: AgentSession): AgentServerMessage[] {
+  return [
+    ...[...session.pendingPermissions.values()].map((pending) => pending.message),
+    ...[...session.pendingPlans.values()].map((pending) => pending.message),
+  ];
+}
+
 export async function endAgentSession(sessionId: string): Promise<void> {
   const session = agentSessions.get(sessionId);
   if (!session) return;
@@ -1004,6 +1775,8 @@ export async function endAgentSession(sessionId: string): Promise<void> {
     clearTimeout(session.saveTimer);
     session.saveTimer = null;
   }
+  stopToolReconciliation(session);
+  stopBusyWatchdog(session);
   // Fail any outstanding permission prompts so the SDK doesn't hang.
   for (const [requestId, pending] of session.pendingPermissions) {
     session.pendingPermissions.delete(requestId);
@@ -1041,4 +1814,49 @@ export async function shutdownAgentBridge(): Promise<void> {
     }
     clientPromise = null;
   }
+}
+
+/**
+ * Release this process's hold on agent sessions without ending them.
+ *
+ * When the runtime lives in the daemon the sessions keep running after we go
+ * away, so a UI-server restart (including `tsx --watch` reloads) must not
+ * destroy them: we only flush transcripts, stop our timers and drop our
+ * in-memory state. Outstanding permission prompts are deliberately left
+ * unanswered — the runtime keeps them pending and `resumeAgentSession` re-emits
+ * them via `continuePendingWork`.
+ *
+ * If we own the runtime (daemon unavailable) there is nothing to preserve, so
+ * fall back to the full shutdown rather than orphaning a child process.
+ */
+export async function detachAgentBridge(): Promise<void> {
+  if (!isRuntimeHostedByDaemon()) {
+    await shutdownAgentBridge();
+    return;
+  }
+
+  for (const session of agentSessions.values()) {
+    if (session.saveTimer) {
+      clearTimeout(session.saveTimer);
+      session.saveTimer = null;
+    }
+    stopToolReconciliation(session);
+    stopBusyWatchdog(session);
+    try {
+      session.unsubscribe();
+    } catch {
+      /* ignore */
+    }
+    persistTranscript(session, true);
+    persistAgentState(session);
+  }
+  agentSessions.clear();
+
+  // Note: we never call `client.stop()` here. It would send `session.destroy`
+  // for every attached session, which is exactly what we are trying to avoid.
+  // The socket to the daemon-hosted runtime closes when this process exits.
+  clientPromise = null;
+  modelsCache = null;
+  modelsPromise = null;
+  console.log('[agent-bridge] Detached from the daemon-hosted runtime; sessions left running.');
 }
