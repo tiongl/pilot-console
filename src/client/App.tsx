@@ -14,6 +14,10 @@ import ProjectLayout from './pages/ProjectLayout';
 import KeepAliveChat from './components/KeepAliveChat';
 import ProjectSkillsPage from './pages/ProjectSkillsPage';
 import ProjectSettingsPage from './pages/ProjectSettingsPage';
+import ProjectBoardPage from './pages/ProjectBoardPage';
+import ProjectMilestonesPage from './pages/ProjectMilestonesPage';
+import ProjectIssuesPage from './pages/ProjectIssuesPage';
+import ProjectPullsPage from './pages/ProjectPullsPage';
 import WorktreeLayout from './pages/WorktreeLayout';
 import WorktreeChatPage from './pages/WorktreeChatPage';
 import ProjectChatPage from './pages/ProjectChatPage';
@@ -69,6 +73,10 @@ export function App() {
               <Route index element={<Navigate to="chat" replace />} />
               <Route path="chat" element={<ProjectChatKeepAlive />} />
               <Route path="lead" element={<ProjectLeadPage />} />
+              <Route path="board" element={<ProjectBoardPage />} />
+              <Route path="milestones" element={<ProjectMilestonesPage />} />
+              <Route path="issues" element={<ProjectIssuesPage />} />
+              <Route path="pulls" element={<ProjectPullsPage />} />
               <Route path="skills" element={<ProjectSkillsPage />} />
               <Route path="settings" element={<ProjectSettingsPage />} />
             </Route>

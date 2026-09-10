@@ -2,7 +2,21 @@
 
 import { useCallback, useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
-import { Wrench, ListTodo, History, Keyboard, Bookmark, Columns2, ExternalLink, Compass } from 'lucide-react';
+import {
+  Wrench,
+  ListTodo,
+  History,
+  Keyboard,
+  Bookmark,
+  Columns2,
+  ExternalLink,
+  Compass,
+  MessageSquare,
+  KanbanSquare,
+  Target,
+  CircleDot,
+  GitPullRequest,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -11,6 +25,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import SessionHistory from './SessionHistory';
 import SnippetPanel from './SnippetPanel';
 import { useKeyboardShortcuts, ShortcutsHelpOverlay } from './KeyboardShortcuts';
+import { GitHubProjectPicker } from '../github/GitHubProjectPicker';
 import { useProjectSplit, isValidSplitLayout } from '../../lib/project-split-context';
 
 interface Props {
@@ -225,6 +240,9 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
         </div>
       </div>
 
+      {/* Sub-nav tabs */}
+      <ProjectNavTabs basePath={basePath} pathname={pathname} />
+
       {/* Content area */}
       <div className="flex-1 flex flex-col overflow-hidden">
         <div className="flex-1 flex overflow-hidden">
@@ -259,6 +277,9 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
               <Textarea id="settings-desc" value={settingsDesc} onChange={e => setSettingsDesc(e.target.value)} rows={2} />
             </div>
             {settingsError && <p className="text-sm text-destructive">{settingsError}</p>}
+            <div className="border-t pt-4">
+              <GitHubProjectPicker projectId={projectId} />
+            </div>
             <div className="flex items-center justify-between">
               <Button type="submit" disabled={settingsSaving}>
                 {settingsSaving ? 'Saving…' : 'Save'}
@@ -270,6 +291,41 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
           </form>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+const NAV_TABS = [
+  { seg: 'chat', label: 'Chat', icon: MessageSquare },
+  { seg: 'board', label: 'Board', icon: KanbanSquare },
+  { seg: 'milestones', label: 'Milestones', icon: Target },
+  { seg: 'issues', label: 'Issues', icon: CircleDot },
+  { seg: 'pulls', label: 'Pull Requests', icon: GitPullRequest },
+] as const;
+
+function ProjectNavTabs({ basePath, pathname }: { basePath: string; pathname: string }) {
+  return (
+    <div className="flex items-center gap-1 border-b px-2">
+      {NAV_TABS.map(({ seg, label, icon: Icon }) => {
+        const active =
+          seg === 'chat'
+            ? pathname === basePath || pathname.endsWith('/chat')
+            : pathname.endsWith(`/${seg}`);
+        return (
+          <Link
+            key={seg}
+            to={`${basePath}/${seg}`}
+            className={`flex items-center gap-1.5 border-b-2 px-2.5 py-1.5 text-xs transition-colors ${
+              active
+                ? 'border-primary text-foreground'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <Icon className="h-3.5 w-3.5" />
+            {label}
+          </Link>
+        );
+      })}
     </div>
   );
 }

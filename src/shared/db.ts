@@ -85,6 +85,19 @@ function initSchema(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_project_snippets_project_id ON project_snippets(project_id);
 
+    CREATE TABLE IF NOT EXISTS project_github_projects (
+      id                TEXT PRIMARY KEY,
+      project_id        TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      gh_project_id     TEXT NOT NULL,
+      gh_project_number INTEGER NOT NULL,
+      title             TEXT NOT NULL DEFAULT '',
+      is_default        INTEGER NOT NULL DEFAULT 0,
+      created_at        TEXT DEFAULT (datetime('now')),
+      UNIQUE(project_id, gh_project_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_project_github_projects_project_id ON project_github_projects(project_id);
+
     CREATE TABLE IF NOT EXISTS worktrees (
       id            TEXT PRIMARY KEY,
       project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

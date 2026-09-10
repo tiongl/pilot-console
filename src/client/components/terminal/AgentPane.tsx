@@ -118,6 +118,13 @@ const CLIENT_COMMANDS: AgentSlashCommand[] = [
 
 const CLIENT_COMMAND_NAMES = new Set(CLIENT_COMMANDS.map((c) => c.name));
 
+// Cap live-streamed tool output kept in browser memory (mirrors the server).
+const MAX_TOOL_OUTPUT_CHARS = 50_000;
+// How many transcript items to render at once; older items are collapsed
+// behind a "show earlier" button so a long session doesn't render thousands
+// of DOM nodes at once.
+const RENDER_WINDOW = 400;
+
 /** Whether a command should prompt for an argument before running. */
 const commandTakesArg = (c: AgentSlashCommand): boolean =>
   c.argRequired === true || !!c.argHint || !!(c.argChoices && c.argChoices.length);
@@ -403,7 +410,14 @@ export default function AgentPane({
       if (entry.kind === 'assistant' && kind === 'assistant') {
         next[idx] = { ...entry, content: entry.content + delta };
       } else if (entry.kind === 'tool' && kind === 'tool') {
-        next[idx] = { ...entry, output: (entry.output ?? '') + delta };
+        const combined = (entry.output ?? '') + delta;
+        // Bound live-streamed tool output so a chatty tool can't grow the
+        // browser's transcript memory without limit (matches the server cap).
+        const output =
+          combined.length > MAX_TOOL_OUTPUT_CHARS
+            ? combined.slice(0, MAX_TOOL_OUTPUT_CHARS) + `\n… [truncated ${combined.length - MAX_TOOL_OUTPUT_CHARS} chars]`
+            : combined;
+        next[idx] = { ...entry, output };
       }
       return next;
     });
@@ -668,6 +682,13 @@ export default function AgentPane({
     }
     return items;
   }, [events, visibility]);
+
+  // Only render the most recent `renderLimit` items to bound DOM size; older
+  // items stay in state (and scroll history) but are revealed on demand.
+  const [renderLimit, setRenderLimit] = useState(RENDER_WINDOW);
+  const windowedItems =
+    renderItems.length > renderLimit ? renderItems.slice(-renderLimit) : renderItems;
+  const earlierCount = renderItems.length - windowedItems.length;
 
   // --- Outline -------------------------------------------------------------
   const outlineItems = useMemo(() => buildOutline(events), [events]);
@@ -1686,7 +1707,19 @@ export default function AgentPane({
             All output is hidden by the current filters.
           </div>
         )}
-        {renderItems.map((item) => {
+        {earlierCount > 0 && (
+          <div className="text-center">
+            <button
+              type="button"
+              onClick={() => setRenderLimit((n) => n + RENDER_WINDOW)}
+              className="text-xs px-3 py-1 rounded-full border"
+              style={{ borderColor: appearance.border, color: appearance.muted }}
+            >
+              Show {Math.min(RENDER_WINDOW, earlierCount)} earlier of {earlierCount} hidden
+            </button>
+          </div>
+        )}
+        {windowedItems.map((item) => {
           const isMatch = searchMatches.includes(item.key);
           return (
             <div

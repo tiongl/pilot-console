@@ -42,6 +42,29 @@ const BUSY_WATCHDOG_MS = 15_000;
 const DEFAULT_MODEL = 'auto';
 const DEFAULT_MODE: AgentMode = 'interactive';
 const MAX_DIFF_CHARS = 200_000;
+// Per-entry byte caps keep a long session from growing transcript memory (and
+// the persisted JSON blob / WS payloads) without bound. Tool output and args
+// are the dominant hogs (file reads, big command output, large JSON args).
+const MAX_TOOL_OUTPUT_CHARS = 50_000;
+const MAX_TOOL_ARG_CHARS = 20_000;
+
+/** Clamp text to `max` chars, appending a one-line truncation marker if cut. */
+function clampText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max) + `\n… [truncated ${text.length - max} chars]`;
+}
+
+/** Clamp large tool args to a bounded string; keep small args as-is. */
+function clampArgs(args: unknown): unknown {
+  if (args === undefined) return undefined;
+  let s: string;
+  try {
+    s = typeof args === 'string' ? args : JSON.stringify(args);
+  } catch {
+    s = String(args);
+  }
+  return s.length <= MAX_TOOL_ARG_CHARS ? args : clampText(s, MAX_TOOL_ARG_CHARS);
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -657,7 +680,7 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
         ts,
         toolCallId: data.toolCallId,
         toolName: data.toolName,
-        args: data.arguments,
+        args: clampArgs(data.arguments),
         status: 'running',
       });
       ensureToolReconciliation(session);
@@ -668,7 +691,8 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
       const entryId = session.toolByCallId.get(data.toolCallId);
       if (entryId) {
         const entry = session.transcript.find((e) => e.id === entryId);
-        if (entry && entry.kind === 'tool') entry.output = (entry.output ?? '') + data.partialOutput;
+        if (entry && entry.kind === 'tool')
+          entry.output = clampText((entry.output ?? '') + data.partialOutput, MAX_TOOL_OUTPUT_CHARS);
         emit(session, { type: 'tool_delta', id: entryId, delta: data.partialOutput });
       }
       break;
@@ -706,7 +730,7 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
         toolName: prior?.toolName ?? 'tool',
         args: prior?.args,
         status: data.success ? 'success' : 'error',
-        output: resultText,
+        output: resultText === undefined ? undefined : clampText(resultText, MAX_TOOL_OUTPUT_CHARS),
         durationMs: prior ? Math.max(0, ts - prior.ts) : undefined,
       });
       if (runningTools(session).length === 0) stopToolReconciliation(session);
