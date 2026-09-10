@@ -87,7 +87,7 @@ describe('AgentPane', () => {
   });
 
   it('copies an assistant reply as markdown source and rendered text', async () => {
-    const writeText = vi.fn(() => Promise.resolve());
+    const writeText = vi.fn((_text: string) => Promise.resolve());
     Object.defineProperty(navigator, 'clipboard', {
       value: { writeText },
       configurable: true,
