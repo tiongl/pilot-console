@@ -135,6 +135,13 @@ export interface AgentSession {
   turnStartTs: number | null;
   /** Maps SDK toolCallId → transcript entry id for tool activity */
   toolByCallId: Map<string, string>;
+  /**
+   * Raw cumulative length of each running tool's streamed output, keyed by
+   * tool call id. `tool.execution_partial_result` reports a snapshot of
+   * everything produced so far, not an increment, so this is what lets us
+   * send clients only the new suffix.
+   */
+  toolPartialLen: Map<string, number>;
   /** Current GitHub session-sharing state (remote-control mode). */
   share: AgentShareStatus;
   /** Accumulated token/billing usage across every model call in the session. */
@@ -880,6 +887,7 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
       const data = event.data as { toolCallId: string; toolName: string; arguments?: unknown };
       const entryId = `tool:${data.toolCallId}`;
       session.toolByCallId.set(data.toolCallId, entryId);
+      session.toolPartialLen?.delete(data.toolCallId);
       upsertEvent(session, {
         kind: 'tool',
         id: entryId,
@@ -897,9 +905,30 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
       const entryId = session.toolByCallId.get(data.toolCallId);
       if (entryId) {
         const entry = session.transcript.find((e) => e.id === entryId);
-        if (entry && entry.kind === 'tool')
-          entry.output = clampText((entry.output ?? '') + data.partialOutput, MAX_TOOL_OUTPUT_CHARS);
-        emit(session, { type: 'tool_delta', id: entryId, delta: data.partialOutput });
+        // `partialOutput` is a snapshot of everything the tool has produced so
+        // far, not an increment. Appending it repeated the output on screen
+        // until `tool.execution_complete` replaced it with the real result.
+        // Sending the snapshot itself would be quadratic on the wire, so send
+        // only the new suffix and keep the snapshot as the stored truth.
+        if (!session.toolPartialLen) session.toolPartialLen = new Map();
+        const seen = session.toolPartialLen.get(data.toolCallId) ?? 0;
+        const snapshot = data.partialOutput;
+        if (snapshot.length === seen) break;
+        session.toolPartialLen.set(data.toolCallId, snapshot.length);
+        if (entry && entry.kind === 'tool') {
+          entry.output = clampText(snapshot, MAX_TOOL_OUTPUT_CHARS);
+        }
+        if (snapshot.length > seen) {
+          emit(session, { type: 'tool_delta', id: entryId, delta: snapshot.slice(seen) });
+        } else {
+          // The tool rewrote rather than extended its output (a progress bar
+          // redrawing, for example), so the client cannot append its way there.
+          emit(session, {
+            type: 'tool_output',
+            id: entryId,
+            output: clampText(snapshot, MAX_TOOL_OUTPUT_CHARS),
+          });
+        }
       }
       break;
     }
@@ -940,6 +969,7 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
         durationMs: prior ? Math.max(0, ts - prior.ts) : undefined,
       });
       if (runningTools(session).length === 0) stopToolReconciliation(session);
+      session.toolPartialLen?.delete(data.toolCallId);
       break;
     }
     case 'session.error': {
@@ -1539,6 +1569,7 @@ function createPendingAgentSession(
     assistantStartTs: new Map(),
     turnStartTs: null,
     toolByCallId: new Map(),
+    toolPartialLen: new Map(),
     share: { mode: 'off', steerable: false },
     usage: emptyAgentUsage(),
     allowAllPermissions,

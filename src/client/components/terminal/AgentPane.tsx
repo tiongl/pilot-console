@@ -132,8 +132,13 @@ const MAX_TOOL_OUTPUT_CHARS = 50_000;
 // of DOM nodes at once.
 const RENDER_WINDOW = 400;
 
-/** Whether a command should prompt for an argument before running. */
-const commandTakesArg = (c: AgentSlashCommand): boolean =>
+/** Bound live-streamed tool output kept in browser memory (matches the server). */
+const clampToolOutput = (text: string): string =>
+  text.length > MAX_TOOL_OUTPUT_CHARS
+    ? text.slice(0, MAX_TOOL_OUTPUT_CHARS) + `\n… [truncated ${text.length - MAX_TOOL_OUTPUT_CHARS} chars]`
+    : text;
+
+/** Whether a command should prompt for an argument before running. */const commandTakesArg = (c: AgentSlashCommand): boolean =>
   c.argRequired === true || !!c.argHint || !!(c.argChoices && c.argChoices.length);
 
 const KIND_LABEL: Record<AgentSlashCommand['kind'], string> = {
@@ -426,14 +431,7 @@ export default function AgentPane({
       if (entry.kind === 'assistant' && kind === 'assistant') {
         next[idx] = { ...entry, content: entry.content + delta };
       } else if (entry.kind === 'tool' && kind === 'tool') {
-        const combined = (entry.output ?? '') + delta;
-        // Bound live-streamed tool output so a chatty tool can't grow the
-        // browser's transcript memory without limit (matches the server cap).
-        const output =
-          combined.length > MAX_TOOL_OUTPUT_CHARS
-            ? combined.slice(0, MAX_TOOL_OUTPUT_CHARS) + `\n… [truncated ${combined.length - MAX_TOOL_OUTPUT_CHARS} chars]`
-            : combined;
-        next[idx] = { ...entry, output };
+        next[idx] = { ...entry, output: clampToolOutput((entry.output ?? '') + delta) };
       }
       return next;
     });
@@ -478,6 +476,17 @@ export default function AgentPane({
           break;
         case 'tool_delta':
           applyDelta(msg.id, msg.delta, 'tool');
+          break;
+        case 'tool_output':
+          setEvents((prev) => {
+            const idx = prev.findIndex((e) => e.id === msg.id);
+            if (idx < 0) return prev;
+            const entry = prev[idx];
+            if (entry.kind !== 'tool') return prev;
+            const next = prev.slice();
+            next[idx] = { ...entry, output: clampToolOutput(msg.output) };
+            return next;
+          });
           break;
         case 'status':
           setStatus(msg.status);

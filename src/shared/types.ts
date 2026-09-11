@@ -244,6 +244,9 @@ export type AgentServerMessage =
   // Streaming text deltas appended to an existing entry (live-only, not replayed).
   | { type: 'assistant_delta'; id: string; delta: string }
   | { type: 'tool_delta'; id: string; delta: string }
+  // Replace a tool entry's output wholesale, for the rare case where a tool
+  // rewrites rather than extends what it has already emitted.
+  | { type: 'tool_output'; id: string; output: string }
   | { type: 'permission_request'; requestId: string; title: string; detail: string; canSession: boolean }
   | { type: 'permission_resolved'; requestId: string }
   // Whether the session auto-approves every permission request.

@@ -830,8 +830,39 @@ describe('AgentPane', () => {
     expect(screen.queryByTestId('agent-fetch-earlier')).toBeNull();
   });
 
-  it('shows the token/credit usage badge in the header', async () => {
+  it('appends streamed tool output without repeating what is already shown', async () => {
     renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'tool' as const, id: 'tool:c1', ts: 0, toolName: 'bash', status: 'running', output: '' },
+      ],
+      hasMore: false,
+    });
+    emit({ type: 'tool_delta', id: 'tool:c1', delta: 'line 1' });
+    emit({ type: 'tool_delta', id: 'tool:c1', delta: '\nline 2' });
+
+    await waitFor(() => expect(screen.getByText(/line 1\s+line 2/)).toBeTruthy());
+    // The first line must appear once, not once per streamed frame.
+    expect(screen.getAllByText(/line 1/)).toHaveLength(1);
+  });
+
+  it('replaces tool output when a tool rewrites rather than extends it', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'tool' as const, id: 'tool:c1', ts: 0, toolName: 'bash', status: 'running', output: '50% done' },
+      ],
+      hasMore: false,
+    });
+    emit({ type: 'tool_output', id: 'tool:c1', output: 'done' });
+
+    await waitFor(() => expect(screen.getByText('done')).toBeTruthy());
+    expect(screen.queryByText(/50%/)).toBeNull();
+  });
+
+  it('shows the token/credit usage badge in the header', async () => {    renderPane();
     emit({
       type: 'usage',
       usage: {

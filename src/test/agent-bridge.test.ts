@@ -45,6 +45,7 @@ function makeSession(): { session: AgentSession; messages: AgentServerMessage[] 
     assistantStartTs: new Map<string, number>(),
     turnStartTs: null,
     toolByCallId: new Map<string, string>(),
+    toolPartialLen: new Map<string, number>(),
     share: { mode: 'off', steerable: false },
     usage: emptyAgentUsage(),
     allowAllPermissions: false,
@@ -144,8 +145,64 @@ describe('agent-bridge handleSdkEvent', () => {
     expect(tool.output).toContain('[truncated');
   });
 
-  it('records tool progress so clients can explain a long-running call', () => {
-    const { session } = makeSession();
+  // `tool.execution_partial_result` reports everything the tool has produced so
+  // far, not just the new bytes. Appending each snapshot made streamed output
+  // visibly repeat itself until execution_complete overwrote it.
+  it('treats streamed tool output as a cumulative snapshot rather than an increment', () => {
+    const { session, messages } = makeSession();
+    drive(session, ev('tool.execution_start', 't1', { toolCallId: 'c1', toolName: 'bash' }));
+    drive(session, ev('tool.execution_partial_result', 'p1', { toolCallId: 'c1', partialOutput: 'line 1' }));
+    drive(session, ev('tool.execution_partial_result', 'p2', { toolCallId: 'c1', partialOutput: 'line 1\nline 2' }));
+
+    const tool = session.transcript.find((e) => e.kind === 'tool') as { output?: string };
+    expect(tool.output).toBe('line 1\nline 2');
+
+    // Clients are sent only the new suffix, so appending reaches the same text.
+    const deltas = messages.filter((m) => m.type === 'tool_delta') as { delta: string }[];
+    expect(deltas.map((d) => d.delta)).toEqual(['line 1', '\nline 2']);
+  });
+
+  it('ignores a repeated tool snapshot that adds nothing', () => {
+    const { session, messages } = makeSession();
+    drive(session, ev('tool.execution_start', 't1', { toolCallId: 'c1', toolName: 'bash' }));
+    drive(session, ev('tool.execution_partial_result', 'p1', { toolCallId: 'c1', partialOutput: 'same' }));
+    drive(session, ev('tool.execution_partial_result', 'p2', { toolCallId: 'c1', partialOutput: 'same' }));
+
+    const tool = session.transcript.find((e) => e.kind === 'tool') as { output?: string };
+    expect(tool.output).toBe('same');
+    expect(messages.filter((m) => m.type === 'tool_delta')).toHaveLength(1);
+  });
+
+  // Some tools redraw their output (progress bars) instead of extending it; a
+  // client cannot append its way to a shorter string, so it gets a replacement.
+  it('sends a replacement when a tool rewrites its output instead of extending it', () => {
+    const { session, messages } = makeSession();
+    drive(session, ev('tool.execution_start', 't1', { toolCallId: 'c1', toolName: 'bash' }));
+    drive(session, ev('tool.execution_partial_result', 'p1', { toolCallId: 'c1', partialOutput: '50% done' }));
+    drive(session, ev('tool.execution_partial_result', 'p2', { toolCallId: 'c1', partialOutput: 'done' }));
+
+    const tool = session.transcript.find((e) => e.kind === 'tool') as { output?: string };
+    expect(tool.output).toBe('done');
+    expect(messages.filter((m) => m.type === 'tool_output')).toMatchObject([{ output: 'done' }]);
+  });
+
+  // Two calls to the same tool must not be measured against each other.
+  it('restarts output tracking for a new tool call', () => {
+    const { session, messages } = makeSession();
+    drive(session, ev('tool.execution_start', 't1', { toolCallId: 'c1', toolName: 'bash' }));
+    drive(session, ev('tool.execution_partial_result', 'p1', { toolCallId: 'c1', partialOutput: 'first run output' }));
+    drive(session, ev('tool.execution_complete', 't2', { toolCallId: 'c1', success: true, result: 'first run output' }));
+
+    drive(session, ev('tool.execution_start', 't3', { toolCallId: 'c2', toolName: 'bash' }));
+    drive(session, ev('tool.execution_partial_result', 'p2', { toolCallId: 'c2', partialOutput: 'second' }));
+
+    const tools = session.transcript.filter((e) => e.kind === 'tool') as { output?: string }[];
+    expect(tools[1].output).toBe('second');
+    const deltas = messages.filter((m) => m.type === 'tool_delta') as { delta: string }[];
+    expect(deltas[deltas.length - 1].delta).toBe('second');
+  });
+
+  it('records tool progress so clients can explain a long-running call', () => {    const { session } = makeSession();
     drive(session, ev('tool.execution_start', 't1', { toolCallId: 'c1', toolName: 'apply_patch' }));
     drive(
       session,
