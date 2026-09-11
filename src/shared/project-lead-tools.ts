@@ -1,10 +1,34 @@
 import { defineTool } from '@github/copilot-sdk';
-import { listWorktrees } from './project-store';
+import { createWorktree, listWorktrees } from './project-store';
 import { getDigest, listDigests } from './digest-store';
 import { getDb } from './db';
 import { executeApprovedMerge, getMergeRequest, resolveMergeRequest } from './merge-store';
 import { getOrBootstrapProjectMemory, refreshProjectMemory } from './project-memory-store';
 import { recordCosBriefing } from './cos-briefing-store';
+import {
+  countActiveDelegations,
+  createDelegation,
+  getDelegationForWorktree,
+  listDelegations,
+  markWorktreeDelegation,
+  shortTitle,
+  updateDelegation,
+} from './delegation-store';
+import { hasPendingPlanReview, resolveLeadPlanReview } from './delegation-runtime';
+
+/** Ceiling on workers one project may have in flight at once. */
+export const MAX_ACTIVE_DELEGATIONS = 3;
+
+const BRIEFING_MAX_CHARS = 280;
+
+/** Collapse whitespace and hard-cap length so audit rows and CoS briefings stay scannable. */
+export function condenseBriefing(summary: string, maxChars = BRIEFING_MAX_CHARS): string {
+  const flat = summary.replace(/\s+/g, ' ').trim();
+  if (flat.length <= maxChars) return flat;
+  const clipped = flat.slice(0, maxChars);
+  const lastBreak = Math.max(clipped.lastIndexOf('. '), clipped.lastIndexOf(' '));
+  return `${(lastBreak > maxChars * 0.6 ? clipped.slice(0, lastBreak) : clipped).replace(/[.,;:\s]+$/, '')}…`;
+}
 
 function audit(projectId: string, action: string, reasoning: string, riskLevel: 'low' | 'medium' | 'high' = 'low') {
   getDb().prepare(`
@@ -13,8 +37,16 @@ function audit(projectId: string, action: string, reasoning: string, riskLevel: 
   `).run(crypto.randomUUID(), projectId, action, reasoning, riskLevel);
 }
 
-function interventionMode(projectId: string): 'flag_only' | 'flag_nudge' | 'flag_nudge_cancel' {
-  const row = getDb().prepare(
+/** Worktree/branch-safe name derived from a delegation title. */
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+}
+
+function interventionMode(projectId: string): 'flag_only' | 'flag_nudge' | 'flag_nudge_cancel' {  const row = getDb().prepare(
     'SELECT intervention_mode FROM project_autonomy_settings WHERE project_id = ?',
   ).get(projectId) as { intervention_mode?: string } | undefined;
   if (row?.intervention_mode === 'flag_nudge_cancel') return 'flag_nudge_cancel';
@@ -58,7 +90,7 @@ export function reviewPlanForWorker(
   return { action, reason };
 }
 
-export function createProjectLeadTools(projectId: string) {
+export function createProjectLeadTools(projectId: string, userId?: string) {
   return [
     defineTool('get_project_memory', {
       description: 'Read (and bootstrap if missing) this Project Lead\'s persistent understanding of the project: README, recent commits, worktrees, digests, and open decisions. Call this at the start of a new conversation to get up to speed.',
@@ -75,15 +107,22 @@ export function createProjectLeadTools(projectId: string) {
       defer: 'never',
     }),
     defineTool('brief_chief_of_staff', {
-      description: 'Send a concise briefing to the Chief of Staff summarizing what was discussed/decided in this conversation, so the CoS stays aware without reading the full transcript. Call this after reaching a decision, completing a review, or before ending a significant conversation.',
+      description: 'Send a one-or-two sentence briefing to the Chief of Staff summarizing what was decided in this conversation, so the CoS stays aware without reading the full transcript. Call this after reaching a decision, completing a review, or before ending a significant conversation. Keep it headline-style: what changed and what it unblocks. Longer summaries are truncated.',
       parameters: {
         type: 'object',
-        properties: { summary: { type: 'string' } },
+        properties: {
+          summary: {
+            type: 'string',
+            description: `Headline-style summary, 1-2 sentences, at most ${BRIEFING_MAX_CHARS} characters. No preamble, bullet lists, or transcript detail.`,
+            maxLength: BRIEFING_MAX_CHARS,
+          },
+        },
         required: ['summary'],
       },
       handler: ({ summary }: { summary: string }) => {
-        const briefing = recordCosBriefing(projectId, summary);
-        audit(projectId, 'brief_chief_of_staff', summary, 'low');
+        const condensed = condenseBriefing(summary);
+        const briefing = recordCosBriefing(projectId, condensed);
+        audit(projectId, 'brief_chief_of_staff', condensed, 'low');
         return briefing;
       },
       skipPermission: true,
@@ -241,20 +280,141 @@ export function createProjectLeadTools(projectId: string) {
       skipPermission: true,
       defer: 'never',
     }),
+    defineTool('delegate_to_worker', {
+      description:
+        'Start a background worker on a task. Creates (or reuses) a worktree, opens a Copilot session in it, and hands it the task. The worker plans first and must get your approval via decide_worker_plan before it changes any files. This returns immediately — do not wait for the worker, end your turn and check back later.',
+      parameters: {
+        type: 'object',
+        properties: {
+          task: { type: 'string', description: 'What the worker should accomplish, with the context and acceptance criteria it needs.' },
+          title: { type: 'string', description: 'Short label for this work (a few words), used as the tab and sidebar name.' },
+          worktreeId: { type: 'string', description: 'Reuse this existing worktree. Omit to create a new one.' },
+          branch: { type: 'string', description: 'Branch for a new worktree. Defaults to a name derived from the title.' },
+        },
+        required: ['task', 'title'],
+      },
+      handler: async ({ task, title, worktreeId, branch }: {
+        task: string; title: string; worktreeId?: string; branch?: string;
+      }) => {
+        if (!userId) throw new Error('This Project Lead session cannot start workers (no owning user).');
+
+        const active = countActiveDelegations(projectId);
+        if (active >= MAX_ACTIVE_DELEGATIONS) {
+          throw new Error(
+            `This project already has ${active} workers in flight (limit ${MAX_ACTIVE_DELEGATIONS}). Wait for one to finish, or cancel it, before delegating more.`,
+          );
+        }
+
+        const label = shortTitle(title);
+        let targetWorktreeId = worktreeId;
+        if (targetWorktreeId) {
+          const existing = listWorktrees(projectId).find((w) => w.id === targetWorktreeId);
+          if (!existing) throw new Error('Worktree does not belong to this project');
+          if (getDelegationForWorktree(targetWorktreeId)?.status === 'working') {
+            throw new Error('That worktree already has a worker running. Pick another, or let it finish.');
+          }
+        } else {
+          const slug = slugify(label) || `task-${Date.now()}`;
+          const created = createWorktree(projectId, slug, branch?.trim() || `lead/${slug}`, true, {
+            seedPrompt: task,
+          });
+          targetWorktreeId = created.id;
+        }
+
+        const { createAgentSession, sendToSession } = await import('./agent-bridge');
+        // Plan mode: the worker drafts a plan and cannot touch files until the
+        // lead approves it through decide_worker_plan.
+        const session = await createAgentSession(userId, projectId, targetWorktreeId, undefined, 'agent', 'plan');
+        const delegation = createDelegation({
+          projectId,
+          worktreeId: targetWorktreeId,
+          title: label,
+          task,
+          sessionId: session.sessionId,
+        });
+
+        await sendToSession(session, [
+          `You are a background worker for this project. The Project Lead has assigned you this task:`,
+          '',
+          task,
+          '',
+          'Work in this worktree only. Before changing any files, produce a short plan and submit it for review — the Project Lead approves or requests changes, and you revise until it is approved.',
+          'Publish progress with update_digest as you go, and use ask_project_lead if you hit a blocker or an ambiguous requirement instead of guessing.',
+        ].join('\n'));
+
+        audit(projectId, 'delegate_to_worker', `${label}: ${task}`, 'high');
+        return {
+          ok: true,
+          delegationId: delegation.id,
+          worktreeId: targetWorktreeId,
+          sessionId: session.sessionId,
+          title: label,
+          note: 'Worker started and planning. End your turn; it will come back to you for plan review.',
+        };
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    defineTool('decide_worker_plan', {
+      description:
+        'Approve or request changes on a plan a worker submitted for review. The worker is blocked until you answer.',
+      parameters: {
+        type: 'object',
+        properties: {
+          worktreeId: { type: 'string' },
+          decision: { type: 'string', enum: ['approve', 'request_changes'] },
+          note: { type: 'string', description: 'For request_changes, say specifically what to change.' },
+        },
+        required: ['worktreeId', 'decision'],
+      },
+      handler: ({ worktreeId, decision, note }: { worktreeId: string; decision: 'approve' | 'request_changes'; note?: string }) => {
+        if (!hasPendingPlanReview(worktreeId)) {
+          throw new Error('No plan is awaiting review for that worktree.');
+        }
+        const approved = decision === 'approve';
+        if (!approved && !note?.trim()) {
+          throw new Error('Requesting changes requires a note saying what to change.');
+        }
+        resolveLeadPlanReview(worktreeId, approved, note?.trim() || 'Approved by Project Lead');
+        audit(projectId, 'decide_worker_plan', `${decision}: ${note ?? ''}`, approved ? 'medium' : 'low');
+        return { ok: true, decision };
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    defineTool('list_delegations', {
+      description: 'List the workers you have started for this project and their current state.',
+      parameters: { type: 'object', properties: {} },
+      handler: () => listDelegations(projectId).map((d) => ({
+        worktreeId: d.worktreeId,
+        title: d.title,
+        status: d.status,
+        note: d.note,
+        updatedAt: d.updatedAt,
+      })),
+      skipPermission: true,
+      defer: 'never',
+    }),
     defineTool('nudge_worker', {
-      description: 'Send a non-destructive guidance message to a live worktree agent. Requires flag_nudge or flag_nudge_cancel intervention mode.',
+      description: 'Send a guidance message — or the answer to a worker question — to a live worktree agent. Always allowed for workers you started yourself; for workers the user started it requires flag_nudge or flag_nudge_cancel intervention mode.',
       parameters: {
         type: 'object',
         properties: { worktreeId: { type: 'string' }, message: { type: 'string' } },
         required: ['worktreeId', 'message'],
       },
       handler: async ({ worktreeId, message }: { worktreeId: string; message: string }) => {
-        const mode = interventionMode(projectId);
-        if (mode === 'flag_only') throw new Error('Worker nudges are disabled by project autonomy settings');
+        // Answering a worker you started is part of the delegation loop, not an
+        // intervention in the user's own session, so autonomy settings only
+        // gate the latter.
+        const isOwnWorker = Boolean(getDelegationForWorktree(worktreeId));
+        if (!isOwnWorker && interventionMode(projectId) === 'flag_only') {
+          throw new Error('Worker nudges are disabled by project autonomy settings');
+        }
         const { findLiveWorktreeAgent, sendAgentMessage } = await import('./agent-bridge');
         const session = findLiveWorktreeAgent(projectId, worktreeId);
         if (!session) throw new Error('No live worktree agent session found');
         await sendAgentMessage(session.sessionId, message);
+        if (isOwnWorker) markWorktreeDelegation(worktreeId, { status: 'working', unread: false });
         audit(projectId, 'nudge_worker', message, 'medium');
         return { ok: true, sessionId: session.sessionId };
       },
@@ -262,18 +422,20 @@ export function createProjectLeadTools(projectId: string) {
       defer: 'never',
     }),
     defineTool('cancel_worker', {
-      description: 'Stop a live worktree agent. Requires flag_nudge_cancel intervention mode.',
+      description: 'Stop a live worktree agent. Always allowed for workers you started yourself; otherwise requires flag_nudge_cancel intervention mode.',
       parameters: {
         type: 'object',
         properties: { worktreeId: { type: 'string' }, reason: { type: 'string' } },
         required: ['worktreeId', 'reason'],
       },
       handler: async ({ worktreeId, reason }: { worktreeId: string; reason: string }) => {
-        if (interventionMode(projectId) !== 'flag_nudge_cancel') {
+        const own = getDelegationForWorktree(worktreeId);
+        if (!own && interventionMode(projectId) !== 'flag_nudge_cancel') {
           throw new Error('Worker cancellation is disabled by project autonomy settings');
         }
         const { cancelAgent, findLiveWorktreeAgent } = await import('./agent-bridge');
         const session = findLiveWorktreeAgent(projectId, worktreeId);
+        if (own) updateDelegation(own.id, { status: 'cancelled', note: reason, unread: false });
         if (!session) throw new Error('No live worktree agent session found');
         await cancelAgent(session.sessionId);
         audit(projectId, 'cancel_worker', reason, 'high');

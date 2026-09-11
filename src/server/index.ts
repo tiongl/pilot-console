@@ -22,6 +22,7 @@ import { getDigest, listDigests, bootstrapDigest, reconcileDigest } from '../sha
 import { listMergeRequests, getMergeRequest, setMergePriority, resolveMergeRequest, releaseMergeLock, getMergeLock, executeApprovedMerge } from '../shared/merge-store';
 import { getOrBootstrapProjectMemory, refreshProjectMemory } from '../shared/project-memory-store';
 import { listCosBriefings, listCosBriefingsForProject } from '../shared/cos-briefing-store';
+import { listDelegations, listAllDelegations, clearDelegationUnread, unreadDelegationCounts } from '../shared/delegation-store';
 import { revealPathInFileSystem } from './file-system';
 import scheduleRoutes from './routes/schedules';
 import githubRoutes from './routes/github';
@@ -251,8 +252,28 @@ app.get('/api/projects/:id/audit-log', (req, res) => {
   res.json({ entries });
 });
 
-app.get('/api/projects/:id/memory', (req, res) => {
+app.get('/api/projects/:id/delegations', (req, res) => {
   const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  res.json({ delegations: listDelegations(req.params.id) });
+});
+
+app.post('/api/projects/:id/delegations/:delegationId/read', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  clearDelegationUnread(req.params.delegationId);
+  res.json({ ok: true });
+});
+
+app.get('/api/delegations/unread', (_req, res) => {
+  res.json({ counts: unreadDelegationCounts() });
+});
+
+app.get('/api/delegations', (_req, res) => {
+  res.json({ delegations: listAllDelegations() });
+});
+
+app.get('/api/projects/:id/memory', (req, res) => {  const project = getProjectById(req.params.id);
   if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
   res.json(getOrBootstrapProjectMemory(req.params.id));
 });
@@ -1315,8 +1336,12 @@ app.get('/api/daemon/status', requireAuth, async (req, res) => {
   if (client.isConnected) {
     try {
       const sessions = await client.listSessions();
+      const { isRuntimeHostedByDaemon } = await import('../shared/agent-bridge');
       res.json({
         connected: true,
+        // False means agent sessions live in-process and will not survive a
+        // server restart, which shows up to users as "cannot reconnect".
+        agentRuntimeHostedByDaemon: isRuntimeHostedByDaemon(),
         sessions: sessions.map(s => ({
           sessionId: s.sessionId,
           alive: s.alive,
@@ -1398,6 +1423,16 @@ app.post('/api/daemon/restart', requireAuth, async (req, res) => {
     // Re-initialize the bridge to recover sessions
     await initDaemonBridge();
     res.json({ ok: true, connected: client.isConnected });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+app.post('/api/agent/reconnect', requireAuth, async (_req, res) => {
+  try {
+    const { reconnectAgentRuntime } = await import('../shared/agent-bridge');
+    await reconnectAgentRuntime();
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }

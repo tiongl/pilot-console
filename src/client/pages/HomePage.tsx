@@ -174,8 +174,9 @@ export default function HomePage() {
   };
 
   return (
-    <div className="flex flex-col gap-8 p-8">
-      <Card>
+    <div className="h-full overflow-y-auto">
+      <div className="flex min-h-full flex-col gap-8 p-8">
+        <Card>
         <CardHeader className="pb-3">
           <CardTitle>Chief of Staff</CardTitle>
           <CardDescription>Portfolio-level prioritization and project handoffs</CardDescription>
@@ -397,6 +398,7 @@ export default function HomePage() {
           ))}
         </div>
       )}
+      </div>
     </div>
   );
 }

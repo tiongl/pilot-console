@@ -122,6 +122,14 @@ export interface AgentSession {
   usage: AgentUsage;
   /** When true, every permission request is auto-approved without prompting. */
   allowAllPermissions: boolean;
+  /**
+   * Follow-up prompts the user submitted while a turn was already in flight.
+   * The SDK accepts one turn at a time, so instead of rejecting the input (or
+   * forcing the user to wait for a long delegation to finish) we hold it here
+   * and send it the moment the session goes idle. Optional so session objects
+   * built before this field existed stay assignable.
+   */
+  queuedPrompts?: string[];
 }
 
 const agentSessions = new Map<string, AgentSession>();
@@ -143,6 +151,7 @@ const agentSessions = new Map<string, AgentSession>();
  * session object per id.
  */
 const resumeInFlight = new Map<string, Promise<AgentSession | undefined>>();
+const persistentLeadInFlight = new Map<string, Promise<AgentSession>>();
 
 // ---------------------------------------------------------------------------
 // Shared Copilot SDK client (lazy singleton)
@@ -227,6 +236,28 @@ export async function reconnectAgentRuntime(): Promise<void> {
   clientPromise = null;
   modelsCache = null;
   modelsPromise = null;
+  // Every in-memory handle points at the runtime we are about to replace.
+  // Leaving them behind makes `findAgentSession` hand out sessions backed by
+  // a dead connection, which is what kept a blank lead conversation pinned
+  // in place even after the real one became resumable again. Flush their
+  // state first so nothing is lost, then force the next connect to re-resolve
+  // from the database.
+  for (const session of agentSessions.values()) {
+    if (session.saveTimer) {
+      clearTimeout(session.saveTimer);
+      session.saveTimer = null;
+    }
+    stopToolReconciliation(session);
+    stopBusyWatchdog(session);
+    try {
+      session.unsubscribe();
+    } catch {
+      /* ignore */
+    }
+    persistTranscript(session, true);
+    persistAgentState(session);
+  }
+  agentSessions.clear();
   if (previous) {
     try {
       const client = await previous;
@@ -388,6 +419,120 @@ export function findAgentSession(
   return undefined;
 }
 
+/**
+ * Close out empty lead/CoS rows once we have settled on the live conversation.
+ *
+ * Each failed resume used to leave a blank session behind, and those rows are
+ * what made this "singleton" grow without bound. Only rows with no transcript
+ * are retired, and never one that is still live in this process, so a real
+ * conversation can never be discarded.
+ */
+function retireEmptyLeadSessions(
+  userId: string,
+  kind: Extract<AgentSessionKind, 'project_lead' | 'chief_of_staff'>,
+  projectId: string | null,
+  keepSessionId: string,
+): void {
+  try {
+    const stale = getDb().prepare(`
+      SELECT id
+      FROM cli_sessions
+      WHERE user_id = ?
+        AND kind = ?
+        AND project_id IS ?
+        AND worktree_id IS NULL
+        AND ended_at IS NULL
+        AND id != ?
+        AND (output_log IS NULL OR length(output_log) <= 2)
+    `).all(userId, kind, projectId, keepSessionId) as Array<{ id: string }>;
+
+    const retire = getDb().prepare(
+      "UPDATE cli_sessions SET ended_at = datetime('now') WHERE id = ?",
+    );
+    for (const row of stale) {
+      const live = agentSessions.get(row.id);
+      if (live?.alive) continue;
+      retire.run(row.id);
+    }
+  } catch {
+    /* housekeeping only — never block opening the conversation */
+  }
+}
+
+function persistentLeadKey(
+  userId: string,
+  kind: Extract<AgentSessionKind, 'project_lead' | 'chief_of_staff'>,
+  projectId: string | null,
+): string {
+  return `${userId}:${kind}:${projectId ?? ''}`;
+}
+
+/**
+ * Return the single durable lead conversation for this user and scope.
+ *
+ * A live session wins, except when it is still empty and a stored
+ * conversation exists: failed resumes leave blank sessions behind, and
+ * preferring one would pin an empty chat in place of the user's real history.
+ * Concurrent mounts share one create/resume path.
+ */
+export async function getOrCreatePersistentLeadSession(
+  userId: string,
+  projectId: string | null,
+  kind: Extract<AgentSessionKind, 'project_lead' | 'chief_of_staff'>,
+  model?: string,
+): Promise<AgentSession> {
+  const live = findAgentSession(userId, projectId, null, kind);
+  if (live && live.transcript.length > 0) return live;
+
+  const key = persistentLeadKey(userId, kind, projectId);
+  const pending = persistentLeadInFlight.get(key);
+  if (pending) return pending;
+
+  const run = (async () => {
+    // Prefer the conversation that actually has history. Failed resumes used
+    // to leave behind empty rows with a newer `started_at`, so ordering by
+    // recency alone hands the user a blank session and buries the real one.
+    // `length(output_log) > 2` skips both NULL and an empty JSON array.
+    const rows = getDb().prepare(`
+      SELECT id
+      FROM cli_sessions
+      WHERE user_id = ?
+        AND kind = ?
+        AND project_id IS ?
+        AND worktree_id IS NULL
+        AND ended_at IS NULL
+      ORDER BY (output_log IS NOT NULL AND length(output_log) > 2) DESC,
+               started_at DESC,
+               rowid DESC
+      LIMIT 20
+    `).all(userId, kind, projectId) as Array<{ id: string }>;
+
+    for (const row of rows) {
+      // The blank live session is already attached; resuming it again would
+      // clash with its own tool registrations.
+      if (row.id === live?.sessionId) continue;
+      const resumed = await resumeAgentSession(userId, row.id);
+      if (resumed) {
+        retireEmptyLeadSessions(userId, kind, projectId, resumed.sessionId);
+        return resumed;
+      }
+    }
+
+    // Nothing stored could be reopened — reuse the empty live session rather
+    // than stacking up another one.
+    if (live) return live;
+
+    const created = await createAgentSession(userId, projectId, null, model, kind);
+    retireEmptyLeadSessions(userId, kind, projectId, created.sessionId);
+    return created;
+  })().finally(() => {
+    persistentLeadInFlight.delete(key);
+  });
+
+  persistentLeadInFlight.set(key, run);
+  return run;
+}
+
 // ---------------------------------------------------------------------------
 // Fan-out + transcript management
 // ---------------------------------------------------------------------------
@@ -429,7 +574,39 @@ function setStatus(session: AgentSession, status: AgentStatus): void {
   }
   emit(session, { type: 'status', status, turnStartedAt: session.turnStartTs });
   if (status === 'busy') ensureBusyWatchdog(session);
-  else stopBusyWatchdog(session);
+  else {
+    stopBusyWatchdog(session);
+    // The turn that was blocking the user's follow-ups just ended — send the
+    // next one. Deferred so this runs after the current event handler unwinds.
+    if (session.queuedPrompts?.length) queueMicrotask(() => void flushQueuedPrompts(session));
+  }
+}
+
+function emitQueued(session: AgentSession): void {
+  emit(session, { type: 'queued', prompts: [...(session.queuedPrompts ?? [])] });
+}
+
+/** Send the oldest queued follow-up, if the session is idle and still alive. */
+export async function flushQueuedPrompts(session: AgentSession): Promise<void> {
+  if (!session.alive || session.status === 'busy') return;
+  const next = session.queuedPrompts?.shift();
+  if (next === undefined) return;
+  emitQueued(session);
+  await sendToSession(session, next);
+}
+
+/** Follow-ups waiting to be sent, oldest first. */
+export function getQueuedPrompts(sessionId: string): string[] {
+  return [...(agentSessions.get(sessionId)?.queuedPrompts ?? [])];
+}
+
+/** Drop a queued follow-up the user changed their mind about. */
+export function dequeuePrompt(sessionId: string, index: number): void {
+  const session = agentSessions.get(sessionId);
+  if (!session?.queuedPrompts) return;
+  if (index < 0 || index >= session.queuedPrompts.length) return;
+  session.queuedPrompts.splice(index, 1);
+  emitQueued(session);
 }
 
 // ---------------------------------------------------------------------------
@@ -1010,10 +1187,54 @@ function makeExitPlanHandler(getSession: () => AgentSession | undefined) {
     if (!session) return { approved: false };
 
     if (session.kind === 'agent' && session.projectId && session.worktreeId) {
+      const projectId = session.projectId;
+      const worktreeId = session.worktreeId;
+      const planContent = request.planContent ?? request.summary;
+
+      // Work the Project Lead delegated is reviewed by the lead itself: the
+      // worker blocks here until the lead approves or asks for changes.
+      const { getDelegationForWorktree } = await import('./delegation-store');
+      if (getDelegationForWorktree(worktreeId)) {
+        const { requestLeadPlanReview } = await import('./delegation-runtime');
+        const decision = await requestLeadPlanReview({
+          userId: session.userId,
+          projectId,
+          worktreeId,
+          summary: request.summary,
+          planContent,
+        });
+        if (decision) {
+          emit(session, {
+            type: 'event',
+            event: {
+              kind: 'notice',
+              id: randomUUID(),
+              ts: Date.now(),
+              message: decision.approved
+                ? `Project Lead approved the plan: ${decision.note}`
+                : `Project Lead requested changes: ${decision.note}`,
+            },
+          });
+          return decision.approved
+            ? { approved: true, selectedAction: request.recommendedAction }
+            : { approved: false };
+        }
+        // No answer in time — fall through and ask the user directly.
+        emit(session, {
+          type: 'event',
+          event: {
+            kind: 'notice',
+            id: randomUUID(),
+            ts: Date.now(),
+            message: 'Project Lead did not respond to the plan review; escalating to you.',
+          },
+        });
+      }
+
       const { reviewPlanForWorker } = await import('./project-lead-tools');
       const scope = request.summary.toLowerCase().includes('large') ? 'large'
         : request.summary.toLowerCase().includes('medium') ? 'medium' : 'small';
-      const review = reviewPlanForWorker(session.projectId, session.worktreeId, request.planContent ?? request.summary, scope);
+      const review = reviewPlanForWorker(projectId, worktreeId, planContent, scope);
       if (review.action === 'approve' || review.action === 'approve-with-note') {
         emit(session, {
           type: 'event',
@@ -1264,6 +1485,7 @@ function createPendingAgentSession(
     share: { mode: 'off', steerable: false },
     usage: emptyAgentUsage(),
     allowAllPermissions,
+    queuedPrompts: [],
   };
 }
 
@@ -1364,9 +1586,23 @@ const PROJECT_LEAD_BASE_INSTRUCTIONS = `
 You are the Project Lead for this project. Review project status, coordinate worktrees, and
 ask for clarification before delegating ambiguous work. At the start of a conversation, call
 get_project_memory to load (and, if needed, bootstrap) your persistent understanding of this
-project's README, recent history, worktrees, and open decisions. After reaching a decision or
-completing a significant review, call brief_chief_of_staff with a short summary so the Chief
-of Staff stays aware of this project's conversation without reading the full transcript.
+project's README, recent history, worktrees, and open decisions.
+
+Delegation is asynchronous. Use delegate_to_worker to start a background worker on a task:
+it creates or reuses a worktree, opens its own Copilot session, and hands over the work. The
+worker plans first and comes back to you through decide_worker_plan before it changes any
+files, and it can reach you with ask_project_lead when it hits a blocker — answer with
+nudge_worker. Once you have delegated, say what you delegated and end your turn. Never idle,
+poll, sleep, or re-read digests in a loop waiting for a worker to finish — that blocks the
+conversation and the user cannot ask you about anything else while your turn is open. Check
+progress with list_delegations/get_digest only when the user asks or at the start of a later
+turn, and report what changed then.
+
+After reaching a decision or
+completing a significant review, call brief_chief_of_staff with a headline-style summary of
+one or two sentences (280 characters or less) so the Chief of Staff stays aware of this
+project's conversation without reading the full transcript. Briefings are a digest, not a
+recap: state what was decided and what it unblocks, and leave the detail in the transcript.
 `;
 
 export function deriveStatusFromEvents(events: SessionEvent[] | undefined): AgentStatus {
@@ -1392,10 +1628,11 @@ export function buildToolsForKind(
   kind: AgentSessionKind,
   projectId: string | null,
   worktreeId: string | null,
+  userId?: string,
 ): Tool<any>[] | undefined {
   if (kind === 'chief_of_staff') return createChiefOfStaffTools();
-  if (kind === 'project_lead') return projectId ? createProjectLeadTools(projectId) : undefined;
-  if (worktreeId) return [...createWorktreeAgentTools(worktreeId), ...createMergeTools(worktreeId)];
+  if (kind === 'project_lead') return projectId ? createProjectLeadTools(projectId, userId) : undefined;
+  if (worktreeId) return [...createWorktreeAgentTools(worktreeId, projectId, userId), ...createMergeTools(worktreeId)];
   return undefined;
 }
 
@@ -1405,6 +1642,7 @@ export async function createAgentSession(
   worktreeId: string | null,
   model = DEFAULT_MODEL,
   kind: AgentSessionKind = 'agent',
+  mode: AgentMode = DEFAULT_MODE,
 ): Promise<AgentSession> {
   const client = await getClient();
   const cwd = resolveCwd(projectId, worktreeId);
@@ -1418,7 +1656,7 @@ export async function createAgentSession(
     kind,
     cwd,
     model,
-    DEFAULT_MODE,
+    mode,
     false,
   );
   let sessionRef: AgentSession | undefined = session;
@@ -1443,7 +1681,7 @@ export async function createAgentSession(
       mode: 'append',
       content: `${AGENT_RENDERING_INSTRUCTIONS}${worktreeId ? WORKTREE_DIGEST_INSTRUCTIONS : ''}${kind === 'project_lead' ? `\n${PROJECT_LEAD_BASE_INSTRUCTIONS}${projectMemorySummary}` : ''}${kind === 'chief_of_staff' ? CHIEF_OF_STAFF_INSTRUCTIONS : ''}`,
     },
-    tools: buildToolsForKind(kind, projectId, worktreeId),
+    tools: buildToolsForKind(kind, projectId, worktreeId, userId),
     onPermissionRequest: makePermissionHandler(() => sessionRef),
     onExitPlanModeRequest: makeExitPlanHandler(() => sessionRef),
   });
@@ -1468,6 +1706,23 @@ export async function createAgentSession(
 export async function sendAgentMessage(sessionId: string, prompt: string): Promise<void> {
   const session = agentSessions.get(sessionId);
   if (!session || !session.alive) return;
+  await sendToSession(session, prompt);
+}
+
+/**
+ * Deliver a prompt to a live session, queueing it when a turn is already in
+ * flight. Exported for tests; callers should prefer `sendAgentMessage`.
+ */
+export async function sendToSession(session: AgentSession, prompt: string): Promise<void> {
+  if (!session.alive) return;
+  // The SDK runs one turn at a time. Rather than dropping input typed during a
+  // long turn (a Project Lead waiting on a worker can stay busy for minutes),
+  // hold it and replay it when the session next goes idle.
+  if (session.status === 'busy') {
+    (session.queuedPrompts ??= []).push(prompt);
+    emitQueued(session);
+    return;
+  }
   // The turn clock starts when the user hands us the prompt, before the SDK
   // round trip, so queueing and connection time are included in the total.
   session.turnStartTs = Date.now();
@@ -1484,6 +1739,13 @@ export async function sendAgentMessage(sessionId: string, prompt: string): Promi
 export async function cancelAgent(sessionId: string): Promise<void> {
   const session = agentSessions.get(sessionId);
   if (!session || !session.alive) return;
+
+  // Stopping the turn also abandons anything queued behind it; otherwise the
+  // queue would immediately start a new turn the user just asked to stop.
+  if (session.queuedPrompts?.length) {
+    session.queuedPrompts.length = 0;
+    emitQueued(session);
+  }
 
   for (const [requestId, pending] of session.pendingPermissions) {
     session.pendingPermissions.delete(requestId);
@@ -1749,6 +2011,25 @@ export async function resumeAgentSession(userId: string, sessionId: string): Pro
   return run;
 }
 
+/**
+ * True when the runtime reports a session id it does not know about, as
+ * opposed to a transient transport failure. Only these are safe to tombstone.
+ */
+function isSessionGoneError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  return /session not found/i.test(message);
+}
+
+/**
+ * True when the runtime refuses a resume because another connection still owns
+ * this session's external tools. The conversation is fine; the registration is
+ * stale, and restarting the runtime clears it.
+ */
+function isToolClashError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  return /tool name clash/i.test(message);
+}
+
 async function resumeAgentSessionUncached(
   userId: string,
   sessionId: string,
@@ -1756,6 +2037,16 @@ async function resumeAgentSessionUncached(
   // A resume may have completed while we were queued behind another caller.
   const existing = agentSessions.get(sessionId);
   if (existing && existing.alive) return existing;
+  // A dead-but-still-attached handle keeps this session's external tools
+  // registered, which would make our own resume fail with a tool name clash.
+  if (existing) {
+    agentSessions.delete(sessionId);
+    try {
+      await existing.sdk?.disconnect?.();
+    } catch {
+      /* already gone */
+    }
+  }
 
   const client = await getClient();
 
@@ -1790,7 +2081,7 @@ async function resumeAgentSessionUncached(
   session.sessionId = sessionId;
   let sessionRef: AgentSession | undefined = session;
 
-  const tools = buildToolsForKind(kind, projectId, worktreeId);
+  const tools = buildToolsForKind(kind, projectId, worktreeId, userId);
 
   let sdk;
   try {
@@ -1805,6 +2096,41 @@ async function resumeAgentSessionUncached(
     });
   } catch (err) {
     console.error(`[agent-bridge] resumeSession failed for ${sessionId}:`, err);
+    if (isToolClashError(err)) {
+      // The conversation is intact but a leaked connection still owns its
+      // tools. Creating a fresh session here would silently hide the user's
+      // history, so report it instead — `POST /api/agent/reconnect` restarts
+      // the runtime and clears the stale registration.
+      console.error(
+        `[agent-bridge] session ${sessionId} is held by a stale runtime connection. ` +
+          'Call POST /api/agent/reconnect to release it.',
+      );
+      return undefined;
+    }
+    // A session the runtime has never heard of can never come back: the
+    // runtime was restarted or the session was pruned. Tombstone the row so
+    // we stop retrying it on every lead/CoS open. Transient faults (runtime
+    // down, socket errors) are left alone so they retry once it recovers.
+    //
+    // Only ever retire *empty* rows. A restarted runtime can report a real
+    // session as missing before it has re-indexed its on-disk state, and
+    // tombstoning a transcript we still have would hide the user's
+    // conversation permanently.
+    if (isSessionGoneError(err)) {
+      try {
+        getDb()
+          .prepare(`
+            UPDATE cli_sessions
+            SET ended_at = datetime('now')
+            WHERE id = ?
+              AND ended_at IS NULL
+              AND (output_log IS NULL OR length(output_log) <= 2)
+          `)
+          .run(sessionId);
+      } catch {
+        /* best effort — a failed tombstone only costs a future retry */
+      }
+    }
     return undefined;
   }
   session.sessionId = sdk.sessionId;
@@ -2094,6 +2420,16 @@ export async function detachAgentBridge(): Promise<void> {
     }
     persistTranscript(session, true);
     persistAgentState(session);
+    // Release this connection's hold on the session. Unlike `client.stop()`
+    // (which destroys the session) `disconnect` only frees in-memory
+    // resources, and crucially it releases the session's external tool
+    // registrations. Skipping it leaks them into the daemon-hosted runtime,
+    // and every later resume fails with "External tool name clash ...
+    // already registered by another connection" — a lead or CoS conversation
+    // that can never be reopened.
+    void Promise.resolve(session.sdk?.disconnect?.()).catch(() => {
+      /* the connection is already gone */
+    });
   }
   agentSessions.clear();
 

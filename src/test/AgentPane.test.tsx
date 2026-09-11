@@ -389,6 +389,42 @@ describe('AgentPane', () => {
     expect(hooked.send).toHaveBeenCalledWith({ type: 'cancel' });
   });
 
+  it('still lets the user send a follow-up while the agent is busy', async () => {
+    renderPane();
+    emit({ type: 'status', status: 'busy' });
+
+    const textarea = screen.getByPlaceholderText(/Message Copilot/i);
+    fireEvent.change(textarea, { target: { value: 'what about the other topic?' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+
+    expect(hooked.send).toHaveBeenCalledWith({ type: 'send', prompt: 'what about the other topic?' });
+    // Stop stays available alongside send, so a busy turn is never a dead end.
+    expect(screen.getByTitle('Stop')).toBeTruthy();
+  });
+
+  it('lists queued follow-ups and can drop one', async () => {
+    renderPane();
+    emit({ type: 'status', status: 'busy' });
+    emit({ type: 'queued', prompts: ['first follow-up', 'second follow-up'] });
+
+    const queue = await screen.findByTestId('agent-queued');
+    expect(queue.textContent).toContain('2 follow-ups queued');
+    expect(screen.getByText('first follow-up')).toBeTruthy();
+
+    fireEvent.click(screen.getAllByTitle('Remove this queued follow-up')[1]);
+    expect(hooked.send).toHaveBeenCalledWith({ type: 'dequeue', index: 1 });
+  });
+
+  it('hides the queue once the server reports it empty', async () => {
+    renderPane();
+    emit({ type: 'status', status: 'busy' });
+    emit({ type: 'queued', prompts: ['only one'] });
+    expect(await screen.findByTestId('agent-queued')).toBeTruthy();
+
+    emit({ type: 'queued', prompts: [] });
+    await waitFor(() => expect(screen.queryByTestId('agent-queued')).toBeNull());
+  });
+
   it('runs /clear to start a new session', async () => {
     renderPane();
     const textarea = screen.getByPlaceholderText(/Message Copilot/i);

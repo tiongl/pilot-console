@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, Outlet, useLocation, useParams } from 'react-router';
-import { KanbanSquare, Target, CircleDot, GitPullRequest, MessageSquare } from 'lucide-react';
+import { KanbanSquare, Target, CircleDot, GitPullRequest, MessageSquare, Compass } from 'lucide-react';
 
 interface Project {
   id: string;
@@ -42,14 +42,24 @@ export default function ProjectViewLayout() {
           <h2 className="truncate text-sm font-semibold">{project?.name ?? 'Project'}</h2>
           <p className="truncate font-mono text-xs text-muted-foreground">{project?.repoPath ?? ''}</p>
         </div>
-        <Link
-          to={`/projects/${id}/chat`}
-          className="flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
-          title="Back to chat workspace"
-        >
-          <MessageSquare className="h-3.5 w-3.5" />
-          Chat
-        </Link>
+        <div className="flex shrink-0 items-center gap-2">
+          <Link
+            to={`/projects/${id}/lead`}
+            className="flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+            title="Chat with Project Lead"
+          >
+            <Compass className="h-3.5 w-3.5" />
+            Project Lead
+          </Link>
+          <Link
+            to={`/projects/${id}/chat`}
+            className="flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+            title="Back to chat workspace"
+          >
+            <MessageSquare className="h-3.5 w-3.5" />
+            Chat
+          </Link>
+        </div>
       </div>
 
       <div className="flex items-center gap-1 border-b px-2">

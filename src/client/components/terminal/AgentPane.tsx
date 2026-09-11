@@ -18,6 +18,13 @@ import {
   DropdownMenuItem,
 } from '@/components/ui/dropdown-menu';
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
   Send,
   Square,
   ChevronRight,
@@ -333,6 +340,8 @@ export default function AgentPane({
 }: Props) {
   const [events, setEvents] = useState<AgentTranscriptEvent[]>([]);
   const [status, setStatus] = useState<AgentStatus>('idle');
+  /** Follow-ups typed mid-turn, held server-side until the current turn ends. */
+  const [queued, setQueued] = useState<string[]>([]);
   /**
    * Wall-clock start of the in-flight turn. Set optimistically the moment the
    * user submits so the progress timer covers the full request → completion
@@ -460,6 +469,9 @@ export default function AgentPane({
         case 'model':
           setModel(msg.model);
           break;
+        case 'queued':
+          setQueued(msg.prompts);
+          break;
         case 'mode':
           setMode(msg.mode);
           break;
@@ -533,7 +545,7 @@ export default function AgentPane({
     projectId,
     worktreeId,
     sessionId,
-    forceNew: !sessionId,
+    forceNew: !sessionId && sessionKind === 'agent',
     model,
     kind: sessionKind,
     onMessage: handleMessage,
@@ -791,9 +803,17 @@ export default function AgentPane({
     send({ type: 'set_allow_all', enabled });
   };
 
-  const changeModel = (m: string) => {    setModel(m);
+  const changeModel = (m: string) => {
+    setModel(m);
     send({ type: 'set_model', model: m });
   };
+
+  // Maps model ids to display names so the trigger shows "GPT-5.6 Sol"
+  // rather than the raw id the session actually runs on.
+  const modelItems = useMemo(
+    () => models.map((m) => ({ value: m.id, label: m.name })),
+    [models],
+  );
 
   const changeMode = useCallback(
     (m: AgentMode) => {
@@ -993,6 +1013,7 @@ export default function AgentPane({
     setEvents([]);
     setPermissions([]);
     setExitPlans([]);
+    setQueued([]);
     setConnError(null);
     onSessionId?.(id);
     switchTo(id);
@@ -1008,7 +1029,9 @@ export default function AgentPane({
       return;
     }
     send({ type: 'send', prompt: trimmed });
-    setTurnStartedAt(Date.now());
+    // Only anchor the clock when this prompt starts a turn; a follow-up typed
+    // mid-turn is queued server-side and must not restart the running timer.
+    if (status !== 'busy') setTurnStartedAt(Date.now());
     setInput('');
     atBottomRef.current = true;
   };
@@ -1277,7 +1300,7 @@ export default function AgentPane({
 
       {/* Header controls */}
       <div
-        className="flex items-center gap-2 px-3 py-1.5 border-b shrink-0"
+        className="flex flex-wrap items-center gap-2 px-3 py-1.5 border-b shrink-0"
         style={{ borderColor: appearance.border, backgroundColor: appearance.surface }}
       >
         <span className="text-xs font-semibold shrink-0">Copilot Agent</span>
@@ -1573,21 +1596,25 @@ export default function AgentPane({
             </>
           )}
         </div>
-        <div className="flex items-center gap-0.5 border rounded px-1" style={{ borderColor: appearance.border }}>
-          <span className="text-[10px]" style={{ color: appearance.muted }}>Model</span>
-          <select
-            value={model}
-            onChange={(e) => changeModel(e.target.value)}
-            className="h-6 text-xs bg-transparent border-none outline-none px-0.5 max-w-[140px]"
-            style={{ color: appearance.fg }}
+        <Select value={model} onValueChange={(value) => value && changeModel(value)} items={modelItems}>
+          <SelectTrigger
+            size="sm"
+            className="h-6 max-w-[180px] shrink-0 gap-1 rounded px-1.5 text-[10px]"
+            data-testid="agent-model-select"
+            aria-label={`${sessionKind === 'project_lead' ? 'Project Lead' : sessionKind === 'chief_of_staff' ? 'Chief of Staff' : 'Agent'} model`}
+            title="Select model"
           >
-            {models.map((m) => (
-              <option key={m.id} value={m.id} style={{ color: '#000' }}>
-                {m.name}
-              </option>
+            <span className="shrink-0" style={{ color: appearance.muted }}>Model</span>
+            <SelectValue className="min-w-0 truncate" />
+          </SelectTrigger>
+          <SelectContent align="end" className="min-w-56">
+            {models.map((item) => (
+              <SelectItem key={item.id} value={item.id} className="text-xs">
+                {item.name}
+              </SelectItem>
             ))}
-          </select>
-        </div>
+          </SelectContent>
+        </Select>
       </div>
 
       {connError && (
@@ -1939,26 +1966,57 @@ export default function AgentPane({
             ))}
           </div>
         )}
+        {queued.length > 0 && (
+          <div data-testid="agent-queued" className="mb-2 space-y-1">
+            <div className="text-[11px]" style={{ color: appearance.muted }}>
+              {queued.length} follow-up{queued.length === 1 ? '' : 's'} queued · sent when this turn ends
+            </div>
+            {queued.map((prompt, index) => (
+              <div
+                key={`${index}:${prompt}`}
+                className="flex items-start gap-2 rounded border px-2 py-1 text-xs"
+                style={{ borderColor: appearance.border }}
+              >
+                <span className="min-w-0 flex-1 truncate" title={prompt}>{prompt}</span>
+                <button
+                  type="button"
+                  className="shrink-0 underline"
+                  style={{ color: appearance.muted }}
+                  title="Remove this queued follow-up"
+                  onClick={() => send({ type: 'dequeue', index })}
+                >
+                  remove
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="flex gap-2 items-end">
           <Textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Message Copilot… (/ for commands, Enter to send, Shift+Enter for newline)"
+            placeholder={busy
+              ? 'Message Copilot… (queued and sent when the current turn ends)'
+              : 'Message Copilot… (/ for commands, Enter to send, Shift+Enter for newline)'}
             rows={2}
             className="resize-none flex-1"
             style={{ fontFamily, fontSize }}
             disabled={!active && state !== 'open'}
           />
-          {busy ? (
+          {busy && (
             <Button variant="destructive" size="icon" onClick={() => send({ type: 'cancel' })} title="Stop">
               <Square className="h-4 w-4" />
             </Button>
-          ) : (
-            <Button onClick={submit} disabled={!input.trim()} size="icon" title="Send">
-              <Send className="h-4 w-4" />
-            </Button>
           )}
+          <Button
+            onClick={submit}
+            disabled={!input.trim()}
+            size="icon"
+            title={busy ? 'Queue this message for when the turn ends' : 'Send'}
+          >
+            <Send className="h-4 w-4" />
+          </Button>
         </div>
       </div>
 

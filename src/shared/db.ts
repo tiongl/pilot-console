@@ -212,6 +212,27 @@ function initSchema(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_cos_briefings_project_id ON cos_briefings(project_id);
 
+    -- Work the Project Lead handed to a background worker: one row per
+    -- lead-started worktree agent, used to drive the lead's worker tabs and
+    -- the sidebar subnodes.
+    CREATE TABLE IF NOT EXISTS delegations (
+      id          TEXT PRIMARY KEY,
+      project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      worktree_id TEXT NOT NULL REFERENCES worktrees(id) ON DELETE CASCADE,
+      session_id  TEXT,
+      title       TEXT NOT NULL,
+      task        TEXT NOT NULL,
+      -- planning | awaiting_plan_review | working | blocked | done | cancelled
+      status      TEXT NOT NULL DEFAULT 'planning',
+      note        TEXT,
+      unread      INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT DEFAULT (datetime('now')),
+      updated_at  TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_delegations_project_id ON delegations(project_id);
+    CREATE INDEX IF NOT EXISTS idx_delegations_worktree_id ON delegations(worktree_id);
+
     CREATE TABLE IF NOT EXISTS report_schedules (
       id                TEXT PRIMARY KEY,
       name              TEXT NOT NULL,

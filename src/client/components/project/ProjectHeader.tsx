@@ -185,11 +185,6 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
                     </div>
                   </div>
                 )}
-                <Link to={`${basePath}/lead`}>
-                  <Button variant={pathname.endsWith('/lead') ? 'secondary' : 'ghost'} size="icon" className="h-8 w-8" title="Project Lead">
-                    <Compass className="h-4 w-4" />
-                  </Button>
-                </Link>
               </div>
               <Button
                 variant={activePanel === 'history' ? 'secondary' : 'ghost'}
@@ -211,6 +206,17 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
               </Button>
             </>
           )}
+          <Link to={`${basePath}/lead`}>
+            <Button
+              variant={pathname.endsWith('/lead') ? 'secondary' : 'ghost'}
+              size="sm"
+              className="h-8 gap-1.5 px-2"
+              title="Chat with Project Lead"
+            >
+              <Compass className="h-4 w-4" />
+              <span className="hidden lg:inline">Project Lead</span>
+            </Button>
+          </Link>
           <Button
             variant="ghost"
             size="icon"

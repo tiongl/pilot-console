@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router';
+import { Compass, Users } from 'lucide-react';
 import AgentPane from '../components/terminal/AgentPane';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
@@ -7,6 +8,14 @@ import { Button } from '../components/ui/button';
 interface AuditEntry { id: string; action: string; reasoning: string | null; risk_level: string | null; created_at: string; }
 interface DecisionThread { id: string; title: string | null; question: string; status: string; decision: string | null; }
 interface ProjectMemory { summary: string; source: string | null; updatedAt: string | null; }
+interface Delegation {
+  id: string;
+  worktreeId: string;
+  title: string;
+  status: 'planning' | 'awaiting_plan_review' | 'working' | 'blocked' | 'done' | 'cancelled';
+  note: string | null;
+  unread: number;
+}
 
 export default function ProjectLeadPage() {
   const { id } = useParams<{ id: string }>();
@@ -43,7 +52,45 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
     }
   };
 
+  const [delegations, setDelegations] = useState<Delegation[]>([]);
+  const [activeTab, setActiveTab] = useState<string>('lead');
+
+  const refreshDelegations = useCallback(() => {
+    fetch(`/api/projects/${projectId}/delegations`)
+      .then((r) => (r.ok ? r.json() : { delegations: [] }))
+      .then((data: { delegations: Delegation[] }) => setDelegations(data.delegations || []))
+      .catch(() => {});
+  }, [projectId]);
+
+  // Workers appear without any action on this page, so poll for new tabs.
+  useEffect(() => {
+    refreshDelegations();
+    const timer = setInterval(refreshDelegations, 8000);
+    return () => clearInterval(timer);
+  }, [refreshDelegations]);
+
+  // Opening a worker's tab clears its "needs attention" flag.
+  useEffect(() => {
+    const open = delegations.find((d) => d.worktreeId === activeTab);
+    if (!open?.unread) return;
+    fetch(`/api/projects/${projectId}/delegations/${open.id}/read`, { method: 'POST' })
+      .then(() => refreshDelegations())
+      .catch(() => {});
+  }, [activeTab, delegations, projectId, refreshDelegations]);
+
   useEffect(() => { refresh(); }, [projectId]);
+
+  // Tabs are never closable: the lead is permanent, and a worker tab is the
+  // only way back into that worker's session from here.
+  const tabs = [
+    { id: 'lead', label: 'Lead', status: null as string | null, unread: 0 },
+    ...delegations.map((d) => ({
+      id: d.worktreeId,
+      label: d.title,
+      status: d.status,
+      unread: d.unread,
+    })),
+  ];
 
   return (
     <div className="grid h-[calc(100vh-4rem)] grid-cols-1 gap-4 overflow-auto p-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
@@ -52,8 +99,45 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
         <h2 className="text-xl font-semibold">Project Lead</h2>
         <p className="text-sm text-muted-foreground">Project-scoped planning and coordination</p>
       </div>
-      <div className="min-h-0 flex-1 overflow-hidden rounded-md border">
-        <AgentPane projectId={projectId} active sessionKind="project_lead" />
+      <div role="tablist" aria-label="Project Lead and workers" className="mb-2 flex flex-wrap items-center gap-1">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            role="tab"
+            aria-selected={activeTab === tab.id}
+            data-testid={`lead-tab-${tab.id}`}
+            onClick={() => setActiveTab(tab.id)}
+            title={tab.status ? `${tab.label} · ${tab.status.replace(/_/g, ' ')}` : 'Project Lead conversation'}
+            className={`flex max-w-[14rem] items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors ${
+              activeTab === tab.id
+                ? 'bg-accent font-medium text-accent-foreground'
+                : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
+            }`}
+          >
+            {tab.id === 'lead' ? <Compass className="h-3.5 w-3.5 shrink-0" /> : <Users className="h-3.5 w-3.5 shrink-0" />}
+            <span className="truncate">{tab.label}</span>
+            {tab.unread ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" /> : null}
+          </button>
+        ))}
+      </div>
+      {/* Every pane stays mounted so switching tabs never drops a live session. */}
+      <div className="relative min-h-0 flex-1 overflow-hidden rounded-md border">
+        <div className="absolute inset-0" style={{ display: activeTab === 'lead' ? 'block' : 'none' }}>
+          <AgentPane projectId={projectId} active={activeTab === 'lead'} sessionKind="project_lead" />
+        </div>
+        {delegations.map((d) => (
+          <div
+            key={d.worktreeId}
+            className="absolute inset-0"
+            style={{ display: activeTab === d.worktreeId ? 'block' : 'none' }}
+          >
+            <AgentPane
+              projectId={projectId}
+              worktreeId={d.worktreeId}
+              active={activeTab === d.worktreeId}
+            />
+          </div>
+        ))}
       </div>
       </div>
       <div className="space-y-4">
@@ -92,12 +176,15 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
           </CardContent>
         </Card>
         <Card>
-          <CardHeader><CardTitle className="text-base">Recent actions</CardTitle></CardHeader>
-          <CardContent className="space-y-2">
+          <CardHeader className="flex-row items-center justify-between space-y-0">
+            <CardTitle className="text-base">Recent actions</CardTitle>
+            {audit.length > 0 && <span className="text-xs text-muted-foreground">{audit.length}</span>}
+          </CardHeader>
+          <CardContent className="max-h-72 space-y-2 overflow-y-auto">
             {audit.length === 0 ? <p className="text-sm text-muted-foreground">No Project Lead actions yet.</p> : audit.map((entry) => (
               <div key={entry.id} className="border-b pb-2 text-xs last:border-0">
                 <div className="font-medium">{entry.action} <span className="text-muted-foreground">({entry.risk_level || 'low'})</span></div>
-                {entry.reasoning && <div className="text-muted-foreground">{entry.reasoning}</div>}
+                {entry.reasoning && <div className="line-clamp-3 break-words text-muted-foreground" title={entry.reasoning}>{entry.reasoning}</div>}
               </div>
             ))}
           </CardContent>

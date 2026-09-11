@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef, lazy, Suspense } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import { Outlet, Link, useNavigate, useLocation } from 'react-router';
 import { useAuth } from '../lib/auth-context';
 import { useTheme, THEMES, type ThemeId } from '../lib/theme-context';
@@ -36,6 +36,16 @@ interface Worktree {
   worktreePath: string;
   isManaged: boolean;
   type?: 'worktree' | 'directory';
+}
+
+/** A task the Project Lead handed to a background worker. */
+interface Delegation {
+  id: string;
+  projectId: string;
+  worktreeId: string;
+  title: string;
+  status: 'planning' | 'awaiting_plan_review' | 'working' | 'blocked' | 'done' | 'cancelled';
+  unread: number;
 }
 
 function statusPriority(status: SessionStatus): number {
@@ -136,6 +146,8 @@ function ProjectNav({
     return active ? new Set([active.id]) : new Set();
   });
   const [worktreeMap, setWorktreeMap] = useState<Record<string, Worktree[]>>({});
+  /** Lead-started work, keyed by worktree id, for labels and unread dots. */
+  const [delegations, setDelegations] = useState<Record<string, Delegation>>({});
   const [showAddDialog, setShowAddDialog] = useState<string | null>(null);
   const [addMode, setAddMode] = useState<'worktree' | 'directory'>('worktree');
   const [wtName, setWtName] = useState('');
@@ -270,8 +282,52 @@ function ProjectNav({
     return () => window.removeEventListener('worktrees-changed', onWorktreesChanged);
   }, [fetchWorktrees]);
 
-  const toggleExpanded = useCallback((projectId: string) => {
-    setExpandedIds(prev => {
+  // Workers the Project Lead starts appear without any local action, so poll for
+  // them and pull in (and reveal) the worktree they created.
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/delegations');
+        if (!res.ok || cancelled) return;
+        const data = await res.json() as { delegations: Delegation[] };
+        const byWorktree: Record<string, Delegation> = {};
+        for (const d of data.delegations || []) byWorktree[d.worktreeId] = d;
+        setDelegations(byWorktree);
+
+        // A delegation whose worktree we have never seen means the lead just
+        // created one: refresh that project's tree and open it.
+        setWorktreeMap((current) => {
+          const missing = new Set<string>();
+          for (const d of Object.values(byWorktree)) {
+            const known = (current[d.projectId] || []).some((w) => w.id === d.worktreeId);
+            if (!known) missing.add(d.projectId);
+          }
+          if (missing.size > 0) {
+            missing.forEach((projectId) => {
+              void fetchWorktrees(projectId);
+              setExpandedIds((prev) => (prev.has(projectId) ? prev : new Set(prev).add(projectId)));
+            });
+          }
+          return current;
+        });
+      } catch { /* offline or server restarting */ }
+    };
+    void poll();
+    const timer = setInterval(poll, 8000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [fetchWorktrees]);
+
+  /** Unread worker updates per project, for the sidebar dot. */
+  const projectUnread = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const d of Object.values(delegations)) {
+      if (d.unread) counts.set(d.projectId, (counts.get(d.projectId) ?? 0) + 1);
+    }
+    return counts;
+  }, [delegations]);
+
+  const toggleExpanded = useCallback((projectId: string) => {    setExpandedIds(prev => {
       const next = new Set(prev);
       if (next.has(projectId)) {
         next.delete(projectId);
@@ -390,12 +446,30 @@ function ProjectNav({
             <div className={`group flex items-center gap-1 rounded-lg px-1 py-1 text-sm transition-colors hover:bg-accent hover:text-accent-foreground`}>
               <button
                 onClick={() => toggleExpanded(project.id)}
-                className="flex items-center gap-2 flex-1 min-w-0 py-0.5 text-left"
+                className="shrink-0 py-0.5 text-muted-foreground"
+                title={isExpanded ? 'Collapse' : 'Expand'}
               >
-                {isExpanded ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+                {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+              </button>
+              {/* The project node itself opens the Project Lead — the place work
+                  for this project is coordinated from. */}
+              <Link
+                to={`/projects/${project.id}/lead`}
+                onClick={() => { if (!isExpanded) toggleExpanded(project.id); }}
+                className={`flex items-center gap-2 flex-1 min-w-0 py-0.5 text-left ${
+                  location.pathname === `/projects/${project.id}/lead` ? 'font-medium text-accent-foreground' : ''
+                }`}
+                title="Open Project Lead"
+              >
                 <FolderOpen className="h-4 w-4 shrink-0" />
                 <span className="truncate flex-1">{project.name}</span>
-              </button>
+                {projectUnread.get(project.id) ? (
+                  <span
+                    className="mr-1 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
+                    title={`${projectUnread.get(project.id)} worker update(s) need attention`}
+                  />
+                ) : null}
+              </Link>
               <button
                 onClick={(e) => openAddDialog(e, project.id)}
                 className="h-4 w-4 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-foreground transition-opacity"
@@ -453,6 +527,7 @@ function ProjectNav({
                 {worktrees.map(wt => {
                   const wtActive = location.pathname.includes(`/worktrees/${wt.id}`);
                   const isDir = wt.type === 'directory';
+                  const delegation = delegations[wt.id];
                   const className = `group/wt ml-7 w-[calc(100%-1.75rem)] pr-2 flex items-center gap-2 px-1 py-1 text-left text-sm transition-colors rounded-md ${
                     wtActive
                       ? 'bg-accent text-accent-foreground font-medium'
@@ -461,7 +536,12 @@ function ProjectNav({
                   const content = (
                     <>
                       {isDir ? <FolderOpen className="h-4 w-4 shrink-0" /> : <GitBranch className="h-4 w-4 shrink-0" />}
-                      <span className="truncate flex-1 text-left">{wt.name}</span>
+                      <span className="truncate flex-1 text-left" title={delegation ? `${delegation.title} · ${delegation.status.replace(/_/g, ' ')}` : wt.name}>
+                        {delegation ? delegation.title : wt.name}
+                      </span>
+                      {delegation?.unread ? (
+                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" title="Needs your attention" />
+                      ) : null}
                       <button
                         onClick={(e) => handleDeleteWorktree(e, project.id, wt.id, wt.isManaged)}
                         className="ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 group-hover/wt:opacity-100 hover:text-destructive transition-opacity"

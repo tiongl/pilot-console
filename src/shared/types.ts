@@ -206,9 +206,10 @@ export type AgentClientMessage =
   | { type: 'set_mode'; mode: AgentMode }
   | { type: 'exit_plan_response'; requestId: string; action: string }
   | { type: 'set_model'; model: string }
+  // Drop a follow-up the user queued while the agent was mid-turn.
+  | { type: 'dequeue'; index: number }
   // Discover the current slash-command catalog (dynamic; plugin-aware).
-  | { type: 'list_commands' }
-  // Invoke a runtime/skill/plugin slash command by name with raw argument text.
+  | { type: 'list_commands' }  // Invoke a runtime/skill/plugin slash command by name with raw argument text.
   | { type: 'run_command'; name: string; input?: string }
   // List resumable sessions for this project (native `/resume` switcher).
   | { type: 'list_sessions' }
@@ -262,6 +263,8 @@ export type AgentServerMessage =
       turnStartedAt?: number | null;
     }
   | { type: 'model'; model: string }
+  // Follow-ups the user submitted mid-turn, in the order they will be sent.
+  | { type: 'queued'; prompts: string[] }
   | { type: 'mode'; mode: AgentMode }
   // The dynamic slash-command catalog for this session.
   | { type: 'commands'; commands: AgentSlashCommand[] }
