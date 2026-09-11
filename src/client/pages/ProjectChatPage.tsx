@@ -21,6 +21,12 @@ interface TabMeta {
   fontFamily: string;
   sessionId?: string;
   group: number;
+  /**
+   * The delegated worker's own conversation. Always first, never closable, and
+   * never persisted — it is rebuilt from the delegation on every mount so it
+   * cannot go stale when a worktree is re-delegated to a new worker.
+   */
+  pinned?: boolean;
 }
 
 interface DetachedTabConfig {
@@ -452,7 +458,15 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   useEffect(() => {
     if (isDetachedTabView) return;
     if (tabStateKey) {
-      const state = { tabs, activeTabId: activeTabIds[1] || '', fontSize, themeName: projectThemeName, fontFamily: projectFontFamily };
+      const state = {
+        // The worker tab is derived from the delegation, so persisting it would
+        // resurrect a stale session id after the worktree is re-delegated.
+        tabs: tabs.filter((t) => !t.pinned),
+        activeTabId: activeTabIds[1] || '',
+        fontSize,
+        themeName: projectThemeName,
+        fontFamily: projectFontFamily,
+      };
       projectTabStates.set(tabStateKey, state);
       saveTabState(tabStateKey, state);
     }
@@ -567,6 +581,79 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
       .catch(() => {});
   }, [isDetachedTabView, projectId, worktreeId, tabStateKey, defaultTheme, defaultFont]);
 
+  // A delegated worktree already has a worker conversation, and that is the
+  // thing you want to see when you open the worktree — not a blank CLI tab. It
+  // is pinned first and cannot be closed, because closing it would only hide a
+  // worker that is still running.
+  const pinnedTabIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (isDetachedTabView || !worktreeId || !projectId) return;
+    let cancelled = false;
+
+    const sync = async () => {
+      let worker: { sessionId: string; title: string } | null = null;
+      try {
+        const response = await fetch(`/api/projects/${projectId}/delegations`);
+        if (!response.ok) return;
+        const data = (await response.json()) as {
+          delegations?: Array<{ worktreeId: string; sessionId: string | null; title: string }>;
+        };
+        // Newest delegation wins: a re-delegated worktree keeps the old rows.
+        const found = [...(data.delegations ?? [])]
+          .reverse()
+          .find((d) => d.worktreeId === worktreeId && d.sessionId);
+        if (found?.sessionId) worker = { sessionId: found.sessionId, title: found.title };
+      } catch {
+        return;
+      }
+      if (cancelled) return;
+
+      if (!worker) {
+        if (!pinnedTabIdRef.current) return;
+        pinnedTabIdRef.current = null;
+        setTabs((prev) => prev.filter((t) => !t.pinned));
+        return;
+      }
+
+      const existingId = pinnedTabIdRef.current;
+      const label = worker.title?.trim() || 'Worker';
+      const id = existingId ?? `tab-${++tabCounter}`;
+      pinnedTabIdRef.current = id;
+
+      setTabs((prev) => {
+        const current = prev.find((t) => t.pinned);
+        const unchanged =
+          current &&
+          current.sessionId === worker.sessionId &&
+          current.label === label &&
+          prev[0]?.id === current.id;
+        if (unchanged) return prev;
+        const tab: TabMeta = {
+          id,
+          label,
+          mode: 'agent',
+          themeName: defaultTheme,
+          fontFamily: defaultFont,
+          sessionId: worker.sessionId,
+          group: 1,
+          pinned: true,
+        };
+        return [tab, ...prev.filter((t) => !t.pinned)];
+      });
+
+      // Land on the worker the first time it appears, but never yank the tab
+      // out from under someone who has since switched away from it.
+      if (!existingId) setActiveTabIds((prev) => ({ ...prev, 1: id }));
+    };
+
+    void sync();
+    const timer = setInterval(() => void sync(), 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [isDetachedTabView, projectId, worktreeId, defaultTheme, defaultFont]);
+
   const addTab = useCallback((mode: TabMeta['mode'] = 'cli', targetGroup: number = 1) => {
     tabCounter++;
     const label = defaultTabLabel(mode, tabCounter);
@@ -594,11 +681,14 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
       const sourceIndex = prev.findIndex(t => t.id === sourceId);
       const targetIndex = prev.findIndex(t => t.id === targetId);
       if (sourceIndex < 0 || targetIndex < 0) return prev;
+      if (prev[sourceIndex].pinned) return prev;
       const next = [...prev];
       const [moved] = next.splice(sourceIndex, 1);
       // Inherit the target tab's group
       moved.group = prev[targetIndex].group;
-      next.splice(targetIndex, 0, moved);
+      // Dropping onto the worker tab lands after it — it stays first.
+      const insertAt = prev[targetIndex].pinned ? targetIndex + 1 : targetIndex;
+      next.splice(insertAt, 0, moved);
       return next;
     });
   }, []);
@@ -607,6 +697,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
     setTabs(prev => {
       const tab = prev.find(t => t.id === tabId);
       if (!tab || tab.group === targetGroup) return prev;
+      if (tab.pinned) return prev;
       const sourceGroup = tab.group;
       const updated = prev.map(t => t.id === tabId ? { ...t, group: targetGroup } : t);
       // Update active tabs for both groups
@@ -626,6 +717,9 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   }, []);
 
   const closeTab = useCallback((tabId: string) => {
+    // The worker tab is not the user's to close — it belongs to a running
+    // delegation, and the next reconcile would bring it straight back.
+    if (tabs.find(t => t.id === tabId)?.pinned) return;
     const killCb = killCallbacksRef.current[tabId];
     if (killCb && projectId) {
       const getSessionId = (killCb as unknown as { _getSessionId?: () => string | null })._getSessionId;
@@ -733,7 +827,8 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
             return (
               <div
                 key={tab.id}
-                draggable
+                draggable={!tab.pinned}
+                data-testid={tab.pinned ? 'worker-tab' : undefined}
                 className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs cursor-pointer border-r shrink-0 transition-opacity ${
                   tab.id === groupActiveTabId
                     ? 'bg-accent text-foreground font-semibold border-b-2 border-b-primary'
@@ -776,7 +871,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
                   setDraggingTabId(null);
                   setDragOverTabId(null);
                 }}
-                title="Drag to rearrange or move to other pane"
+                title={tab.pinned ? 'The worker the Project Lead delegated to this worktree' : 'Drag to rearrange or move to other pane'}
               >
                 {!isUtilTab && <div className={`h-1.5 w-1.5 rounded-full ${stColor}`} />}
                 {tabIcon}
@@ -791,12 +886,14 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
                 >
                   <ExternalLink className="h-3 w-3" />
                 </button>
-                <button
-                  onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
-                  className={`h-4 w-4 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-muted`}
-                >
-                  <XIcon className="h-3 w-3" />
-                </button>
+                {!tab.pinned && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
+                    className={`h-4 w-4 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-muted`}
+                  >
+                    <XIcon className="h-3 w-3" />
+                  </button>
+                )}
               </div>
             );
           })}
