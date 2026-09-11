@@ -835,7 +835,7 @@ describe('AgentPane', () => {
     emit({
       type: 'replay',
       events: [
-        { kind: 'tool' as const, id: 'tool:c1', ts: 0, toolName: 'bash', status: 'running', output: '' },
+        { kind: 'tool' as const, id: 'tool:c1', ts: 0, toolCallId: 'c1', toolName: 'bash', status: 'running' as const, output: '' },
       ],
       hasMore: false,
     });
@@ -852,7 +852,7 @@ describe('AgentPane', () => {
     emit({
       type: 'replay',
       events: [
-        { kind: 'tool' as const, id: 'tool:c1', ts: 0, toolName: 'bash', status: 'running', output: '50% done' },
+        { kind: 'tool' as const, id: 'tool:c1', ts: 0, toolCallId: 'c1', toolName: 'bash', status: 'running' as const, output: '50% done' },
       ],
       hasMore: false,
     });

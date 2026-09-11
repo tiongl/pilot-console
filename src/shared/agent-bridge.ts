@@ -149,6 +149,13 @@ export interface AgentSession {
   /** When true, every permission request is auto-approved without prompting. */
   allowAllPermissions: boolean;
   /**
+   * A session nobody is expected to be watching: a worker the Project Lead
+   * delegated to, rather than something the user opened. There is no client to
+   * answer a permission prompt, so prompting would block the run forever.
+   * Optional so session objects built before this field existed stay assignable.
+   */
+  unattended?: boolean;
+  /**
    * Follow-up prompts the user submitted while a turn was already in flight.
    * The SDK accepts one turn at a time, so instead of rejecting the input (or
    * forcing the user to wait for a long delegation to finish) we hold it here
@@ -1207,7 +1214,7 @@ async function waitForSession(
 
 function makePermissionHandler(
   getSession: () => AgentSession | undefined,
-  fallback?: { allowAllPermissions?: boolean },
+  fallback?: { allowAllPermissions?: boolean; unattended?: boolean },
 ) {
   return async (request: PermissionRequest): Promise<PermissionRequestResult> => {
     // A resumed session can re-emit prompts that were pending while nobody was
@@ -1215,7 +1222,9 @@ function makePermissionHandler(
     // Wait briefly rather than blanket-approving work the user never saw.
     const session = (await waitForSession(getSession)) ?? undefined;
     if (!session) {
-      return fallback?.allowAllPermissions ? { kind: 'approve-once' } : { kind: 'reject' };
+      return fallback?.allowAllPermissions || fallback?.unattended
+        ? { kind: 'approve-once' }
+        : { kind: 'reject' };
     }
     if (autoApprovesPermissions(session)) return { kind: 'approve-once' };
 
@@ -1362,11 +1371,15 @@ export function respondToPermission(
 
 /**
  * Whether a permission request should be approved without asking the user:
- * either the session is in "allow everything" mode (any agent mode) or the
- * agent is running auto-pilot.
+ * the session is in "allow everything" mode (any agent mode), the agent is
+ * running auto-pilot, or nobody is attached to answer in the first place.
+ *
+ * That last case covers workers the Project Lead delegated to. They run in a
+ * worktree the system created, with no client subscribed, so a prompt has no
+ * one to answer it and the worker would sit blocked until it was cancelled.
  */
 export function autoApprovesPermissions(session: AgentSession): boolean {
-  return session.allowAllPermissions || session.mode === 'autopilot';
+  return session.allowAllPermissions || session.mode === 'autopilot' || session.unattended === true;
 }
 
 /** Session-level permission resolution. Exported for unit testing. */
@@ -1529,6 +1542,7 @@ export interface PersistedAgentState {
   projectId?: string | null;
   worktreeId?: string | null;
   allowAllPermissions?: boolean;
+  unattended?: boolean;
   cwd?: string;
 }
 
@@ -1541,6 +1555,7 @@ function createPendingAgentSession(
   model: string,
   mode: AgentMode,
   allowAllPermissions: boolean,
+  unattended = false,
 ): AgentSession {
   return {
     // Replaced with the runtime session id as soon as create/resume resolves.
@@ -1573,6 +1588,7 @@ function createPendingAgentSession(
     share: { mode: 'off', steerable: false },
     usage: emptyAgentUsage(),
     allowAllPermissions,
+    unattended,
     queuedPrompts: [],
   };
 }
@@ -1584,6 +1600,7 @@ export function persistAgentState(session: AgentSession): void {
     projectId: session.projectId,
     worktreeId: session.worktreeId,
     allowAllPermissions: session.allowAllPermissions,
+    unattended: session.unattended,
     cwd: session.cwd,
   };
   try {
@@ -1732,6 +1749,7 @@ export async function createAgentSession(
   model = DEFAULT_MODEL,
   kind: AgentSessionKind = 'agent',
   mode: AgentMode = DEFAULT_MODE,
+  options: { unattended?: boolean } = {},
 ): Promise<AgentSession> {
   const client = await getClient();
   const cwd = resolveCwd(projectId, worktreeId);
@@ -1747,6 +1765,7 @@ export async function createAgentSession(
     model,
     mode,
     false,
+    options.unattended ?? false,
   );
   let sessionRef: AgentSession | undefined = session;
 
@@ -2157,6 +2176,21 @@ async function resumeAgentSessionUncached(
   const projectId = persisted.projectId ?? null;
   const worktreeId = persisted.worktreeId ?? null;
 
+  // A worktree with a live delegation belongs to a worker the Project Lead
+  // started, which nobody is subscribed to. Sessions created before the flag
+  // existed have it missing, so derive it here rather than resuming them
+  // straight back onto the permission prompt they were already stuck on.
+  let unattended = persisted.unattended ?? false;
+  if (!unattended && worktreeId) {
+    try {
+      const { getDelegationForWorktree } = await import('./delegation-store');
+      const delegation = getDelegationForWorktree(worktreeId);
+      if (delegation && delegation.sessionId === sessionId) unattended = true;
+    } catch (err) {
+      console.warn(`[agent-bridge] Could not check delegation for ${sessionId}:`, err);
+    }
+  }
+
   const session = createPendingAgentSession(
     userId,
     projectId,
@@ -2166,6 +2200,7 @@ async function resumeAgentSessionUncached(
     persisted.model ?? DEFAULT_MODEL,
     persisted.mode ?? DEFAULT_MODE,
     persisted.allowAllPermissions ?? false,
+    unattended,
   );
   // Keep the requested id while resume is in flight so diagnostics stay clear.
   session.sessionId = sessionId;
@@ -2181,6 +2216,7 @@ async function resumeAgentSessionUncached(
       tools,
       onPermissionRequest: makePermissionHandler(() => sessionRef, {
         allowAllPermissions: persisted.allowAllPermissions,
+        unattended,
       }),
       onExitPlanModeRequest: makeExitPlanHandler(() => sessionRef),
     });

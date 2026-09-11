@@ -432,8 +432,18 @@ export function createProjectLeadTools(
 
         const { createAgentSession, sendToSession } = await import('./agent-bridge');
         // Plan mode: the worker drafts a plan and cannot touch files until the
-        // lead approves it through decide_worker_plan.
-        const session = await createAgentSession(userId, projectId, targetWorktreeId, undefined, 'agent', 'plan');
+        // lead approves it through decide_worker_plan. It is also unattended —
+        // no client is subscribed to answer permission prompts, so it must not
+        // be asked any, or it would block forever on the first one.
+        const session = await createAgentSession(
+          userId,
+          projectId,
+          targetWorktreeId,
+          undefined,
+          'agent',
+          'plan',
+          { unattended: true },
+        );
         const delegation = createDelegation({
           projectId,
           worktreeId: targetWorktreeId,

@@ -322,6 +322,18 @@ describe('agent-bridge handleSdkEvent', () => {
     expect(autoApprovesPermissions(session)).toBe(true);
   });
 
+  // A worker the Project Lead delegated to has no client subscribed, so a
+  // permission prompt has nobody to answer it and the run blocks forever.
+  it('auto-approves permissions for an unattended delegated worker', () => {
+    const { session } = makeSession();
+    session.mode = 'plan';
+    session.allowAllPermissions = false;
+    expect(autoApprovesPermissions(session)).toBe(false);
+
+    session.unattended = true;
+    expect(autoApprovesPermissions(session)).toBe(true);
+  });
+
   it('approve-all resolves the prompt and stops asking for the rest of the session', () => {
     const { session, messages } = makeSession();
     const resolve = vi.fn();
