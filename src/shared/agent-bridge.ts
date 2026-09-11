@@ -494,7 +494,7 @@ export async function getOrCreatePersistentLeadSession(
     // recency alone hands the user a blank session and buries the real one.
     // `length(output_log) > 2` skips both NULL and an empty JSON array.
     const rows = getDb().prepare(`
-      SELECT id
+      SELECT id, (output_log IS NOT NULL AND length(output_log) > 2) AS hasContent
       FROM cli_sessions
       WHERE user_id = ?
         AND kind = ?
@@ -505,12 +505,22 @@ export async function getOrCreatePersistentLeadSession(
                started_at DESC,
                rowid DESC
       LIMIT 20
-    `).all(userId, kind, projectId) as Array<{ id: string }>;
+    `).all(userId, kind, projectId) as Array<{ id: string; hasContent: number }>;
+
+    // A blank live session holds this kind's external tools on the runtime
+    // connection, so resuming the real conversation would fail with a tool
+    // name clash and we would fall back to the blank one forever. Nothing is
+    // lost by ending it: it has no transcript.
+    let blankLive = live;
+    if (blankLive && rows.some((row) => row.hasContent && row.id !== blankLive!.sessionId)) {
+      await endAgentSession(blankLive.sessionId);
+      blankLive = undefined;
+    }
 
     for (const row of rows) {
       // The blank live session is already attached; resuming it again would
       // clash with its own tool registrations.
-      if (row.id === live?.sessionId) continue;
+      if (row.id === blankLive?.sessionId) continue;
       const resumed = await resumeAgentSession(userId, row.id);
       if (resumed) {
         retireEmptyLeadSessions(userId, kind, projectId, resumed.sessionId);
@@ -520,7 +530,7 @@ export async function getOrCreatePersistentLeadSession(
 
     // Nothing stored could be reopened — reuse the empty live session rather
     // than stacking up another one.
-    if (live) return live;
+    if (blankLive) return blankLive;
 
     const created = await createAgentSession(userId, projectId, null, model, kind);
     retireEmptyLeadSessions(userId, kind, projectId, created.sessionId);
@@ -1629,9 +1639,10 @@ export function buildToolsForKind(
   projectId: string | null,
   worktreeId: string | null,
   userId?: string,
+  getSessionId?: () => string | undefined,
 ): Tool<any>[] | undefined {
   if (kind === 'chief_of_staff') return createChiefOfStaffTools();
-  if (kind === 'project_lead') return projectId ? createProjectLeadTools(projectId, userId) : undefined;
+  if (kind === 'project_lead') return projectId ? createProjectLeadTools(projectId, userId, getSessionId) : undefined;
   if (worktreeId) return [...createWorktreeAgentTools(worktreeId, projectId, userId), ...createMergeTools(worktreeId)];
   return undefined;
 }
@@ -1681,7 +1692,7 @@ export async function createAgentSession(
       mode: 'append',
       content: `${AGENT_RENDERING_INSTRUCTIONS}${worktreeId ? WORKTREE_DIGEST_INSTRUCTIONS : ''}${kind === 'project_lead' ? `\n${PROJECT_LEAD_BASE_INSTRUCTIONS}${projectMemorySummary}` : ''}${kind === 'chief_of_staff' ? CHIEF_OF_STAFF_INSTRUCTIONS : ''}`,
     },
-    tools: buildToolsForKind(kind, projectId, worktreeId, userId),
+    tools: buildToolsForKind(kind, projectId, worktreeId, userId, () => sessionRef?.sessionId),
     onPermissionRequest: makePermissionHandler(() => sessionRef),
     onExitPlanModeRequest: makeExitPlanHandler(() => sessionRef),
   });
@@ -2033,6 +2044,7 @@ function isToolClashError(err: unknown): boolean {
 async function resumeAgentSessionUncached(
   userId: string,
   sessionId: string,
+  allowRuntimeRecovery = true,
 ): Promise<AgentSession | undefined> {
   // A resume may have completed while we were queued behind another caller.
   const existing = agentSessions.get(sessionId);
@@ -2081,7 +2093,7 @@ async function resumeAgentSessionUncached(
   session.sessionId = sessionId;
   let sessionRef: AgentSession | undefined = session;
 
-  const tools = buildToolsForKind(kind, projectId, worktreeId, userId);
+  const tools = buildToolsForKind(kind, projectId, worktreeId, userId, () => sessionRef?.sessionId);
 
   let sdk;
   try {
@@ -2097,13 +2109,26 @@ async function resumeAgentSessionUncached(
   } catch (err) {
     console.error(`[agent-bridge] resumeSession failed for ${sessionId}:`, err);
     if (isToolClashError(err)) {
-      // The conversation is intact but a leaked connection still owns its
-      // tools. Creating a fresh session here would silently hide the user's
-      // history, so report it instead — `POST /api/agent/reconnect` restarts
-      // the runtime and clears the stale registration.
+      // The conversation is intact but a connection leaked by an earlier
+      // server process still owns its tools, and a clash survives restarts of
+      // this process. Creating a fresh session here would silently hide the
+      // user's history, so restart the runtime — which drops every stale
+      // registration — and try the resume once more.
+      if (allowRuntimeRecovery) {
+        console.warn(
+          `[agent-bridge] session ${sessionId} is held by a stale runtime connection; ` +
+            'restarting the runtime to release it.',
+        );
+        try {
+          await reconnectAgentRuntime();
+        } catch (recoveryErr) {
+          console.error('[agent-bridge] runtime restart failed:', recoveryErr);
+          return undefined;
+        }
+        return resumeAgentSessionUncached(userId, sessionId, false);
+      }
       console.error(
-        `[agent-bridge] session ${sessionId} is held by a stale runtime connection. ` +
-          'Call POST /api/agent/reconnect to release it.',
+        `[agent-bridge] session ${sessionId} is still held by a stale runtime connection after a restart.`,
       );
       return undefined;
     }

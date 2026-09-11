@@ -65,8 +65,8 @@ export function synthesizeProjectMemory(projectId: string): string {
   const worktrees = listWorktrees(projectId);
   const digests = listDigests(projectId);
   const openThreads = getDb().prepare(
-    `SELECT title, question FROM decision_threads WHERE project_id = ? AND status = 'open' ORDER BY updated_at DESC LIMIT 10`,
-  ).all(projectId) as Array<{ title: string | null; question: string }>;
+    `SELECT id, title, question FROM decision_threads WHERE project_id = ? AND status = 'open' ORDER BY updated_at DESC LIMIT 10`,
+  ).all(projectId) as Array<{ id: string; title: string | null; question: string }>;
 
   const sections: string[] = [];
   sections.push(`# Project: ${project.name}\nRepo: ${project.repoPath}${project.description ? `\n${project.description}` : ''}`);
@@ -77,7 +77,13 @@ export function synthesizeProjectMemory(projectId: string): string {
     sections.push(`## Worktree status\n${digests.map((d) => `- ${d.worktreeId}: ${d.status ?? 'unknown'} — ${d.headline ?? 'no headline'}`).join('\n')}`);
   }
   if (openThreads.length) {
-    sections.push(`## Open decision threads\n${openThreads.map((t) => `- ${t.title || t.question}`).join('\n')}`);
+    // Ids are included so the lead can close a specific thread with
+    // resolve_decision_thread instead of only knowing one exists.
+    sections.push(
+      `## Open decision threads\n${openThreads
+        .map((t) => `- [${t.id}] ${t.title || t.question}`)
+        .join('\n')}`,
+    );
   }
   return sections.join('\n\n');
 }

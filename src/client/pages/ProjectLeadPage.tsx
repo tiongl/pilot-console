@@ -1,12 +1,31 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router';
-import { Compass, Users } from 'lucide-react';
+import { Compass, Users, ChevronRight } from 'lucide-react';
 import AgentPane from '../components/terminal/AgentPane';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 
-interface AuditEntry { id: string; action: string; reasoning: string | null; risk_level: string | null; created_at: string; }
-interface DecisionThread { id: string; title: string | null; question: string; status: string; decision: string | null; }
+interface AuditEntry {
+  id: string;
+  action: string;
+  reasoning: string | null;
+  risk_level: string | null;
+  subject_id: string | null;
+  created_at: string;
+}
+interface DecisionThread {
+  id: string;
+  title: string | null;
+  question: string;
+  status: string;
+  decision: string | null;
+  rationale: string | null;
+  alternatives_considered: string | null;
+  user_verdict: string | null;
+  follow_up_actions: string | null;
+  created_at: string;
+  updated_at: string;
+}
 interface ProjectMemory { summary: string; source: string | null; updatedAt: string | null; }
 interface Delegation {
   id: string;
@@ -29,6 +48,8 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
   const [threads, setThreads] = useState<DecisionThread[]>([]);
   const [memory, setMemory] = useState<ProjectMemory | null>(null);
   const [refreshingMemory, setRefreshingMemory] = useState(false);
+  const [openThreadId, setOpenThreadId] = useState<string | null>(null);
+  const [resolvingId, setResolvingId] = useState<string | null>(null);
 
   const refresh = () => {
     Promise.all([
@@ -42,13 +63,29 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
     }).catch(() => {});
   };
 
-  const refreshMemory = async () => {
-    setRefreshingMemory(true);
+  const refreshMemory = async () => {    setRefreshingMemory(true);
     try {
       const response = await fetch(`/api/projects/${projectId}/memory/refresh`, { method: 'POST' });
       if (response.ok) setMemory(await response.json());
     } finally {
       setRefreshingMemory(false);
+    }
+  };
+
+  const resolveThread = async (threadId: string, status: 'resolved' | 'open') => {
+    setResolvingId(threadId);
+    try {
+      const response = await fetch(`/api/projects/${projectId}/decision-threads/${threadId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status, userVerdict: status === 'resolved' ? 'Closed from Project Lead page' : null }),
+      });
+      if (response.ok) {
+        const data = await response.json() as { thread?: DecisionThread };
+        if (data.thread) setThreads((prev) => prev.map((t) => (t.id === threadId ? data.thread! : t)));
+      }
+    } finally {
+      setResolvingId(null);
     }
   };
 
@@ -166,13 +203,50 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
             <CardTitle className="text-base">Decision threads</CardTitle>
             <Button size="sm" variant="ghost" onClick={refresh}>Refresh</Button>
           </CardHeader>
-          <CardContent className="space-y-2">
-            {threads.length === 0 ? <p className="text-sm text-muted-foreground">No open handoffs.</p> : threads.map((thread) => (
-              <div key={thread.id} className="rounded border p-2 text-sm">
-                <div className="font-medium">{thread.title || thread.question}</div>
-                <div className="text-xs text-muted-foreground">{thread.status}{thread.decision ? ` · ${thread.decision}` : ''}</div>
-              </div>
-            ))}
+          <CardContent className="max-h-96 space-y-2 overflow-y-auto">
+            {threads.length === 0 ? <p className="text-sm text-muted-foreground">No handoffs recorded.</p> : threads.map((thread) => {
+              const isOpen = openThreadId === thread.id;
+              const unresolved = !['resolved', 'confirmed', 'closed'].includes(thread.status);
+              return (
+                <div key={thread.id} id={`thread-${thread.id}`} className="rounded border p-2 text-sm">
+                  <button
+                    type="button"
+                    className="flex w-full items-start gap-2 text-left"
+                    aria-expanded={isOpen}
+                    data-testid={`thread-toggle-${thread.id}`}
+                    onClick={() => setOpenThreadId(isOpen ? null : thread.id)}
+                  >
+                    <ChevronRight className={`mt-0.5 h-3.5 w-3.5 shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block font-medium">{thread.title || thread.question}</span>
+                      <span className="block text-xs text-muted-foreground">
+                        {thread.status} · updated {new Date(thread.updated_at).toLocaleString()}
+                      </span>
+                    </span>
+                  </button>
+                  {isOpen && (
+                    <div className="mt-2 space-y-2 border-t pt-2 text-xs">
+                      <ThreadField label="Context" value={thread.question} />
+                      <ThreadField label="Decision" value={thread.decision} />
+                      <ThreadField label="Rationale" value={thread.rationale} />
+                      <ThreadField label="Alternatives considered" value={thread.alternatives_considered} />
+                      <ThreadField label="User verdict" value={thread.user_verdict} />
+                      <ThreadField label="Follow-up actions" value={thread.follow_up_actions} />
+                      <div className="text-muted-foreground">Opened {new Date(thread.created_at).toLocaleString()}</div>
+                      <Button
+                        size="sm"
+                        variant={unresolved ? 'default' : 'ghost'}
+                        disabled={resolvingId === thread.id}
+                        data-testid={`thread-resolve-${thread.id}`}
+                        onClick={() => void resolveThread(thread.id, unresolved ? 'resolved' : 'open')}
+                      >
+                        {resolvingId === thread.id ? 'Saving…' : unresolved ? 'Mark resolved' : 'Reopen'}
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </CardContent>
         </Card>
         <Card>
@@ -181,15 +255,41 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
             {audit.length > 0 && <span className="text-xs text-muted-foreground">{audit.length}</span>}
           </CardHeader>
           <CardContent className="max-h-72 space-y-2 overflow-y-auto">
-            {audit.length === 0 ? <p className="text-sm text-muted-foreground">No Project Lead actions yet.</p> : audit.map((entry) => (
-              <div key={entry.id} className="border-b pb-2 text-xs last:border-0">
-                <div className="font-medium">{entry.action} <span className="text-muted-foreground">({entry.risk_level || 'low'})</span></div>
-                {entry.reasoning && <div className="line-clamp-3 break-words text-muted-foreground" title={entry.reasoning}>{entry.reasoning}</div>}
-              </div>
-            ))}
+            {audit.length === 0 ? <p className="text-sm text-muted-foreground">No Project Lead actions yet.</p> : audit.map((entry) => {
+              const linkedThread = entry.subject_id ? threads.find((t) => t.id === entry.subject_id) : undefined;
+              return (
+                <div key={entry.id} className="border-b pb-2 text-xs last:border-0">
+                  <div className="font-medium">{entry.action} <span className="text-muted-foreground">({entry.risk_level || 'low'})</span></div>
+                  {entry.reasoning && <div className="line-clamp-3 break-words text-muted-foreground" title={entry.reasoning}>{entry.reasoning}</div>}
+                  {linkedThread && (
+                    <button
+                      type="button"
+                      className="mt-1 text-primary underline-offset-2 hover:underline"
+                      data-testid={`audit-thread-link-${entry.id}`}
+                      onClick={() => {
+                        setOpenThreadId(linkedThread.id);
+                        document.getElementById(`thread-${linkedThread.id}`)?.scrollIntoView({ block: 'nearest' });
+                      }}
+                    >
+                      View decision thread
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </CardContent>
         </Card>
       </div>
+    </div>
+  );
+}
+
+function ThreadField({ label, value }: { label: string; value: string | null }) {
+  if (!value) return null;
+  return (
+    <div>
+      <div className="font-medium">{label}</div>
+      <div className="whitespace-pre-wrap break-words text-muted-foreground">{value}</div>
     </div>
   );
 }

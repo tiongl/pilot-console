@@ -330,6 +330,13 @@ function initSchema(db: Database.Database) {
     db.exec('ALTER TABLE worktrees ADD COLUMN seed_prompt TEXT');
   }
 
+  // Migration: link an audit entry to the record it acted on (currently the
+  // decision thread) so "Recent actions" can navigate to its subject.
+  const auditCols = db.pragma('table_info(project_audit_log)') as Array<{ name: string }>;
+  if (!new Set(auditCols.map((c) => c.name)).has('subject_id')) {
+    db.exec('ALTER TABLE project_audit_log ADD COLUMN subject_id TEXT');
+  }
+
   // Migration: add daemon_session_id to report_runs
   const runCols = db.pragma('table_info(report_runs)') as Array<{ name: string }>;
   const runColNames = new Set(runCols.map((c) => c.name));

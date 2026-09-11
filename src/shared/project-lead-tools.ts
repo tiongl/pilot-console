@@ -30,11 +30,17 @@ export function condenseBriefing(summary: string, maxChars = BRIEFING_MAX_CHARS)
   return `${(lastBreak > maxChars * 0.6 ? clipped.slice(0, lastBreak) : clipped).replace(/[.,;:\s]+$/, '')}…`;
 }
 
-function audit(projectId: string, action: string, reasoning: string, riskLevel: 'low' | 'medium' | 'high' = 'low') {
+function audit(
+  projectId: string,
+  action: string,
+  reasoning: string,
+  riskLevel: 'low' | 'medium' | 'high' = 'low',
+  subjectId?: string,
+) {
   getDb().prepare(`
-    INSERT INTO project_audit_log (id, project_id, actor, action, reasoning, risk_level)
-    VALUES (?, ?, 'project_lead', ?, ?, ?)
-  `).run(crypto.randomUUID(), projectId, action, reasoning, riskLevel);
+    INSERT INTO project_audit_log (id, project_id, actor, action, reasoning, risk_level, subject_id)
+    VALUES (?, ?, 'project_lead', ?, ?, ?, ?)
+  `).run(crypto.randomUUID(), projectId, action, reasoning, riskLevel, subjectId ?? null);
 }
 
 /** Worktree/branch-safe name derived from a delegation title. */
@@ -90,7 +96,11 @@ export function reviewPlanForWorker(
   return { action, reason };
 }
 
-export function createProjectLeadTools(projectId: string, userId?: string) {
+export function createProjectLeadTools(
+  projectId: string,
+  userId?: string,
+  getSessionId?: () => string | undefined,
+) {
   return [
     defineTool('get_project_memory', {
       description: 'Read (and bootstrap if missing) this Project Lead\'s persistent understanding of the project: README, recent commits, worktrees, digests, and open decisions. Call this at the start of a new conversation to get up to speed.',
@@ -236,12 +246,111 @@ export function createProjectLeadTools(projectId: string, userId?: string) {
           `Dependencies: ${dependencies || 'None recorded'}`,
           `Open questions: ${openQuestions || 'None recorded'}`,
         ].join('\n');
+        const status = openQuestions ? 'open' : 'confirmed';
         getDb().prepare(`
-          INSERT INTO decision_threads (id, project_id, title, question, status)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(id, projectId, title, question, openQuestions ? 'open' : 'confirmed');
-        audit(projectId, 'record_requirements', title, openQuestions ? 'medium' : 'low');
-        return { id, title, status: openQuestions ? 'open' : 'confirmed' };
+          INSERT INTO decision_threads (id, project_id, title, question, status, session_id)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(id, projectId, title, question, status, getSessionId?.() ?? null);
+        audit(projectId, 'record_requirements', title, openQuestions ? 'medium' : 'low', id);
+        return { id, title, status };
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    defineTool('list_decision_threads', {
+      description:
+        'List this project\'s decision threads with their ids, so a specific one can be resolved. Defaults to open threads.',
+      parameters: {
+        type: 'object',
+        properties: {
+          status: {
+            type: 'string',
+            description: "Filter by status: 'open', 'confirmed', 'resolved', or 'all'. Defaults to 'open'.",
+          },
+        },
+      },
+      handler: async ({ status }: { status?: string }) => {
+        const requested = status ?? 'open';
+        const wanted = requested === 'all' ? null : requested;
+        const rows = getDb().prepare(`
+          SELECT id, title, question, status, decision, rationale, follow_up_actions AS followUpActions, updated_at AS updatedAt
+          FROM decision_threads
+          WHERE project_id = ? AND (? IS NULL OR status = ?)
+          ORDER BY updated_at DESC
+          LIMIT 50
+        `).all(projectId, wanted, wanted);
+        return { threads: rows, count: rows.length };
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    defineTool('resolve_decision_thread', {
+      description:
+        'Close a decision thread with the verdict that was reached. Use list_decision_threads first to get the id.',
+      parameters: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string', description: 'Id of the thread to close.' },
+          decision: { type: 'string', description: 'The verdict that was reached.' },
+          rationale: { type: 'string', description: 'Why this decision was made.' },
+          alternativesConsidered: { type: 'string', description: 'Options that were weighed and set aside.' },
+          followUpActions: { type: 'string', description: 'Work this decision creates.' },
+          status: {
+            type: 'string',
+            description: "Resulting status: 'resolved' (default) or 'confirmed' when the user signed off.",
+          },
+        },
+        required: ['threadId', 'decision'],
+      },
+      handler: async ({
+        threadId,
+        decision,
+        rationale,
+        alternativesConsidered,
+        followUpActions,
+        status,
+      }: {
+        threadId: string;
+        decision: string;
+        rationale?: string;
+        alternativesConsidered?: string;
+        followUpActions?: string;
+        status?: string;
+      }) => {
+        const thread = getDb().prepare(
+          'SELECT id, title, status FROM decision_threads WHERE id = ? AND project_id = ?',
+        ).get(threadId, projectId) as { id: string; title: string | null; status: string } | undefined;
+        if (!thread) throw new Error('Decision thread does not belong to this project');
+
+        const nextStatus = status === 'confirmed' ? 'confirmed' : 'resolved';
+        getDb().prepare(`
+          UPDATE decision_threads SET
+            status = ?,
+            decision = ?,
+            rationale = COALESCE(?, rationale),
+            alternatives_considered = COALESCE(?, alternatives_considered),
+            follow_up_actions = COALESCE(?, follow_up_actions),
+            updated_at = datetime('now')
+          WHERE id = ? AND project_id = ?
+        `).run(
+          nextStatus,
+          decision,
+          rationale ?? null,
+          alternativesConsidered ?? null,
+          followUpActions ?? null,
+          threadId,
+          projectId,
+        );
+        audit(
+          projectId,
+          'resolve_decision_thread',
+          condenseBriefing(`${thread.title || 'Decision'} → ${decision}`),
+          'medium',
+          threadId,
+        );
+        // The summary lists open threads, so it is stale the moment one closes.
+        refreshProjectMemory(projectId);
+        return { id: threadId, status: nextStatus, decision };
       },
       skipPermission: true,
       defer: 'never',

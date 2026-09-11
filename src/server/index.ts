@@ -137,7 +137,7 @@ app.get('/api/chief-of-staff/overview', (_req, res) => {
   `).all();
   const history = db.prepare(`
     SELECT a.id, a.project_id as projectId, p.name as projectName, a.actor,
-           a.action, a.reasoning, a.risk_level as riskLevel, a.created_at as createdAt
+           a.action, a.reasoning, a.risk_level as riskLevel, a.subject_id as subjectId, a.created_at as createdAt
     FROM project_audit_log a
     JOIN projects p ON p.id = a.project_id
     ORDER BY a.created_at DESC
@@ -252,24 +252,25 @@ app.get('/api/projects/:id/audit-log', (req, res) => {
   res.json({ entries });
 });
 
-app.get('/api/projects/:id/delegations', (req, res) => {
-  const project = getProjectById(req.params.id);
+app.get('/api/projects/:id/delegations', requireAuth, (req, res) => {
+  const projectId = String(req.params.id);
+  const project = getProjectById(projectId);
   if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
-  res.json({ delegations: listDelegations(req.params.id) });
+  res.json({ delegations: listDelegations(projectId) });
 });
 
-app.post('/api/projects/:id/delegations/:delegationId/read', (req, res) => {
-  const project = getProjectById(req.params.id);
+app.post('/api/projects/:id/delegations/:delegationId/read', requireAuth, (req, res) => {
+  const project = getProjectById(String(req.params.id));
   if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
-  clearDelegationUnread(req.params.delegationId);
+  clearDelegationUnread(String(req.params.delegationId));
   res.json({ ok: true });
 });
 
-app.get('/api/delegations/unread', (_req, res) => {
+app.get('/api/delegations/unread', requireAuth, (_req, res) => {
   res.json({ counts: unreadDelegationCounts() });
 });
 
-app.get('/api/delegations', (_req, res) => {
+app.get('/api/delegations', requireAuth, (_req, res) => {
   res.json({ delegations: listAllDelegations() });
 });
 
@@ -290,8 +291,9 @@ app.get('/api/projects/:id/briefings', (req, res) => {
   res.json({ briefings: listCosBriefingsForProject(req.params.id) });
 });
 
-app.get('/api/projects/:id/decision-threads', (req, res) => {
-  const project = getProjectById(req.params.id);
+app.get('/api/projects/:id/decision-threads', requireAuth, (req, res) => {
+  const projectId = String(req.params.id);
+  const project = getProjectById(projectId);
   if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
   const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
   const threads = search
@@ -299,17 +301,17 @@ app.get('/api/projects/:id/decision-threads', (req, res) => {
         SELECT * FROM decision_threads
         WHERE project_id = ? AND (title LIKE ? OR question LIKE ? OR decision LIKE ?)
         ORDER BY updated_at DESC
-      `).all(req.params.id, `%${search}%`, `%${search}%`, `%${search}%`)
+      `).all(projectId, `%${search}%`, `%${search}%`, `%${search}%`)
     : getDb().prepare(
         'SELECT * FROM decision_threads WHERE project_id = ? ORDER BY updated_at DESC',
-      ).all(req.params.id);
+      ).all(projectId);
   res.json({ threads });
 });
 
-app.patch('/api/projects/:id/decision-threads/:threadId', (req, res) => {
+app.patch('/api/projects/:id/decision-threads/:threadId', requireAuth, (req, res) => {
   const thread = getDb().prepare(
     'SELECT id FROM decision_threads WHERE id = ? AND project_id = ?',
-  ).get(req.params.threadId, req.params.id);
+  ).get(String(req.params.threadId), String(req.params.id));
   if (!thread) { res.status(404).json({ error: 'Decision thread not found' }); return; }
   const fields = req.body as {
     status?: string; decision?: string; rationale?: string; userVerdict?: string; followUpActions?: string;
@@ -329,10 +331,12 @@ app.patch('/api/projects/:id/decision-threads/:threadId', (req, res) => {
     fields.rationale ?? null,
     fields.userVerdict ?? null,
     fields.followUpActions ?? null,
-    req.params.threadId,
-    req.params.id,
+    String(req.params.threadId),
+    String(req.params.id),
   );
-  res.json({ ok: true });
+  if (fields.status && fields.status !== 'open') refreshProjectMemory(String(req.params.id));
+  const updated = getDb().prepare('SELECT * FROM decision_threads WHERE id = ?').get(String(req.params.threadId));
+  res.json({ ok: true, thread: updated });
 });
 
 app.get('/api/projects/:id/autonomy', (req, res) => {
