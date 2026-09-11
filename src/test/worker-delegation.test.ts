@@ -10,10 +10,15 @@ interface Harness {
   tool: (name: string) => ToolLike;
   createAgentSession: ReturnType<typeof vi.fn>;
   sendToSession: ReturnType<typeof vi.fn>;
+  sendAgentMessage: ReturnType<typeof vi.fn>;
   cancelAgent: ReturnType<typeof vi.fn>;
+  endAgentSession: ReturnType<typeof vi.fn>;
+  endWorktreeAgentSessions: ReturnType<typeof vi.fn>;
+  resumeAgentSession: ReturnType<typeof vi.fn>;
   updated: Array<[string, Record<string, unknown>]>;
   setLiveAgent: (value: { sessionId: string } | undefined) => void;
   setDelegation: (value: Record<string, unknown> | undefined) => void;
+  setMergeRequest: (value: Record<string, unknown> | undefined) => void;
 }
 
 const projectId = 'p1';
@@ -54,17 +59,27 @@ async function buildTools(options: { interventionMode?: string } = {}): Promise<
 
   let liveWorktreeAgent: { sessionId: string } | undefined;
   let delegationForWorktree: Record<string, unknown> | undefined;
+  let mergeRequest: Record<string, unknown> | undefined;
   const updated: Array<[string, Record<string, unknown>]> = [];
+  const executeMerge = vi.fn(async () => ({ pullRequestUrl: 'https://example/pr/1' }));
 
   const createAgentSession = vi.fn(async () => ({ sessionId: 'worker-session-1' }));
   const sendToSession = vi.fn(async () => {});
+  const sendAgentMessage = vi.fn(async () => {});
   const cancelAgent = vi.fn(async () => {});
+  const endAgentSession = vi.fn(async () => {});
+  const endWorktreeAgentSessions = vi.fn(async () => []);
+  const resumeAgentSession = vi.fn(async () => ({ sessionId: 'worker-session-resumed' }));
 
   vi.doMock('../shared/db', () => ({ getDb: () => db }));
   vi.doMock('../shared/agent-bridge', () => ({
     createAgentSession,
     sendToSession,
+    sendAgentMessage,
     cancelAgent,
+    endAgentSession,
+    endWorktreeAgentSessions,
+    resumeAgentSession,
     findLiveWorktreeAgent: () => liveWorktreeAgent,
   }));
   vi.doMock('../shared/project-memory-store', () => ({
@@ -77,8 +92,8 @@ async function buildTools(options: { interventionMode?: string } = {}): Promise<
   }));
   vi.doMock('../shared/digest-store', () => ({ getDigest: () => undefined, listDigests: () => [] }));
   vi.doMock('../shared/merge-store', () => ({
-    executeApprovedMerge: vi.fn(),
-    getMergeRequest: vi.fn(),
+    executeApprovedMerge: executeMerge,
+    getMergeRequest: () => mergeRequest,
     resolveMergeRequest: vi.fn(),
   }));
   vi.doMock('../shared/cos-briefing-store', () => ({ recordCosBriefing: vi.fn() }));
@@ -111,10 +126,15 @@ async function buildTools(options: { interventionMode?: string } = {}): Promise<
     },
     createAgentSession,
     sendToSession,
+    sendAgentMessage,
     cancelAgent,
+    endAgentSession,
+    endWorktreeAgentSessions,
+    resumeAgentSession,
     updated,
     setLiveAgent: (value) => { liveWorktreeAgent = value; },
     setDelegation: (value) => { delegationForWorktree = value; },
+    setMergeRequest: (value: Record<string, unknown> | undefined) => { mergeRequest = value; },
   };
 }
 
@@ -186,7 +206,7 @@ describe('cancel_worker', () => {
     ]);
   });
 
-  it('stops a worker that is still live', async () => {
+  it('stops a worker that is still live and closes its session', async () => {
     const harness = await buildTools();
     harness.setDelegation({ id: 'deleg-1', status: 'working' });
     harness.setLiveAgent({ sessionId: 'worker-session-1' });
@@ -198,6 +218,8 @@ describe('cancel_worker', () => {
 
     expect(result.sessionId).toBe('worker-session-1');
     expect(harness.cancelAgent).toHaveBeenCalledWith('worker-session-1');
+    // Interrupting the turn alone left the session connected and idle forever.
+    expect(harness.endAgentSession).toHaveBeenCalledWith('worker-session-1');
   });
 
   // Without a delegation of its own there is nothing to close out, so a
@@ -210,5 +232,77 @@ describe('cancel_worker', () => {
     await expect(
       harness.tool('cancel_worker').handler({ worktreeId: 'wt-1', reason: 'cleanup' }),
     ).rejects.toThrow('No live worktree agent session found');
+  });
+});
+
+/**
+ * Worker sessions are released on a server restart and deliberately released
+ * once a delegation is closed out, but the conversation survives. Treating
+ * "not live in this process" as "gone" left the lead unable to answer a worker
+ * that was perfectly resumable.
+ */
+describe('nudge_worker', () => {
+  it('resumes a worker whose session is no longer live in this process', async () => {
+    const harness = await buildTools();
+    harness.setDelegation({ id: 'deleg-1', status: 'working', sessionId: 'worker-session-1' });
+    harness.setLiveAgent(undefined);
+
+    const result = (await harness.tool('nudge_worker').handler({
+      worktreeId: 'wt-1',
+      message: 'use the new parser API',
+    })) as { ok: boolean; sessionId: string };
+
+    expect(harness.resumeAgentSession).toHaveBeenCalledWith('user-1', 'worker-session-1');
+    expect(result.sessionId).toBe('worker-session-resumed');
+    expect(harness.sendAgentMessage).toHaveBeenCalledWith('worker-session-resumed', 'use the new parser API');
+  });
+
+  it('does not resume when the delegation never recorded a session', async () => {
+    const harness = await buildTools();
+    harness.setDelegation({ id: 'deleg-1', status: 'working' });
+    harness.setLiveAgent(undefined);
+
+    await expect(
+      harness.tool('nudge_worker').handler({ worktreeId: 'wt-1', message: 'hello' }),
+    ).rejects.toThrow('No live worktree agent session found');
+    expect(harness.resumeAgentSession).not.toHaveBeenCalled();
+  });
+
+  it('uses the live session without resuming when one is already open', async () => {
+    const harness = await buildTools();
+    harness.setDelegation({ id: 'deleg-1', status: 'working', sessionId: 'worker-session-1' });
+    harness.setLiveAgent({ sessionId: 'worker-session-1' });
+
+    await harness.tool('nudge_worker').handler({ worktreeId: 'wt-1', message: 'hello' });
+
+    expect(harness.resumeAgentSession).not.toHaveBeenCalled();
+    expect(harness.sendAgentMessage).toHaveBeenCalledWith('worker-session-1', 'hello');
+  });
+});
+
+/**
+ * Once the work is submitted the worker has nothing left to do, so its session
+ * is released rather than left connected forever.
+ */
+describe('approve_merge', () => {
+  it('releases the worktree worker session after the merge is executed', async () => {
+    const harness = await buildTools();
+    harness.setMergeRequest({ id: 'mr-1', projectId, worktreeId: 'wt-1' });
+
+    await harness.tool('approve_merge').handler({ requestId: 'mr-1', note: 'looks good' });
+
+    expect(harness.endWorktreeAgentSessions).toHaveBeenCalledWith(projectId, 'wt-1');
+  });
+
+  it('still returns the merge result when releasing the session fails', async () => {
+    const harness = await buildTools();
+    harness.setMergeRequest({ id: 'mr-1', projectId, worktreeId: 'wt-1' });
+    harness.endWorktreeAgentSessions.mockRejectedValueOnce(new Error('disconnect failed'));
+
+    const result = (await harness.tool('approve_merge').handler({ requestId: 'mr-1' })) as {
+      pullRequestUrl: string;
+    };
+
+    expect(result.pullRequestUrl).toBe('https://example/pr/1');
   });
 });

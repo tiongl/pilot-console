@@ -15,7 +15,7 @@ import { createProject, listProjects, getProjectById, updateProject, deleteProje
 import { listSessionsForUser, listAllSessions, getCopilotSessionDetail, listCopilotSessionsForProject } from '../shared/session-store';
 import { setupWebSocketServer } from './websocket';
 import { setupAgentWebSocketServer } from './agent-websocket';
-import { listAgentModels, detachAgentBridge, listLiveAgentSessions } from '../shared/agent-bridge';
+import { listAgentModels, detachAgentBridge, listLiveAgentSessions, endWorktreeAgentSessions } from '../shared/agent-bridge';
 import { getAllSessions, getAllSessionsWithExited, getSessionStatus, endCliSession, endSessionByProject, initDaemonBridge } from '../shared/cli-bridge';
 import { getDb } from '../shared/db';
 import { getDigest, listDigests, bootstrapDigest, reconcileDigest } from '../shared/digest-store';
@@ -528,9 +528,14 @@ app.get('/api/projects/:id/worktrees/:worktreeId/seed', (req, res) => {
   res.json({ seed: consumeWorktreeSeed(req.params.worktreeId) });
 });
 
-app.delete('/api/projects/:id/worktrees/:worktreeId', (req, res) => {
+app.delete('/api/projects/:id/worktrees/:worktreeId', async (req, res) => {
+  const projectId = String(req.params.id);
+  const worktreeId = String(req.params.worktreeId);
   try {
-    deleteWorktree(req.params.worktreeId, req.params.id);
+    // Any agent still running in this worktree is about to lose its working
+    // directory, so let it go before the directory disappears.
+    await endWorktreeAgentSessions(projectId, worktreeId);
+    deleteWorktree(worktreeId, projectId);
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });

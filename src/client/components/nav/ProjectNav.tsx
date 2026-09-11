@@ -3,7 +3,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router';
 import { FolderOpen, Pin, ChevronRight, ChevronDown, GitBranch, Plus, Trash2, LayoutDashboard } from 'lucide-react';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuLabel, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -26,6 +27,9 @@ export default function ProjectNav({ projects }: Props) {
   const [wtExistingPath, setWtExistingPath] = useState('');
   const [wtError, setWtError] = useState('');
   const [wtSaving, setWtSaving] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ projectId: string; worktree: Worktree } | null>(null);
+  const [deleteError, setDeleteError] = useState('');
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     fetch('/api/projects')
@@ -148,18 +152,28 @@ export default function ProjectNav({ projects }: Props) {
     }
   };
 
-  const handleDeleteWorktree = async (e: React.MouseEvent, projectId: string, worktreeId: string, isManaged: boolean) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const message = isManaged
-      ? 'Remove this worktree? The worktree directory will be deleted.'
-      : 'Remove this worktree from Pilot Console? The existing directory will not be deleted.';
-    if (!confirm(message)) return;
+  const requestDeleteWorktree = (projectId: string, worktree: Worktree) => {
+    setDeleteError('');
+    setDeleteTarget({ projectId, worktree });
+  };
+
+  const confirmDeleteWorktree = async () => {
+    if (!deleteTarget) return;
+    const { projectId, worktree } = deleteTarget;
+    setDeleting(true);
+    setDeleteError('');
     try {
-      await fetch(`/api/projects/${projectId}/worktrees/${worktreeId}`, { method: 'DELETE' });
+      const res = await fetch(`/api/projects/${projectId}/worktrees/${worktree.id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error || 'Could not remove the worktree');
+      }
       await fetchWorktrees(projectId);
-    } catch {
-      // ignore
+      setDeleteTarget(null);
+    } catch (err) {
+      setDeleteError((err as Error).message);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -237,22 +251,40 @@ export default function ProjectNav({ projects }: Props) {
             {isExpanded && worktrees.length > 0 && (
               <div className="ml-4 border-l pl-2 mb-1">
                 {worktrees.map(wt => (
-                  <Link
-                    key={wt.id}
-                    to={`/projects/${project.id}/worktrees/${wt.id}/chat`}
-                    className="group/wt flex items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-accent hover:text-accent-foreground transition-colors"
-                  >
-                    <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                    <span className="truncate flex-1">{wt.name}</span>
-                    <span className="text-[10px] text-muted-foreground truncate max-w-[60px]">{wt.branch}</span>
-                    <button
-                      onClick={(e) => handleDeleteWorktree(e, project.id, wt.id, wt.isManaged)}
-                      className="h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 group-hover/wt:opacity-100 hover:text-destructive transition-opacity"
-                      title="Remove worktree"
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </button>
-                  </Link>
+                  <ContextMenu key={wt.id}>
+                    <ContextMenuTrigger className="block">
+                      <Link
+                        to={`/projects/${project.id}/worktrees/${wt.id}/chat`}
+                        className="group/wt flex items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-accent hover:text-accent-foreground transition-colors"
+                      >
+                        <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span className="truncate flex-1">{wt.name}</span>
+                        <span className="text-[10px] text-muted-foreground truncate max-w-[60px]">{wt.branch}</span>
+                        <button
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            requestDeleteWorktree(project.id, wt);
+                          }}
+                          className="h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 group-hover/wt:opacity-100 hover:text-destructive transition-opacity"
+                          title="Remove worktree"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </Link>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent>
+                      <ContextMenuLabel className="truncate">{wt.name}</ContextMenuLabel>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem
+                        variant="destructive"
+                        onClick={() => requestDeleteWorktree(project.id, wt)}
+                      >
+                        <Trash2 />
+                        {wt.isManaged ? 'Delete worktree…' : 'Remove from Pilot Console…'}
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
                 ))}
               </div>
             )}
@@ -264,6 +296,56 @@ export default function ProjectNav({ projects }: Props) {
           </div>
         );
       })}
+
+      <Dialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => {
+          if (!open && !deleting) {
+            setDeleteTarget(null);
+            setDeleteError('');
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {deleteTarget?.worktree.isManaged ? 'Delete worktree?' : 'Remove worktree?'}
+            </DialogTitle>
+            <DialogDescription>
+              {deleteTarget?.worktree.isManaged
+                ? 'The worktree directory will be deleted from disk, including any uncommitted changes. Commits already pushed to the branch are unaffected. This cannot be undone.'
+                : 'This worktree will be removed from Pilot Console. The directory on disk is left untouched.'}
+            </DialogDescription>
+          </DialogHeader>
+          {deleteTarget && (
+            <div className="rounded-md border px-3 py-2 text-xs">
+              <div className="flex items-center gap-2">
+                <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span className="font-medium truncate">{deleteTarget.worktree.name}</span>
+              </div>
+              <p className="mt-1 text-muted-foreground break-all">{deleteTarget.worktree.branch}</p>
+              <p className="text-muted-foreground break-all">{deleteTarget.worktree.worktreePath}</p>
+            </div>
+          )}
+          {deleteError && <p className="text-xs text-destructive">{deleteError}</p>}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={deleting}
+              onClick={() => {
+                setDeleteTarget(null);
+                setDeleteError('');
+              }}
+            >
+              Cancel
+            </Button>
+            <Button type="button" variant="destructive" disabled={deleting} onClick={confirmDeleteWorktree}>
+              {deleting ? 'Removing…' : deleteTarget?.worktree.isManaged ? 'Delete' : 'Remove'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={!!showAddDialog} onOpenChange={(open) => !open && setShowAddDialog(null)}>
         <DialogContent className="sm:max-w-md">

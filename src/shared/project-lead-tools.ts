@@ -96,6 +96,30 @@ export function reviewPlanForWorker(
   return { action, reason };
 }
 
+/**
+ * Get a usable session handle for a worker, resuming it when it is not live in
+ * this process.
+ *
+ * A worker's runtime session is released on a server restart, and deliberately
+ * released once its delegation is closed out, but the conversation itself
+ * survives. Treating "not in memory" as "gone" left the lead unable to talk to
+ * a worker that was perfectly resumable.
+ */
+async function findOrResumeWorker(projectId: string, worktreeId: string, userId?: string) {
+  const { findLiveWorktreeAgent, resumeAgentSession } = await import('./agent-bridge');
+  const live = findLiveWorktreeAgent(projectId, worktreeId);
+  if (live) return live;
+
+  const delegation = getDelegationForWorktree(worktreeId);
+  if (!delegation?.sessionId || !userId) return undefined;
+  try {
+    return await resumeAgentSession(userId, delegation.sessionId);
+  } catch (err) {
+    console.error(`[project-lead-tools] Could not resume worker ${delegation.sessionId}:`, err);
+    return undefined;
+  }
+}
+
 export function createProjectLeadTools(
   projectId: string,
   userId?: string,
@@ -367,7 +391,17 @@ export function createProjectLeadTools(
         if (!request || request.projectId !== projectId) throw new Error('Merge request does not belong to this project');
         resolveMergeRequest(requestId, 'approved', note);
         audit(projectId, 'approve_merge', note ?? 'Approved merge request');
-        return executeApprovedMerge(requestId);
+        const result = await executeApprovedMerge(requestId);
+        // The work is submitted, so the worker has nothing left to do. Release
+        // its runtime session; nudge_worker resumes the conversation if the
+        // lead needs follow-up changes. Cleanup must never fail the merge.
+        try {
+          const { endWorktreeAgentSessions } = await import('./agent-bridge');
+          await endWorktreeAgentSessions(projectId, request.worktreeId);
+        } catch (err) {
+          console.error(`[project-lead-tools] Could not release worker session for ${request.worktreeId}:`, err);
+        }
+        return result;
       },
       skipPermission: true,
       defer: 'never',
@@ -529,9 +563,9 @@ export function createProjectLeadTools(
         if (!isOwnWorker && interventionMode(projectId) === 'flag_only') {
           throw new Error('Worker nudges are disabled by project autonomy settings');
         }
-        const { findLiveWorktreeAgent, sendAgentMessage } = await import('./agent-bridge');
-        const session = findLiveWorktreeAgent(projectId, worktreeId);
+        const session = await findOrResumeWorker(projectId, worktreeId, userId);
         if (!session) throw new Error('No live worktree agent session found');
+        const { sendAgentMessage } = await import('./agent-bridge');
         await sendAgentMessage(session.sessionId, message);
         if (isOwnWorker) markWorktreeDelegation(worktreeId, { status: 'working', unread: false });
         audit(projectId, 'nudge_worker', message, 'medium');
@@ -552,7 +586,7 @@ export function createProjectLeadTools(
         if (!own && interventionMode(projectId) !== 'flag_nudge_cancel') {
           throw new Error('Worker cancellation is disabled by project autonomy settings');
         }
-        const { cancelAgent, findLiveWorktreeAgent } = await import('./agent-bridge');
+        const { cancelAgent, endAgentSession, findLiveWorktreeAgent } = await import('./agent-bridge');
         const session = findLiveWorktreeAgent(projectId, worktreeId);
         if (own) updateDelegation(own.id, { status: 'cancelled', note: reason, unread: false });
         audit(projectId, 'cancel_worker', reason, 'high');
@@ -568,8 +602,12 @@ export function createProjectLeadTools(
             note: `That worker had already stopped, so there was nothing to interrupt. The delegation is closed. ${redelegate}`,
           };
         }
+        // Interrupt the turn, then release the runtime session. Cancelling only
+        // the turn left the session connected and idle forever; the transcript
+        // is persisted and the conversation stays resumable either way.
         await cancelAgent(session.sessionId);
-        return { ok: true, sessionId: session.sessionId, note: `Worker stopped. ${redelegate}` };
+        await endAgentSession(session.sessionId);
+        return { ok: true, sessionId: session.sessionId, note: `Worker stopped and its session closed. ${redelegate}` };
       },
       skipPermission: true,
       defer: 'never',

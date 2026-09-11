@@ -2566,6 +2566,24 @@ export async function endAgentSession(sessionId: string): Promise<void> {
   }
 }
 
+/**
+ * Release every live agent session bound to a worktree.
+ *
+ * Deleting a worktree pulls the directory out from under any agent still
+ * working in it, so the sessions are ended first: a session left holding a
+ * deleted cwd keeps a runtime connection open and fails every later tool call.
+ * Returns the session ids that were ended.
+ */
+export async function endWorktreeAgentSessions(projectId: string, worktreeId: string): Promise<string[]> {
+  const ids = [...agentSessions.values()]
+    .filter((s) => s.projectId === projectId && s.worktreeId === worktreeId)
+    .map((s) => s.sessionId);
+  for (const id of ids) {
+    await endAgentSession(id);
+  }
+  return ids;
+}
+
 /** Graceful shutdown — persist and disconnect all agent sessions. */
 export async function shutdownAgentBridge(): Promise<void> {
   const ids = [...agentSessions.keys()];
