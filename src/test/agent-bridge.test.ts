@@ -13,6 +13,9 @@ import {
   emptyAgentUsage,
   cwdMatches,
   buildToolsForKind,
+  sliceReplayTail,
+  sliceReplayBefore,
+  serializeTranscriptWithinBudget,
   type AgentSession,
   type AgentSubscriber,
 } from '../shared/agent-bridge';
@@ -620,5 +623,83 @@ describe('buildToolsForKind', () => {
 
   it('gives plain agent sessions with no worktree no extra tools', () => {
     expect(buildToolsForKind('agent', null, null)).toBeUndefined();
+  });
+});
+
+describe('transcript replay windowing', () => {
+  const makeTranscript = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      kind: 'assistant',
+      id: `e${i}`,
+      ts: i,
+      text: `m${i}`,
+    })) as unknown as Parameters<typeof sliceReplayTail>[0];
+
+  it('sends the whole transcript when it fits the window', () => {
+    const { events, hasMore } = sliceReplayTail(makeTranscript(5), 10);
+    expect(events).toHaveLength(5);
+    expect(hasMore).toBe(false);
+  });
+
+  it('sends only the tail and flags that older events remain', () => {
+    const { events, hasMore } = sliceReplayTail(makeTranscript(50), 10);
+    expect(events).toHaveLength(10);
+    expect((events[0] as unknown as { id: string }).id).toBe('e40');
+    expect((events[9] as unknown as { id: string }).id).toBe('e49');
+    expect(hasMore).toBe(true);
+  });
+
+  it('returns the slice preceding an anchor id', () => {
+    const { events, hasMore } = sliceReplayBefore(makeTranscript(50), 'e40', 10);
+    expect((events[0] as unknown as { id: string }).id).toBe('e30');
+    expect((events[9] as unknown as { id: string }).id).toBe('e39');
+    expect(hasMore).toBe(true);
+  });
+
+  it('reports no more once the start of the transcript is reached', () => {
+    const { events, hasMore } = sliceReplayBefore(makeTranscript(50), 'e5', 10);
+    expect(events).toHaveLength(5);
+    expect((events[0] as unknown as { id: string }).id).toBe('e0');
+    expect(hasMore).toBe(false);
+  });
+
+  it('treats a trimmed-away anchor as nothing earlier to send', () => {
+    const { events, hasMore } = sliceReplayBefore(makeTranscript(50), 'gone', 10);
+    expect(events).toEqual([]);
+    expect(hasMore).toBe(false);
+  });
+});
+
+describe('transcript byte budget', () => {
+  it('leaves a small transcript untouched', () => {
+    const { session } = makeSession();
+    session.transcript = [
+      { kind: 'assistant', id: 'a', ts: 1, text: 'hello' },
+    ] as unknown as typeof session.transcript;
+    const json = serializeTranscriptWithinBudget(session);
+    expect(session.transcript).toHaveLength(1);
+    expect(JSON.parse(json)).toHaveLength(1);
+  });
+
+  it('drops the oldest events once the serialized transcript is over budget', () => {
+    const { session } = makeSession();
+    const chunk = 'x'.repeat(100_000);
+    session.transcript = Array.from({ length: 120 }, (_, i) => ({
+      kind: 'assistant',
+      id: `e${i}`,
+      ts: i,
+      text: chunk,
+    })) as unknown as typeof session.transcript;
+
+    const json = serializeTranscriptWithinBudget(session);
+
+    expect(json.length).toBeLessThanOrEqual(8 * 1024 * 1024);
+    expect(session.transcript.length).toBeLessThan(120);
+    // The newest events survive; the oldest are the ones dropped.
+    const ids = session.transcript.map((e) => (e as unknown as { id: string }).id);
+    expect(ids[ids.length - 1]).toBe('e119');
+    expect(ids).not.toContain('e0');
+    // The returned JSON reflects the trimmed transcript, not the original.
+    expect(JSON.parse(json)).toHaveLength(session.transcript.length);
   });
 });

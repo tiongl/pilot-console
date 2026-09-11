@@ -219,7 +219,9 @@ export type AgentClientMessage =
   | { type: 'share_session'; mode: AgentShareMode }
   // Report the current GitHub share status.
   | { type: 'get_share_status' }
-  | { type: 'replay' };
+  | { type: 'replay' }
+  // Pull the transcript slice preceding the oldest event the client holds.
+  | { type: 'fetch_earlier'; beforeId?: string };
 
 /** Server → Client messages for the `/ws/agent` socket. */
 export type AgentServerMessage =
@@ -232,7 +234,11 @@ export type AgentServerMessage =
       /** Wall-clock start of the in-flight turn (the user's request), if busy. */
       turnStartedAt?: number | null;
     }
-  | { type: 'replay'; events: AgentTranscriptEvent[] }
+  // The tail of the conversation. `hasMore` means older events exist on the
+  // server and can be pulled with `fetch_earlier`.
+  | { type: 'replay'; events: AgentTranscriptEvent[]; hasMore?: boolean }
+  // An older slice, in response to `fetch_earlier`; prepended by the client.
+  | { type: 'earlier'; events: AgentTranscriptEvent[]; hasMore: boolean }
   // Upsert (create or update) a transcript entry, keyed by `event.id`.
   | { type: 'event'; event: AgentTranscriptEvent }
   // Streaming text deltas appended to an existing entry (live-only, not replayed).

@@ -35,6 +35,25 @@ import type {
 } from '@github/copilot-sdk';
 
 const MAX_TRANSCRIPT_EVENTS = 5_000;
+/**
+ * Hard ceiling on the serialized transcript kept in memory and persisted to
+ * `cli_sessions.output_log`.
+ *
+ * The event count alone is not a real bound — 5,000 events of large tool
+ * output is hundreds of megabytes — and `output_log` is rewritten in full on
+ * every save, so an unbounded transcript makes every save and every replay
+ * more expensive. Trimming loses nothing durable: the runtime keeps the
+ * complete event log on disk and a resume rebuilds from it.
+ */
+const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
+/** Trim well under the ceiling so the next several saves do not re-trim. */
+const TRANSCRIPT_TRIM_TARGET_BYTES = Math.floor(MAX_TRANSCRIPT_BYTES * 0.8);
+/**
+ * How many transcript events a client receives when it connects. Older events
+ * are fetched on demand, so opening a long conversation does not ship the
+ * whole history over the socket.
+ */
+export const REPLAY_WINDOW = 800;
 const SAVE_DEBOUNCE_MS = 1_500;
 const TOOL_RECONCILE_MS = 5_000;
 /** How often a busy session double-checks liveness against the runtime. */
@@ -1426,9 +1445,37 @@ function scheduleSave(session: AgentSession): void {
   }, SAVE_DEBOUNCE_MS);
 }
 
+/**
+ * Serialize the transcript, first dropping the oldest events if it exceeds the
+ * byte budget.
+ *
+ * Callers were about to stringify anyway, so the JSON is returned rather than
+ * recomputed. The expensive per-event measuring pass only runs when the
+ * transcript is actually over budget, and the trim goes well below the ceiling
+ * so it does not re-trigger on the next save.
+ */
+export function serializeTranscriptWithinBudget(session: AgentSession): string {
+  const json = JSON.stringify(session.transcript);
+  if (json.length <= MAX_TRANSCRIPT_BYTES) return json;
+
+  const sizes = session.transcript.map((event) => JSON.stringify(event).length + 1);
+  let total = sizes.reduce((sum, size) => sum + size, 0);
+  let drop = 0;
+  while (drop < sizes.length && total > TRANSCRIPT_TRIM_TARGET_BYTES) {
+    total -= sizes[drop];
+    drop++;
+  }
+  if (drop === 0) return json;
+  session.transcript.splice(0, drop);
+  console.log(
+    `[agent-bridge] trimmed ${drop} oldest events from ${session.sessionId} to stay within the transcript budget`,
+  );
+  return JSON.stringify(session.transcript);
+}
+
 function persistTranscript(session: AgentSession, ended = false): void {
   try {
-    const json = JSON.stringify(session.transcript);
+    const json = serializeTranscriptWithinBudget(session);
     if (ended) {
       getDb()
         .prepare("UPDATE cli_sessions SET output_log = ?, ended_at = datetime('now') WHERE id = ?")
@@ -2201,6 +2248,10 @@ async function resumeAgentSessionUncached(
     // restore the session-wide cost.
     session.usage = emptyAgentUsage();
     for (const event of replayed) handleSdkEvent(session, event);
+    // The runtime's log is the full history (far larger than what we keep), so
+    // bring the rebuilt transcript back inside the budget before any client
+    // attaches to it.
+    serializeTranscriptWithinBudget(session);
   }
   setStatus(session, deriveStatusFromEvents(replayed));
 
@@ -2341,8 +2392,52 @@ export function subscribe(sessionId: string, subscriber: AgentSubscriber): () =>
   };
 }
 
-export function getReplay(sessionId: string): AgentTranscriptEvent[] {
-  return agentSessions.get(sessionId)?.transcript ?? [];
+export function sliceReplayTail(
+  transcript: AgentTranscriptEvent[],
+  limit = REPLAY_WINDOW,
+): { events: AgentTranscriptEvent[]; hasMore: boolean } {
+  if (transcript.length <= limit) return { events: transcript, hasMore: false };
+  return { events: transcript.slice(-limit), hasMore: true };
+}
+
+/**
+ * The slice immediately preceding `beforeId`.
+ *
+ * Anchoring on an event id rather than an index keeps this correct while the
+ * transcript is being appended to or trimmed underneath us. An id we no longer
+ * hold means it was trimmed away, so there is nothing earlier to send.
+ */
+export function sliceReplayBefore(
+  transcript: AgentTranscriptEvent[],
+  beforeId: string | undefined,
+  limit = REPLAY_WINDOW,
+): { events: AgentTranscriptEvent[]; hasMore: boolean } {
+  const end = beforeId ? transcript.findIndex((event) => event.id === beforeId) : transcript.length;
+  if (end <= 0) return { events: [], hasMore: false };
+  const start = Math.max(0, end - limit);
+  return { events: transcript.slice(start, end), hasMore: start > 0 };
+}
+
+/**
+ * The tail of a session's transcript, plus whether older events remain.
+ *
+ * Shipping the whole transcript on every connect is what made opening a long
+ * conversation expensive; clients render a window anyway and pull older slices
+ * through `getEarlierReplay` only when the user asks for them.
+ */
+export function getReplay(
+  sessionId: string,
+  limit = REPLAY_WINDOW,
+): { events: AgentTranscriptEvent[]; hasMore: boolean } {
+  return sliceReplayTail(agentSessions.get(sessionId)?.transcript ?? [], limit);
+}
+
+export function getEarlierReplay(
+  sessionId: string,
+  beforeId: string | undefined,
+  limit = REPLAY_WINDOW,
+): { events: AgentTranscriptEvent[]; hasMore: boolean } {
+  return sliceReplayBefore(agentSessions.get(sessionId)?.transcript ?? [], beforeId, limit);
 }
 
 export async function reconcileAgentSession(sessionId: string): Promise<void> {

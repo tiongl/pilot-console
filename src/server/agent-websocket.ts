@@ -7,6 +7,7 @@ import {
   findAgentSession,
   subscribe,
   getReplay,
+  getEarlierReplay,
   getPendingAgentMessages,
   reconcileAgentSession,
   sendAgentMessage,
@@ -160,7 +161,7 @@ export function setupAgentWebSocketServer(): WebSocketServer {
       status: session.status,
       turnStartedAt: session.turnStartTs,
     });
-    send({ type: 'replay', events: getReplay(sessionId) });
+    send({ type: 'replay', ...getReplay(sessionId) });
     for (const message of getPendingAgentMessages(sessionId)) send(message);
     void reconcileAgentSession(sessionId);
 
@@ -228,7 +229,10 @@ export function setupAgentWebSocketServer(): WebSocketServer {
           send({ type: 'share_status', status: getAgentShareStatus(sessionId) });
           break;
         case 'replay':
-          send({ type: 'replay', events: getReplay(sessionId) });
+          send({ type: 'replay', ...getReplay(sessionId) });
+          break;
+        case 'fetch_earlier':
+          send({ type: 'earlier', ...getEarlierReplay(sessionId, msg.beforeId) });
           break;
       }
     });

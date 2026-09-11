@@ -339,6 +339,13 @@ export default function AgentPane({
   sessionKind = 'agent',
 }: Props) {
   const [events, setEvents] = useState<AgentTranscriptEvent[]>([]);
+  // Older events stay on the server until the user asks for them, so a long
+  // conversation does not ship its whole history on connect.
+  const [hasEarlier, setHasEarlier] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  // Only render the most recent `renderLimit` items to bound DOM size; older
+  // items stay in state (and scroll history) but are revealed on demand.
+  const [renderLimit, setRenderLimit] = useState(RENDER_WINDOW);
   const [status, setStatus] = useState<AgentStatus>('idle');
   /** Follow-ups typed mid-turn, held server-side until the current turn ends. */
   const [queued, setQueued] = useState<string[]>([]);
@@ -444,11 +451,25 @@ export default function AgentPane({
           break;
         case 'replay':
           setEvents(msg.events.filter((e) => e.kind !== 'system'));
+          setHasEarlier(msg.hasMore ?? false);
+          setLoadingEarlier(false);
+          setRenderLimit(RENDER_WINDOW);
           // A replay is a fresh render of the whole conversation (first
           // connect, reconnect, or a manual refresh) — always land at the end.
           atBottomRef.current = true;
           setAtBottom(true);
           break;
+        case 'earlier': {
+          const older = msg.events.filter((e) => e.kind !== 'system');
+          setHasEarlier(msg.hasMore);
+          setLoadingEarlier(false);
+          if (older.length === 0) break;
+          setEvents((prev) => [...older, ...prev]);
+          // Reveal what was just fetched instead of hiding it behind another
+          // click, and stay where the user was reading rather than jumping.
+          setRenderLimit((n) => n + older.length);
+          break;
+        }
         case 'event':
           if (msg.event.kind !== 'system') upsert(msg.event);
           break;
@@ -697,7 +718,6 @@ export default function AgentPane({
 
   // Only render the most recent `renderLimit` items to bound DOM size; older
   // items stay in state (and scroll history) but are revealed on demand.
-  const [renderLimit, setRenderLimit] = useState(RENDER_WINDOW);
   const windowedItems =
     renderItems.length > renderLimit ? renderItems.slice(-renderLimit) : renderItems;
   const earlierCount = renderItems.length - windowedItems.length;
@@ -856,6 +876,8 @@ export default function AgentPane({
 
   const clearSession = useCallback(() => {
     setEvents([]);
+    setHasEarlier(false);
+    setLoadingEarlier(false);
     setPermissions([]);
     setExitPlans([]);
     setSubcommandPrompt(null);
@@ -1011,6 +1033,8 @@ export default function AgentPane({
     if (id === sessionId) return;
     // Clear the local view; the server replays the target session's transcript.
     setEvents([]);
+    setHasEarlier(false);
+    setLoadingEarlier(false);
     setPermissions([]);
     setExitPlans([]);
     setQueued([]);
@@ -1734,7 +1758,7 @@ export default function AgentPane({
             All output is hidden by the current filters.
           </div>
         )}
-        {earlierCount > 0 && (
+        {earlierCount > 0 ? (
           <div className="text-center">
             <button
               type="button"
@@ -1745,7 +1769,23 @@ export default function AgentPane({
               Show {Math.min(RENDER_WINDOW, earlierCount)} earlier of {earlierCount} hidden
             </button>
           </div>
-        )}
+        ) : hasEarlier ? (
+          <div className="text-center">
+            <button
+              type="button"
+              disabled={loadingEarlier}
+              data-testid="agent-fetch-earlier"
+              onClick={() => {
+                setLoadingEarlier(true);
+                send({ type: 'fetch_earlier', beforeId: events[0]?.id });
+              }}
+              className="text-xs px-3 py-1 rounded-full border disabled:opacity-50"
+              style={{ borderColor: appearance.border, color: appearance.muted }}
+            >
+              {loadingEarlier ? 'Loading earlier…' : 'Load earlier messages'}
+            </button>
+          </div>
+        ) : null}
         {windowedItems.map((item) => {
           const isMatch = searchMatches.includes(item.key);
           return (

@@ -791,6 +791,45 @@ describe('AgentPane', () => {
     await waitFor(() => expect(screen.getByText('message 100')).toBeTruthy());
   });
 
+
+  it('pulls older transcript slices from the server when the local window runs out', async () => {
+    renderPane();
+    const events = Array.from({ length: 5 }, (_, i) => ({
+      kind: 'user' as const,
+      id: `u${i}`,
+      ts: i,
+      content: `message ${i}`,
+    }));
+    // A short tail plus `hasMore`: everything local is already on screen, so
+    // the only way to see more is to ask the server.
+    emit({ type: 'replay', events, hasMore: true });
+    await waitFor(() => expect(screen.getByText('message 4')).toBeTruthy());
+
+    hooked.send.mockClear();
+    fireEvent.click(screen.getByTestId('agent-fetch-earlier'));
+    expect(hooked.send).toHaveBeenCalledWith({ type: 'fetch_earlier', beforeId: 'u0' });
+
+    emit({
+      type: 'earlier',
+      events: [{ kind: 'user' as const, id: 'old1', ts: -1, content: 'ancient message' }],
+      hasMore: false,
+    });
+    // The fetched slice is rendered immediately, not hidden behind another click.
+    await waitFor(() => expect(screen.getByText('ancient message')).toBeTruthy());
+    expect(screen.queryByTestId('agent-fetch-earlier')).toBeNull();
+  });
+
+  it('does not offer a server fetch when the whole transcript is already loaded', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [{ kind: 'user' as const, id: 'u0', ts: 0, content: 'only message' }],
+      hasMore: false,
+    });
+    await waitFor(() => expect(screen.getByText('only message')).toBeTruthy());
+    expect(screen.queryByTestId('agent-fetch-earlier')).toBeNull();
+  });
+
   it('shows the token/credit usage badge in the header', async () => {
     renderPane();
     emit({
