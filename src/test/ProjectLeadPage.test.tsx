@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router';
 
 /**
@@ -125,5 +125,59 @@ describe('ProjectLeadPage worker tabs', () => {
 
     const pane = await screen.findByTestId('pane-project_lead-lead');
     expect(pane.parentElement?.style.display).toBe('block');
+  });
+});
+
+/**
+ * The details column used to grow the page instead of scrolling inside itself,
+ * so a project with a long audit trail pushed the conversation off screen.
+ */
+describe('ProjectLeadPage details panel', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('scrolls inside its own panel rather than growing the page', async () => {
+    await renderPage();
+
+    const panel = await screen.findByTestId('lead-side-panel');
+    expect(panel.className).toContain('xl:overflow-y-auto');
+    expect(panel.className).toContain('xl:min-h-0');
+  });
+
+  it('hides and restores the panel from the toggle', async () => {
+    await renderPage();
+
+    const toggle = await screen.findByTestId('lead-side-panel-toggle');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.queryByTestId('lead-side-panel')).toBeNull());
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+
+    fireEvent.click(toggle);
+    expect(await screen.findByTestId('lead-side-panel')).toBeTruthy();
+  });
+
+  it('remembers that the panel was hidden', async () => {
+    await renderPage();
+    fireEvent.click(await screen.findByTestId('lead-side-panel-toggle'));
+    await waitFor(() => expect(localStorage.getItem('pilot-console:lead-side-panel')).toBe('hidden'));
+
+    cleanup();
+    await renderPage();
+
+    await screen.findByTestId('lead-side-panel-toggle');
+    expect(screen.queryByTestId('lead-side-panel')).toBeNull();
+  });
+
+  it('gives the conversation the full width once the panel is hidden', async () => {
+    await renderPage();
+    const toggle = await screen.findByTestId('lead-side-panel-toggle');
+    const grid = toggle.closest('div.grid');
+
+    expect(grid?.className).toContain('xl:grid-cols-[minmax(0,1fr)_22rem]');
+    fireEvent.click(toggle);
+    await waitFor(() => expect(grid?.className).toContain('xl:grid-cols-[minmax(0,1fr)]'));
   });
 });

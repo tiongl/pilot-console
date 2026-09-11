@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router';
-import { Compass, Users, ChevronRight } from 'lucide-react';
+import { Compass, Users, ChevronRight, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import AgentPane from '../components/terminal/AgentPane';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
@@ -27,6 +27,8 @@ interface DecisionThread {
   updated_at: string;
 }
 interface ProjectMemory { summary: string; source: string | null; updatedAt: string | null; }
+
+const SIDE_PANEL_LS_KEY = 'pilot-console:lead-side-panel';
 interface Delegation {
   id: string;
   worktreeId: string;
@@ -52,6 +54,22 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
   const [refreshingMemory, setRefreshingMemory] = useState(false);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
+  // Remembered per browser so the pane does not reappear on every visit.
+  const [sidePanelOpen, setSidePanelOpen] = useState(() => {
+    try {
+      return localStorage.getItem(SIDE_PANEL_LS_KEY) !== 'hidden';
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDE_PANEL_LS_KEY, sidePanelOpen ? 'shown' : 'hidden');
+    } catch {
+      /* private mode — the toggle still works for this session */
+    }
+  }, [sidePanelOpen]);
 
   const refresh = () => {
     Promise.all([
@@ -141,11 +159,30 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
   ];
 
   return (
-    <div className="grid h-[calc(100vh-4rem)] grid-cols-1 gap-4 overflow-auto p-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
-      <div className="flex min-h-[32rem] flex-col">
-      <div className="mb-3">
-        <h2 className="text-xl font-semibold">Project Lead</h2>
-        <p className="text-sm text-muted-foreground">Project-scoped planning and coordination</p>
+    <div
+      className={`grid h-[calc(100vh-4rem)] grid-cols-1 gap-4 overflow-auto p-4 xl:min-h-0 xl:overflow-hidden ${
+        sidePanelOpen ? 'xl:grid-cols-[minmax(0,1fr)_22rem]' : 'xl:grid-cols-[minmax(0,1fr)]'
+      }`}
+    >
+      <div className="flex min-h-[32rem] flex-col xl:min-h-0">
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <div>
+          <h2 className="text-xl font-semibold">Project Lead</h2>
+          <p className="text-sm text-muted-foreground">Project-scoped planning and coordination</p>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          className="shrink-0"
+          aria-expanded={sidePanelOpen}
+          aria-controls="lead-side-panel"
+          data-testid="lead-side-panel-toggle"
+          title={sidePanelOpen ? 'Hide memory, decisions and recent actions' : 'Show memory, decisions and recent actions'}
+          onClick={() => setSidePanelOpen((open) => !open)}
+        >
+          {sidePanelOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+          <span className="ml-1.5">{sidePanelOpen ? 'Hide details' : 'Details'}</span>
+        </Button>
       </div>
       <div role="tablist" aria-label="Project Lead and workers" className="mb-2 flex flex-wrap items-center gap-1">
         {tabs.map((tab) => (
@@ -195,7 +232,12 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
         ))}
       </div>
       </div>
-      <div className="space-y-4">
+      {sidePanelOpen && (
+      <div
+        id="lead-side-panel"
+        data-testid="lead-side-panel"
+        className="space-y-4 xl:min-h-0 xl:overflow-y-auto xl:pr-1"
+      >
         <Card>
           <CardHeader className="flex-row items-center justify-between space-y-0">
             <CardTitle className="text-base">Project memory</CardTitle>
@@ -221,7 +263,7 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
             <CardTitle className="text-base">Decision threads</CardTitle>
             <Button size="sm" variant="ghost" onClick={refresh}>Refresh</Button>
           </CardHeader>
-          <CardContent className="max-h-96 space-y-2 overflow-y-auto">
+          <CardContent className="space-y-2">
             {threads.length === 0 ? <p className="text-sm text-muted-foreground">No handoffs recorded.</p> : threads.map((thread) => {
               const isOpen = openThreadId === thread.id;
               const unresolved = !['resolved', 'confirmed', 'closed'].includes(thread.status);
@@ -272,7 +314,7 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
             <CardTitle className="text-base">Recent actions</CardTitle>
             {audit.length > 0 && <span className="text-xs text-muted-foreground">{audit.length}</span>}
           </CardHeader>
-          <CardContent className="max-h-72 space-y-2 overflow-y-auto">
+          <CardContent className="space-y-2">
             {audit.length === 0 ? <p className="text-sm text-muted-foreground">No Project Lead actions yet.</p> : audit.map((entry) => {
               const linkedThread = entry.subject_id ? threads.find((t) => t.id === entry.subject_id) : undefined;
               return (
@@ -298,6 +340,7 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
           </CardContent>
         </Card>
       </div>
+      )}
     </div>
   );
 }
