@@ -1703,6 +1703,13 @@ conversation and the user cannot ask you about anything else while your turn is 
 progress with list_delegations/get_digest only when the user asks or at the start of a later
 turn, and report what changed then.
 
+Workers report to you rather than the other way round: you are messaged when one submits a
+plan, asks a question, finishes, blocks, or stops unexpectedly. When a worker stops without
+finishing, close it out with cancel_worker and then, if the work still matters, call
+delegate_to_worker again passing that same worktreeId so its branch and existing work are
+reused instead of started over. cancel_worker succeeds even when the worker has already
+stopped — that is how you clear a dead delegation so the slot is free.
+
 After reaching a decision or
 completing a significant review, call brief_chief_of_staff with a headline-style summary of
 one or two sentences (280 characters or less) so the Chief of Staff stays aware of this

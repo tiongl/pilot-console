@@ -555,10 +555,21 @@ export function createProjectLeadTools(
         const { cancelAgent, findLiveWorktreeAgent } = await import('./agent-bridge');
         const session = findLiveWorktreeAgent(projectId, worktreeId);
         if (own) updateDelegation(own.id, { status: 'cancelled', note: reason, unread: false });
-        if (!session) throw new Error('No live worktree agent session found');
-        await cancelAgent(session.sessionId);
         audit(projectId, 'cancel_worker', reason, 'high');
-        return { ok: true, sessionId: session.sessionId };
+        const redelegate = `You can start fresh work in this worktree with delegate_to_worker using worktreeId "${worktreeId}".`;
+        if (!session) {
+          // A worker whose session already ended is in exactly the state
+          // cancelling is meant to produce. Reporting that as a failure left
+          // the lead unable to close out a dead worker and move on.
+          if (!own) throw new Error('No live worktree agent session found');
+          return {
+            ok: true,
+            sessionId: null,
+            note: `That worker had already stopped, so there was nothing to interrupt. The delegation is closed. ${redelegate}`,
+          };
+        }
+        await cancelAgent(session.sessionId);
+        return { ok: true, sessionId: session.sessionId, note: `Worker stopped. ${redelegate}` };
       },
       skipPermission: true,
       defer: 'never',

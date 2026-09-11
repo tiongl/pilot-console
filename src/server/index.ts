@@ -27,6 +27,7 @@ import { revealPathInFileSystem } from './file-system';
 import scheduleRoutes from './routes/schedules';
 import githubRoutes from './routes/github';
 import { startScheduler } from './scheduler';
+import { startDelegationMonitor } from './delegation-monitor';
 import { startLagMonitor, getPerfSnapshot, recordApiCall } from './perf-monitor';
 import './renderers'; // register built-in renderers
 
@@ -1536,6 +1537,7 @@ console.log('[server] Initializing daemon bridge before accepting requests...');
     // Start the report scheduler and perf monitor once the server is live
     startScheduler();
     startLagMonitor();
+    startDelegationMonitor();
   });
 })();
 

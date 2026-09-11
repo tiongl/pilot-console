@@ -49,12 +49,43 @@ export function createWorktreeAgentTools(
         });
         // Mirror notable states onto the delegation so the lead's worker tab and
         // the sidebar reflect them without anyone opening the session.
+        const delegation = getDelegationForWorktree(worktreeId);
+        const wasStatus = delegation?.status;
         if (args.status === 'blocked') {
           markWorktreeDelegation(worktreeId, { status: 'blocked', note: args.headline, unread: true });
         } else if (args.status === 'ready_to_merge') {
           markWorktreeDelegation(worktreeId, { status: 'done', note: args.headline, unread: true });
         } else if (args.status === 'in_progress') {
           markWorktreeDelegation(worktreeId, { status: 'working', note: args.headline });
+        }
+
+        // The lead is forbidden from polling for workers, so a worker that
+        // finishes or gets stuck has to say so or the lead never finds out.
+        // Only announce the transition, not every later repeat of the state.
+        const announce =
+          (args.status === 'ready_to_merge' && wasStatus !== 'done') ||
+          (args.status === 'blocked' && wasStatus !== 'blocked');
+        if (delegation && announce && projectId && userId) {
+          const finished = args.status === 'ready_to_merge';
+          const message = [
+            `[worker ${finished ? 'finished' : 'blocked'} · ${delegation.title}]`,
+            `Worktree id: ${worktreeId}`,
+            '',
+            args.headline,
+            '',
+            args.detail,
+            '',
+            finished
+              ? 'Review it with get_digest, then approve_merge or reject_merge. If more work is needed, use nudge_worker.'
+              : 'Unblock it with nudge_worker, or close it out with cancel_worker if it cannot continue.',
+          ].join('\n');
+          try {
+            await notifyProjectLead(userId, projectId, message);
+          } catch (err) {
+            // The digest is already saved; failing to reach the lead must not
+            // turn the worker's status update into an error.
+            console.error(`[digest-tools] Could not notify project lead for ${worktreeId}:`, err);
+          }
         }
         return { ok: true, updatedAt: digest.updatedAt };
       },
