@@ -30,6 +30,8 @@ interface ProjectMemory { summary: string; source: string | null; updatedAt: str
 interface Delegation {
   id: string;
   worktreeId: string;
+  /** The worker's own Copilot session. Without it a worker tab has to guess. */
+  sessionId: string | null;
   title: string;
   status: 'planning' | 'awaiting_plan_review' | 'working' | 'blocked' | 'done' | 'cancelled';
   note: string | null;
@@ -106,9 +108,10 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
     return () => clearInterval(timer);
   }, [refreshDelegations]);
 
-  // Opening a worker's tab clears its "needs attention" flag.
+  // Opening a worker's tab clears its "needs attention" flag. A worktree can
+  // have older, closed-out delegations too; the newest one owns the tab.
   useEffect(() => {
-    const open = delegations.find((d) => d.worktreeId === activeTab);
+    const open = [...delegations].reverse().find((d) => d.worktreeId === activeTab);
     if (!open?.unread) return;
     fetch(`/api/projects/${projectId}/delegations/${open.id}/read`, { method: 'POST' })
       .then(() => refreshDelegations())
@@ -117,11 +120,19 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
 
   useEffect(() => { refresh(); }, [projectId]);
 
+  // One worker per worktree. Re-delegating leaves the old, closed-out
+  // delegation in place, and rendering both gave the worktree two tabs with the
+  // same id — so clicking either displayed both panes stacked on top of each
+  // other. Rows arrive oldest-first, so the last one wins.
+  const workers = Array.from(
+    delegations.reduce((byWorktree, d) => byWorktree.set(d.worktreeId, d), new Map<string, Delegation>()).values(),
+  );
+
   // Tabs are never closable: the lead is permanent, and a worker tab is the
   // only way back into that worker's session from here.
   const tabs = [
     { id: 'lead', label: 'Lead', status: null as string | null, unread: 0 },
-    ...delegations.map((d) => ({
+    ...workers.map((d) => ({
       id: d.worktreeId,
       label: d.title,
       status: d.status,
@@ -162,15 +173,22 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
         <div className="absolute inset-0" style={{ display: activeTab === 'lead' ? 'block' : 'none' }}>
           <AgentPane projectId={projectId} active={activeTab === 'lead'} sessionKind="project_lead" />
         </div>
-        {delegations.map((d) => (
+        {workers.map((d) => (
           <div
-            key={d.worktreeId}
+            // Re-keyed on the session so replacing a worker rebuilds the pane
+            // instead of leaving it connected to the previous worker's session.
+            key={`${d.worktreeId}:${d.sessionId ?? 'none'}`}
             className="absolute inset-0"
             style={{ display: activeTab === d.worktreeId ? 'block' : 'none' }}
           >
+            {/* Target the worker's own session explicitly. Resolving the pane by
+                workspace alone picks whichever session in that directory was
+                touched most recently, which is not necessarily this worker —
+                and after a server restart it never is. */}
             <AgentPane
               projectId={projectId}
               worktreeId={d.worktreeId}
+              sessionId={d.sessionId ?? undefined}
               active={activeTab === d.worktreeId}
             />
           </div>
