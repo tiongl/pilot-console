@@ -4,6 +4,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardE
 import RichMarkdown from '@/components/markdown/RichMarkdown';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { useSpeechInput } from '@/hooks/useSpeechInput';
 import {
   Dialog,
   DialogContent,
@@ -46,6 +47,9 @@ import {
   ChevronUp,
   Coins,
   ListTree,
+  Mic,
+  MicOff,
+  MessageCircleQuestion,
 } from 'lucide-react';
 import { useAgentSocket } from '@/hooks/useAgentSocket';
 import { getThemeByName } from '@/lib/terminal-themes';
@@ -91,7 +95,90 @@ interface ExitPlanPrompt {
   reviewNote?: string;
 }
 
+interface AskUserPrompt {
+  requestId: string;
+  question: string;
+  detail?: string;
+  options: string[];
+  allowText: boolean;
+}
+
 const MODE_ORDER: AgentMode[] = ['interactive', 'plan', 'autopilot'];
+
+/**
+ * An agent question answered by clicking. Kept as its own component so the
+ * optional free-text box can hold its draft without re-rendering the transcript
+ * on every keystroke.
+ */
+function AskUserCard({
+  prompt,
+  onAnswer,
+  surface,
+}: {
+  prompt: AskUserPrompt;
+  onAnswer: (requestId: string, answer: string) => void;
+  surface: string;
+}) {
+  const [text, setText] = useState('');
+  return (
+    <div
+      data-testid="ask-user-prompt"
+      className="rounded-lg border border-violet-500/40 bg-violet-500/5 p-3 space-y-2"
+    >
+      <div className="flex items-center gap-1.5 text-sm font-medium">
+        <MessageCircleQuestion className="h-4 w-4 text-violet-500" />
+        <span className="whitespace-pre-wrap break-words">{prompt.question}</span>
+      </div>
+      {prompt.detail && (
+        <div
+          className="text-xs whitespace-pre-wrap break-words rounded p-2"
+          style={{ backgroundColor: surface }}
+        >
+          {prompt.detail}
+        </div>
+      )}
+      <div className="flex flex-wrap gap-2">
+        {prompt.options.map((option, index) => (
+          <Button
+            key={`${option}:${index}`}
+            size="sm"
+            className="h-7"
+            variant={index === 0 ? 'default' : 'secondary'}
+            onClick={() => onAnswer(prompt.requestId, option)}
+          >
+            {option}
+          </Button>
+        ))}
+      </div>
+      {prompt.allowText && (
+        <div className="flex gap-2">
+          <input
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                onAnswer(prompt.requestId, text);
+              }
+            }}
+            placeholder="Or type an answer…"
+            aria-label="Type an answer instead"
+            className="flex-1 h-7 rounded border bg-transparent px-2 text-xs outline-none focus:ring-1 focus:ring-ring"
+          />
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7"
+            disabled={!text.trim()}
+            onClick={() => onAnswer(prompt.requestId, text)}
+          >
+            Send
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 const MODE_META: Record<AgentMode, { label: string; icon: typeof MessageSquare; color: string }> = {
   interactive: { label: 'Interactive', icon: MessageSquare, color: '#3fb950' },
@@ -364,9 +451,27 @@ export default function AgentPane({
   const [mode, setMode] = useState<AgentMode>('interactive');
   const [permissions, setPermissions] = useState<PermissionPrompt[]>([]);
   const [exitPlans, setExitPlans] = useState<ExitPlanPrompt[]>([]);
+  /** Click-to-answer questions raised by the agent's `ask_user` tool. */
+  const [questions, setQuestions] = useState<AskUserPrompt[]>([]);
   const [models, setModels] = useState<AgentModelOption[]>([{ id: 'auto', name: 'Auto' }]);
   const [connError, setConnError] = useState<string | null>(null);
   const [input, setInput] = useState('');
+  /**
+   * Text already in the composer when dictation started. Speech is appended to
+   * it so starting the mic never wipes a partially typed message.
+   */
+  const dictationBaseRef = useRef('');
+  const speech = useSpeechInput({
+    onTranscript: useCallback((text: string) => {
+      const base = dictationBaseRef.current;
+      const separator = base && !/\s$/.test(base) ? ' ' : '';
+      setInput(text ? base + separator + text : base);
+    }, []),
+  });
+  const toggleDictation = useCallback(() => {
+    if (!speech.listening) dictationBaseRef.current = input;
+    speech.toggle();
+  }, [speech, input]);
   // Dynamic slash-command catalog for this session (plugin/skill-aware).
   const [serverCommands, setServerCommands] = useState<AgentSlashCommand[]>([]);
   // Pending subcommand picker, when a command needs a further selection.
@@ -562,6 +667,25 @@ export default function AgentPane({
           break;
         case 'exit_plan_resolved':
           setExitPlans((prev) => prev.filter((p) => p.requestId !== msg.requestId));
+          break;
+        case 'ask_user_request':
+          setQuestions((prev) => {
+            const prompt = {
+              requestId: msg.requestId,
+              question: msg.question,
+              detail: msg.detail,
+              options: msg.options,
+              allowText: msg.allowText,
+            };
+            const idx = prev.findIndex((item) => item.requestId === msg.requestId);
+            if (idx < 0) return [...prev, prompt];
+            const next = prev.slice();
+            next[idx] = prompt;
+            return next;
+          });
+          break;
+        case 'ask_user_resolved':
+          setQuestions((prev) => prev.filter((p) => p.requestId !== msg.requestId));
           break;
         case 'error':
           setConnError(msg.message);
@@ -865,6 +989,13 @@ export default function AgentPane({
     setExitPlans((prev) => prev.filter((p) => p.requestId !== requestId));
   };
 
+  const respondAskUser = (requestId: string, answer: string) => {
+    const trimmed = answer.trim();
+    if (!trimmed) return;
+    send({ type: 'ask_user_response', requestId, answer: trimmed });
+    setQuestions((prev) => prev.filter((p) => p.requestId !== requestId));
+  };
+
   // --- Slash commands ------------------------------------------------------
   const [slashSel, setSlashSel] = useState(0);
   const noticeSeq = useRef(0);
@@ -1047,6 +1178,7 @@ export default function AgentPane({
     setPermissions([]);
     setExitPlans([]);
     setQueued([]);
+    setQuestions([]);
     setConnError(null);
     onSessionId?.(id);
     switchTo(id);
@@ -1055,6 +1187,9 @@ export default function AgentPane({
   const submit = () => {
     const trimmed = input.trim();
     if (!trimmed) return;
+    // Sending ends the utterance; leaving the mic hot would dictate the next
+    // message into an empty composer without the user asking.
+    if (speech.listening) speech.stop();
     if (trimmed.startsWith('/')) {
       executeSlash(trimmed);
       setInput('');
@@ -1903,6 +2038,16 @@ export default function AgentPane({
             </div>
           </div>
         ))}
+
+        {/* Click-to-answer questions from the agent's ask_user tool */}
+        {questions.map((p) => (
+          <AskUserCard
+            key={p.requestId}
+            prompt={p}
+            onAnswer={respondAskUser}
+            surface={appearance.surfaceStrong}
+          />
+        ))}
           </>
         )}
       </div>
@@ -2040,12 +2185,19 @@ export default function AgentPane({
             ))}
           </div>
         )}
+        {speech.error && (
+          <div className="px-1 pb-1 text-[11px] text-destructive" role="status">
+            {speech.error}
+          </div>
+        )}
         <div className="flex gap-2 items-end">
           <Textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={busy
+            placeholder={speech.listening
+              ? 'Listening… speak now, then edit before sending'
+              : busy
               ? 'Message Copilot… (queued and sent when the current turn ends)'
               : 'Message Copilot… (/ for commands, Enter to send, Shift+Enter for newline)'}
             rows={2}
@@ -2056,6 +2208,21 @@ export default function AgentPane({
           {busy && (
             <Button variant="destructive" size="icon" onClick={() => send({ type: 'cancel' })} title="Stop">
               <Square className="h-4 w-4" />
+            </Button>
+          )}
+          {speech.supported && (
+            <Button
+              variant={speech.listening ? 'destructive' : 'secondary'}
+              size="icon"
+              data-testid="agent-dictate"
+              aria-pressed={speech.listening}
+              onClick={toggleDictation}
+              title={
+                speech.error ??
+                (speech.listening ? 'Stop dictating' : 'Dictate a message (speech to text)')
+              }
+            >
+              {speech.listening ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
             </Button>
           )}
           <Button

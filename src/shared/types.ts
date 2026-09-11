@@ -205,6 +205,9 @@ export type AgentClientMessage =
   | { type: 'set_allow_all'; enabled: boolean }
   | { type: 'set_mode'; mode: AgentMode }
   | { type: 'exit_plan_response'; requestId: string; action: string }
+  // Answer to an `ask_user_request`. `answer` is one of the offered options, or
+  // free text when the prompt allowed it.
+  | { type: 'ask_user_response'; requestId: string; answer: string }
   | { type: 'set_model'; model: string }
   // Drop a follow-up the user queued while the agent was mid-turn.
   | { type: 'dequeue'; index: number }
@@ -262,6 +265,18 @@ export type AgentServerMessage =
       reviewNote?: string;
     }
   | { type: 'exit_plan_resolved'; requestId: string }
+  // The agent is asking the user a question it wants answered by clicking
+  // rather than typing. Raised by the `ask_user` tool.
+  | {
+      type: 'ask_user_request';
+      requestId: string;
+      question: string;
+      detail?: string;
+      options: string[];
+      /** Whether the user may type an answer instead of picking an option. */
+      allowText: boolean;
+    }
+  | { type: 'ask_user_resolved'; requestId: string }
   | {
       type: 'status';
       status: AgentStatus;

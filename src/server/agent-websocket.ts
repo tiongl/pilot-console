@@ -16,6 +16,7 @@ import {
   setAgentMode,
   respondToPermission,
   respondToExitPlan,
+  respondToAskUser,
   isAllowAllPermissions,
   setAllowAllPermissions,
   listAgentCommands,
@@ -198,6 +199,9 @@ export function setupAgentWebSocketServer(): WebSocketServer {
           break;
         case 'exit_plan_response':
           respondToExitPlan(sessionId, msg.requestId, msg.action);
+          break;
+        case 'ask_user_response':
+          respondToAskUser(sessionId, msg.requestId, msg.answer);
           break;
         case 'set_mode':
           setAgentMode(sessionId, msg.mode);

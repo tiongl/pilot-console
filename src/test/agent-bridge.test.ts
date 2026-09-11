@@ -13,6 +13,8 @@ import {
   emptyAgentUsage,
   cwdMatches,
   buildToolsForKind,
+  createAskUserTool,
+  resolveAskUser,
   sliceReplayTail,
   sliceReplayBefore,
   serializeTranscriptWithinBudget,
@@ -20,6 +22,17 @@ import {
   type AgentSubscriber,
 } from '../shared/agent-bridge';
 import type { AgentServerMessage } from '../shared/types';
+
+/**
+ * The SDK types a tool handler as optional and two-argument; `ask_user` only
+ * ever reads its input, so tests call it through this narrow wrapper.
+ */
+function callAskUser(
+  tool: ReturnType<typeof createAskUserTool>,
+  input: Record<string, unknown>,
+): Promise<string> {
+  return (tool.handler as unknown as (i: Record<string, unknown>) => Promise<string>)(input);
+}
 
 function makeSession(): { session: AgentSession; messages: AgentServerMessage[] } {
   const messages: AgentServerMessage[] = [];
@@ -38,6 +51,7 @@ function makeSession(): { session: AgentSession; messages: AgentServerMessage[] 
     subscribers: new Set<AgentSubscriber>([sub]),
     pendingPermissions: new Map(),
     pendingPlans: new Map(),
+    pendingQuestions: new Map(),
     saveTimer: null,
     toolReconcileTimer: null,
     toolReconcileInFlight: false,
@@ -308,6 +322,72 @@ describe('agent-bridge handleSdkEvent', () => {
     session.pendingPlans.set(plan.requestId, { resolve: vi.fn(), message: plan });
 
     expect(pendingMessagesForSession(session)).toEqual([permission, plan]);
+  });
+
+  // The user wanted to answer agent questions with the mouse, so `ask_user`
+  // blocks the tool call until a click arrives from the pane.
+  it('blocks ask_user until the user answers, then returns their choice', async () => {
+    const { session, messages } = makeSession();
+    const tool = createAskUserTool(() => session);
+
+    const pending = callAskUser(tool, {
+      question: 'Ship it?',
+      detail: 'The branch is green.',
+      options: ['Ship', 'Hold'],
+    }) as Promise<string>;
+    await Promise.resolve();
+
+    const asked = messages.find((m) => m.type === 'ask_user_request');
+    expect(asked).toMatchObject({
+      question: 'Ship it?',
+      detail: 'The branch is green.',
+      options: ['Ship', 'Hold'],
+      allowText: true,
+    });
+    expect(session.pendingQuestions.size).toBe(1);
+
+    resolveAskUser(session, (asked as { requestId: string }).requestId, 'Hold');
+    await expect(pending).resolves.toBe('Hold');
+    expect(session.pendingQuestions.size).toBe(0);
+    expect(messages.some((m) => m.type === 'ask_user_resolved')).toBe(true);
+  });
+
+  it('offers Yes/No when the agent supplies no options', async () => {
+    const { session, messages } = makeSession();
+    const tool = createAskUserTool(() => session);
+
+    void callAskUser(tool, { question: 'Continue?' });
+    await Promise.resolve();
+
+    expect(messages.find((m) => m.type === 'ask_user_request')).toMatchObject({
+      options: ['Yes', 'No'],
+    });
+  });
+
+  // A delegated worker has no one watching its pane; blocking there would hang
+  // the run until someone cancelled it by hand.
+  it('does not block an unattended session on ask_user', async () => {
+    const { session, messages } = makeSession();
+    session.unattended = true;
+    const tool = createAskUserTool(() => session);
+
+    await expect(callAskUser(tool, { question: 'Continue?' })).resolves.toContain('unattended');
+    expect(messages.some((m) => m.type === 'ask_user_request')).toBe(false);
+  });
+
+  it('does not block when no session is attached', async () => {
+    const tool = createAskUserTool(() => undefined);
+    await expect(callAskUser(tool, { question: 'Continue?' })).resolves.toContain('No interactive user');
+  });
+
+  it('replays unanswered questions to a reconnecting client', async () => {
+    const { session, messages } = makeSession();
+    const tool = createAskUserTool(() => session);
+    void callAskUser(tool, { question: 'Ship it?', options: ['Ship'] });
+    await Promise.resolve();
+
+    const asked = messages.find((m) => m.type === 'ask_user_request');
+    expect(pendingMessagesForSession(session)).toContainEqual(asked);
   });
 
   it('auto-approves permissions in auto-pilot or when allow-all is on', () => {
@@ -680,8 +760,9 @@ describe('buildToolsForKind', () => {
     expect(tools!.length).toBeGreaterThan(0);
   });
 
-  it('gives project_lead sessions no tools when projectId is missing', () => {
-    expect(buildToolsForKind('project_lead', null, null)).toBeUndefined();
+  it('gives project_lead sessions the ask_user tool even when projectId is missing', () => {
+    const tools = buildToolsForKind('project_lead', null, null);
+    expect(tools?.map((t) => t.name)).toEqual(['ask_user']);
   });
 
   it('gives plain agent sessions worktree + merge tools when scoped to a worktree', () => {
@@ -690,8 +771,21 @@ describe('buildToolsForKind', () => {
     expect(tools!.length).toBeGreaterThan(0);
   });
 
-  it('gives plain agent sessions with no worktree no extra tools', () => {
-    expect(buildToolsForKind('agent', null, null)).toBeUndefined();
+  // Asking the user a question with buttons is useful whatever the agent is
+  // doing, so ask_user is the one tool every session gets.
+  it('gives plain agent sessions with no worktree only ask_user', () => {
+    expect(buildToolsForKind('agent', null, null)?.map((t) => t.name)).toEqual(['ask_user']);
+  });
+
+  it('adds ask_user to every other tool set', () => {
+    for (const tools of [
+      buildToolsForKind('chief_of_staff', null, null),
+      buildToolsForKind('project_lead', 'proj-1', null),
+      buildToolsForKind('agent', null, 'wt-1'),
+    ]) {
+      expect(tools!.map((t) => t.name)).toContain('ask_user');
+      expect(tools!.length).toBeGreaterThan(1);
+    }
   });
 });
 

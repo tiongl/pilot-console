@@ -33,6 +33,7 @@ import type {
   ExitPlanModeResult,
   Tool,
 } from '@github/copilot-sdk';
+import { defineTool } from '@github/copilot-sdk';
 
 const MAX_TRANSCRIPT_EVENTS = 5_000;
 /**
@@ -99,6 +100,11 @@ interface PendingPlan {
   message: Extract<AgentServerMessage, { type: 'exit_plan_request' }>;
 }
 
+interface PendingQuestion {
+  resolve: (answer: string) => void;
+  message: Extract<AgentServerMessage, { type: 'ask_user_request' }>;
+}
+
 export interface AgentSession {
   sessionId: string;
   userId: string;
@@ -114,6 +120,8 @@ export interface AgentSession {
   subscribers: Set<AgentSubscriber>;
   pendingPermissions: Map<string, PendingPermission>;
   pendingPlans: Map<string, PendingPlan>;
+  /** Questions raised by the `ask_user` tool, awaiting a click from the user. */
+  pendingQuestions: Map<string, PendingQuestion>;
   sdk: CopilotSession;
   unsubscribe: () => void;
   saveTimer: ReturnType<typeof setTimeout> | null;
@@ -1573,6 +1581,7 @@ function createPendingAgentSession(
     subscribers: new Set(),
     pendingPermissions: new Map(),
     pendingPlans: new Map(),
+    pendingQuestions: new Map(),
     sdk: undefined as unknown as CopilotSession,
     unsubscribe: () => {},
     saveTimer: null,
@@ -1671,6 +1680,14 @@ Use Markdown links for URLs and GitHub issues, pull requests, and commits. Do no
 Keep code blocks and tool output focused; avoid excessively large unstructured dumps.
 `;
 
+const ASK_USER_INSTRUCTIONS = `
+When you need a decision from the user and the answer is a choice rather than free prose —
+yes/no, approve/revise, pick one of several approaches or files — call the ask_user tool so
+they can answer with a single click. Offer specific, self-explanatory options. Do not end a
+turn with a question in prose when ask_user would do; only fall back to prose for genuinely
+open-ended questions.
+`;
+
 const WORKTREE_DIGEST_INSTRUCTIONS = `
 When working in a worktree, keep the portfolio dashboard current by calling update_digest
 at meaningful milestones and before becoming idle. Use concise, factual summaries; include
@@ -1736,6 +1753,108 @@ export function deriveStatusFromEvents(events: SessionEvent[] | undefined): Agen
  * silently strips a session's tools, which is why unresumed sessions can look
  * "dead" (any turn that needs a tool call stalls or errors).
  */
+/** Fallback choices when the agent asks a question without offering any. */
+const DEFAULT_ASK_OPTIONS = ['Yes', 'No'];
+const MAX_ASK_OPTIONS = 8;
+
+/**
+ * Lets the agent put a question to the user as clickable buttons instead of
+ * making them type an answer. Every session gets this — answering "which of
+ * these three?" with a mouse is useful whatever the agent is doing.
+ */
+export function createAskUserTool(getSession: () => AgentSession | undefined): Tool<any> {
+  return defineTool('ask_user', {
+    description:
+      'Ask the user a question and let them answer by clicking a button. Use this for ANY ' +
+      'non-freeform question — yes/no confirmations, picking between approaches, choosing a ' +
+      'file or branch — instead of asking in prose and waiting for them to type. Returns the ' +
+      'option the user chose. Prefer this over ending your turn with a question.',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: {
+          type: 'string',
+          description: 'The question, phrased so the options below are the obvious answers.',
+          maxLength: 500,
+        },
+        detail: {
+          type: 'string',
+          description: 'Optional context shown under the question, e.g. the trade-offs involved.',
+          maxLength: 2000,
+        },
+        options: {
+          type: 'array',
+          items: { type: 'string' },
+          description: `The answers to offer as buttons (max ${MAX_ASK_OPTIONS}). Defaults to Yes/No.`,
+        },
+        allowText: {
+          type: 'boolean',
+          description: 'Also let the user type their own answer. Default true.',
+        },
+      },
+      required: ['question'],
+    },
+    handler: async ({
+      question,
+      detail,
+      options,
+      allowText,
+    }: {
+      question: string;
+      detail?: string;
+      options?: string[];
+      allowText?: boolean;
+    }): Promise<string> => {
+      const session = getSession();
+      // An unattended worker has nobody watching its pane, so blocking here
+      // would stall the run until it is cancelled by hand.
+      if (!session || !session.alive) {
+        return 'No interactive user is attached to this session. Decide for yourself and continue.';
+      }
+      if (session.unattended) {
+        return 'This session is running unattended, so nobody can answer. Use your best judgement and continue.';
+      }
+
+      const cleaned = (options ?? [])
+        .map((option) => String(option ?? '').trim())
+        .filter(Boolean)
+        .slice(0, MAX_ASK_OPTIONS);
+      const requestId = randomUUID();
+      const message: Extract<AgentServerMessage, { type: 'ask_user_request' }> = {
+        type: 'ask_user_request',
+        requestId,
+        question: String(question ?? '').trim() || 'Which would you prefer?',
+        detail: detail ? String(detail) : undefined,
+        options: cleaned.length ? cleaned : DEFAULT_ASK_OPTIONS,
+        allowText: allowText !== false,
+      };
+
+      return new Promise<string>((resolve) => {
+        session.pendingQuestions.set(requestId, { resolve, message });
+        emit(session, message);
+      });
+    },
+    skipPermission: true,
+    defer: 'never',
+  });
+}
+
+/** Deliver the user's click back to the waiting `ask_user` call. */
+export function respondToAskUser(sessionId: string, requestId: string, answer: string): void {
+  const session = agentSessions.get(sessionId);
+  if (!session) return;
+  resolveAskUser(session, requestId, answer);
+}
+
+/** Session-level `ask_user` resolution. Exported for unit testing. */
+export function resolveAskUser(session: AgentSession, requestId: string, answer: string): void {
+  const pending = session.pendingQuestions.get(requestId);
+  if (!pending) return;
+  session.pendingQuestions.delete(requestId);
+  pending.resolve(answer);
+  emit(session, { type: 'ask_user_resolved', requestId });
+}
+
 export function buildToolsForKind(
   kind: AgentSessionKind,
   projectId: string | null,
@@ -1743,10 +1862,16 @@ export function buildToolsForKind(
   userId?: string,
   getSessionId?: () => string | undefined,
 ): Tool<any>[] | undefined {
-  if (kind === 'chief_of_staff') return createChiefOfStaffTools();
-  if (kind === 'project_lead') return projectId ? createProjectLeadTools(projectId, userId, getSessionId) : undefined;
-  if (worktreeId) return [...createWorktreeAgentTools(worktreeId, projectId, userId), ...createMergeTools(worktreeId)];
-  return undefined;
+  const askUser = createAskUserTool(() => {
+    const id = getSessionId?.();
+    return id ? agentSessions.get(id) : undefined;
+  });
+  if (kind === 'chief_of_staff') return [...createChiefOfStaffTools(), askUser];
+  if (kind === 'project_lead')
+    return projectId ? [...createProjectLeadTools(projectId, userId, getSessionId), askUser] : [askUser];
+  if (worktreeId)
+    return [...createWorktreeAgentTools(worktreeId, projectId, userId), ...createMergeTools(worktreeId), askUser];
+  return [askUser];
 }
 
 export async function createAgentSession(
@@ -1794,7 +1919,7 @@ export async function createAgentSession(
     workingDirectory: cwd,
     systemMessage: {
       mode: 'append',
-      content: `${AGENT_RENDERING_INSTRUCTIONS}${worktreeId ? WORKTREE_DIGEST_INSTRUCTIONS : ''}${kind === 'project_lead' ? `\n${PROJECT_LEAD_BASE_INSTRUCTIONS}${projectMemorySummary}` : ''}${kind === 'chief_of_staff' ? CHIEF_OF_STAFF_INSTRUCTIONS : ''}`,
+      content: `${AGENT_RENDERING_INSTRUCTIONS}${ASK_USER_INSTRUCTIONS}${worktreeId ? WORKTREE_DIGEST_INSTRUCTIONS : ''}${kind === 'project_lead' ? `\n${PROJECT_LEAD_BASE_INSTRUCTIONS}${projectMemorySummary}` : ''}${kind === 'chief_of_staff' ? CHIEF_OF_STAFF_INSTRUCTIONS : ''}`,
     },
     tools: buildToolsForKind(kind, projectId, worktreeId, userId, () => sessionRef?.sessionId),
     onPermissionRequest: makePermissionHandler(() => sessionRef),
@@ -1871,6 +1996,11 @@ export async function cancelAgent(sessionId: string): Promise<void> {
     session.pendingPlans.delete(requestId);
     pending.resolve({ approved: false });
     emit(session, { type: 'exit_plan_resolved', requestId });
+  }
+  for (const [requestId, pending] of session.pendingQuestions) {
+    session.pendingQuestions.delete(requestId);
+    pending.resolve('The user cancelled the turn instead of answering.');
+    emit(session, { type: 'ask_user_resolved', requestId });
   }
   for (const event of session.transcript) {
     if (event.kind === 'tool' && event.status === 'running') {
@@ -2529,6 +2659,7 @@ export function pendingMessagesForSession(session: AgentSession): AgentServerMes
   return [
     ...[...session.pendingPermissions.values()].map((pending) => pending.message),
     ...[...session.pendingPlans.values()].map((pending) => pending.message),
+    ...[...session.pendingQuestions.values()].map((pending) => pending.message),
   ];
 }
 
@@ -2551,6 +2682,11 @@ export async function endAgentSession(sessionId: string): Promise<void> {
   for (const [requestId, pending] of session.pendingPlans) {
     session.pendingPlans.delete(requestId);
     pending.resolve({ approved: false });
+  }
+  // Unblock any `ask_user` call still waiting on a click.
+  for (const [requestId, pending] of session.pendingQuestions) {
+    session.pendingQuestions.delete(requestId);
+    pending.resolve('The session was closed before the user answered.');
   }
   try {
     session.unsubscribe();

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import type { AgentServerMessage } from '@/types';
 
@@ -1142,6 +1142,179 @@ describe('AgentPane', () => {
         event: { kind: 'assistant', id: 'a1', ts: Date.now(), content: 'done', durationMs: 95_000 },
       });
       expect(screen.getByText(/1m 35s/)).toBeTruthy();
+    });
+  });
+
+  // The agent can put a question to the user as buttons so non-freeform
+  // answers need a click rather than typing.
+  describe('ask_user prompts', () => {
+    const question = {
+      type: 'ask_user_request' as const,
+      requestId: 'q1',
+      question: 'Which database?',
+      detail: 'Both are already installed.',
+      options: ['Postgres', 'SQLite'],
+      allowText: true,
+    };
+
+    it('renders the question, detail, and one button per option', () => {
+      renderPane();
+      emit(question);
+      const card = screen.getByTestId('ask-user-prompt');
+      expect(card.textContent).toContain('Which database?');
+      expect(card.textContent).toContain('Both are already installed.');
+      expect(screen.getByRole('button', { name: 'Postgres' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'SQLite' })).toBeTruthy();
+    });
+
+    it('sends the clicked option back and clears the prompt', () => {
+      renderPane();
+      emit(question);
+      fireEvent.click(screen.getByRole('button', { name: 'SQLite' }));
+      expect(hooked.send).toHaveBeenCalledWith({
+        type: 'ask_user_response',
+        requestId: 'q1',
+        answer: 'SQLite',
+      });
+      expect(screen.queryByTestId('ask-user-prompt')).toBeNull();
+    });
+
+    it('accepts a typed answer when the prompt allows one', () => {
+      renderPane();
+      emit(question);
+      const box = screen.getByLabelText('Type an answer instead');
+      fireEvent.change(box, { target: { value: '  DuckDB  ' } });
+      fireEvent.keyDown(box, { key: 'Enter' });
+      expect(hooked.send).toHaveBeenCalledWith({
+        type: 'ask_user_response',
+        requestId: 'q1',
+        answer: 'DuckDB',
+      });
+    });
+
+    it('omits the free-text box when the agent wants a strict choice', () => {
+      renderPane();
+      emit({ ...question, allowText: false });
+      expect(screen.queryByLabelText('Type an answer instead')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Postgres' })).toBeTruthy();
+    });
+
+    it('removes the prompt when the server resolves it elsewhere', () => {
+      renderPane();
+      emit(question);
+      emit({ type: 'ask_user_resolved', requestId: 'q1' });
+      expect(screen.queryByTestId('ask-user-prompt')).toBeNull();
+    });
+
+    it('replaces rather than duplicates a re-sent question on reconnect', () => {
+      renderPane();
+      emit(question);
+      emit(question);
+      expect(screen.getAllByTestId('ask-user-prompt')).toHaveLength(1);
+    });
+  });
+
+  describe('voice input', () => {
+    class FakeRecognition {
+      static instances: FakeRecognition[] = [];
+      continuous = false;
+      interimResults = false;
+      lang = '';
+      maxAlternatives = 1;
+      started = 0;
+      onresult: ((e: unknown) => void) | null = null;
+      onerror: ((e: { error: string }) => void) | null = null;
+      onend: (() => void) | null = null;
+      onstart: (() => void) | null = null;
+      constructor() {
+        FakeRecognition.instances.push(this);
+      }
+      start() {
+        this.started += 1;
+      }
+      stop() {
+        this.onend?.();
+      }
+      abort() {}
+      say(transcript: string, isFinal: boolean) {
+        this.onresult?.({
+          resultIndex: 0,
+          results: { length: 1, 0: { length: 1, isFinal, 0: { transcript } } },
+        });
+      }
+    }
+
+    beforeEach(() => {
+      FakeRecognition.instances = [];
+      (window as unknown as { SpeechRecognition?: unknown }).SpeechRecognition = FakeRecognition;
+    });
+
+    afterEach(() => {
+      delete (window as unknown as { SpeechRecognition?: unknown }).SpeechRecognition;
+    });
+
+    function startDictation() {
+      renderPane();
+      act(() => {
+        fireEvent.click(screen.getByTestId('agent-dictate'));
+      });
+      return FakeRecognition.instances.at(-1)!;
+    }
+
+    it('fills the composer with speech so it can be edited before sending', () => {
+      const recognition = startDictation();
+      act(() => recognition.say('add a retry to the fetch call', true));
+
+      const box = screen.getByPlaceholderText(/Listening/) as HTMLTextAreaElement;
+      expect(box.value).toBe('add a retry to the fetch call');
+      // Still a normal textarea: the point is to edit before sending.
+      expect(hooked.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'send' }));
+    });
+
+    it('shows interim speech and then the corrected final text', () => {
+      const recognition = startDictation();
+      act(() => recognition.say('add a retro', false));
+      expect((screen.getByPlaceholderText(/Listening/) as HTMLTextAreaElement).value).toBe('add a retro');
+
+      act(() => recognition.say('add a retry', true));
+      expect((screen.getByPlaceholderText(/Listening/) as HTMLTextAreaElement).value).toBe('add a retry');
+    });
+
+    it('appends to text already typed instead of replacing it', () => {
+      renderPane();
+      const box = screen.getByPlaceholderText(/Message Copilot/) as HTMLTextAreaElement;
+      fireEvent.change(box, { target: { value: 'Fix the bug:' } });
+      act(() => {
+        fireEvent.click(screen.getByTestId('agent-dictate'));
+      });
+      act(() => FakeRecognition.instances.at(-1)!.say('it throws on empty input', true));
+
+      expect((screen.getByPlaceholderText(/Listening/) as HTMLTextAreaElement).value).toBe(
+        'Fix the bug: it throws on empty input',
+      );
+    });
+
+    it('stops listening when the message is sent', () => {
+      const recognition = startDictation();
+      act(() => recognition.say('hello', true));
+      fireEvent.click(screen.getByTitle('Send'));
+
+      expect(hooked.send).toHaveBeenCalledWith({ type: 'send', prompt: 'hello' });
+      expect(screen.getByTestId('agent-dictate').getAttribute('aria-pressed')).toBe('false');
+    });
+
+    it('reports a blocked microphone instead of failing silently', () => {
+      const recognition = startDictation();
+      act(() => recognition.onerror?.({ error: 'not-allowed' }));
+
+      expect(screen.getByText(/Microphone access was blocked/)).toBeTruthy();
+      expect(screen.getByTestId('agent-dictate').getAttribute('aria-pressed')).toBe('false');
+    });
+
+    it('hides the mic entirely in browsers without the Web Speech API', () => {
+      delete (window as unknown as { SpeechRecognition?: unknown }).SpeechRecognition;
+      renderPane();
+      expect(screen.queryByTestId('agent-dictate')).toBeNull();
     });
   });
 });
