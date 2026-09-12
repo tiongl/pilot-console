@@ -1890,6 +1890,17 @@ export function resolveAskUser(session: AgentSession, requestId: string, answer:
  * still gets its answer and the conversation moves again.
  */
 export function reviveOrphanedQuestions(session: AgentSession): void {
+  // A conversation whose newest tool call is an ask_user that never returned
+  // successfully is parked on a promise this process no longer holds. That
+  // includes one a previous resume already marked interrupted: marking it did
+  // not end the turn, so the session stayed busy and quietly queued everything
+  // the user typed.
+  const lastTool = [...session.transcript]
+    .reverse()
+    .find((event): event is Extract<AgentTranscriptEvent, { kind: 'tool' }> => event.kind === 'tool');
+  if (!lastTool || lastTool.toolName !== 'ask_user' || lastTool.status === 'success') return;
+  setStatus(session, 'idle');
+
   const stuck = session.transcript.filter(
     (event): event is Extract<AgentTranscriptEvent, { kind: 'tool' }> =>
       event.kind === 'tool' && event.toolName === 'ask_user' && event.status === 'running',

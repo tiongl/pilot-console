@@ -10,11 +10,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 describe('reviving an ask_user question orphaned by a restart', () => {
   let db: InstanceType<typeof Database>;
   let sent: string[];
+  let replayEvents: unknown[];
   let bridge: typeof import('../shared/agent-bridge');
 
   beforeEach(async () => {
     vi.resetModules();
     sent = [];
+    replayEvents = [];
 
     db = new Database(':memory:');
     db.exec(`
@@ -36,8 +38,8 @@ describe('reviving an ask_user question orphaned by a restart', () => {
       sessionId: 'lead-session',
       on: () => () => {},
       // An empty replay keeps the stored transcript, which is where the stuck
-      // tool call lives.
-      getEvents: async () => [],
+      // tool call lives; tests that need a realistic rebuild set replayEvents.
+      getEvents: async () => replayEvents,
       send: async ({ prompt }: { prompt: string }) => {
         sent.push(prompt);
       },
@@ -136,6 +138,46 @@ describe('reviving an ask_user question orphaned by a restart', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(sent).toEqual(['Merge now']);
+  });
+
+  it('unwedges a session the dead turn left busy, so prompts are sent not queued', async () => {
+    // Rebuild from the runtime's own log, the way a real resume does: a tool
+    // call that started and never finished leaves the session busy for ever.
+    replayEvents = [
+      {
+        id: 'e1',
+        type: 'tool.execution_start',
+        timestamp: new Date().toISOString(),
+        data: {
+          toolCallId: 'c1',
+          toolName: 'ask_user',
+          arguments: { question: 'Should I merge the probe now?', options: ['Merge now', 'Wait'] },
+        },
+      },
+    ];
+    seedSession([]);
+
+    const session = await bridge.resumeAgentSession('u1', 'lead-session');
+
+    expect(session!.status).toBe('idle');
+    await bridge.sendAgentMessage('lead-session', 'continue');
+    expect(sent).toEqual(['continue']);
+    expect(session!.queuedPrompts ?? []).toEqual([]);
+  });
+
+  // A resume that already marked the call interrupted still left the turn
+  // hanging, which is how a session ends up accepting input and answering
+  // none of it.
+  it('unwedges a session an earlier resume marked interrupted but left busy', async () => {
+    seedSession([{ ...stuckAsk, status: 'error', output: 'Interrupted by a restart before the user answered.' }]);
+
+    const session = await bridge.resumeAgentSession('u1', 'lead-session');
+    session!.status = 'busy';
+    bridge.reviveOrphanedQuestions(session!);
+
+    expect(session!.status).toBe('idle');
+    // Already asked once; re-asking a question the user has seen would be noise.
+    expect(bridge.pendingMessagesForSession(session!)).toEqual([]);
   });
 
   it('leaves a session with no stuck question alone', async () => {
