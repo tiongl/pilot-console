@@ -11,12 +11,14 @@ describe('reviving an ask_user question orphaned by a restart', () => {
   let db: InstanceType<typeof Database>;
   let sent: string[];
   let replayEvents: unknown[];
+  let aborted: number;
   let bridge: typeof import('../shared/agent-bridge');
 
   beforeEach(async () => {
     vi.resetModules();
     sent = [];
     replayEvents = [];
+    aborted = 0;
 
     db = new Database(':memory:');
     db.exec(`
@@ -42,6 +44,9 @@ describe('reviving an ask_user question orphaned by a restart', () => {
       getEvents: async () => replayEvents,
       send: async ({ prompt }: { prompt: string }) => {
         sent.push(prompt);
+      },
+      abort: async () => {
+        aborted += 1;
       },
       setModel: async () => {},
       disconnect: async () => {},
@@ -160,6 +165,9 @@ describe('reviving an ask_user question orphaned by a restart', () => {
     const session = await bridge.resumeAgentSession('u1', 'lead-session');
 
     expect(session!.status).toBe('idle');
+    // Local status alone is not enough: the runtime keeps waiting for the tool
+    // result, accepts the next prompt, and drops it without a word.
+    expect(aborted).toBe(1);
     await bridge.sendAgentMessage('lead-session', 'continue');
     expect(sent).toEqual(['continue']);
     expect(session!.queuedPrompts ?? []).toEqual([]);
@@ -172,10 +180,9 @@ describe('reviving an ask_user question orphaned by a restart', () => {
     seedSession([{ ...stuckAsk, status: 'error', output: 'Interrupted by a restart before the user answered.' }]);
 
     const session = await bridge.resumeAgentSession('u1', 'lead-session');
-    session!.status = 'busy';
-    bridge.reviveOrphanedQuestions(session!);
 
     expect(session!.status).toBe('idle');
+    expect(aborted).toBe(1);
     // Already asked once; re-asking a question the user has seen would be noise.
     expect(bridge.pendingMessagesForSession(session!)).toEqual([]);
   });
@@ -186,6 +193,8 @@ describe('reviving an ask_user question orphaned by a restart', () => {
     const session = await bridge.resumeAgentSession('u1', 'lead-session');
 
     expect(bridge.pendingMessagesForSession(session!)).toEqual([]);
+    // Aborting a healthy session would kill a turn that is genuinely running.
+    expect(aborted).toBe(0);
   });
 
   it('re-asks only the most recent question when a restart stranded several', async () => {
@@ -205,3 +214,4 @@ describe('reviving an ask_user question orphaned by a restart', () => {
     expect(session!.transcript.every((e) => e.kind !== 'tool' || e.status === 'error')).toBe(true);
   });
 });
+

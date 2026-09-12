@@ -1889,7 +1889,7 @@ export function resolveAskUser(session: AgentSession, requestId: string, answer:
  * ordinary message. The tool result itself has nowhere to go now, but the agent
  * still gets its answer and the conversation moves again.
  */
-export function reviveOrphanedQuestions(session: AgentSession): void {
+export async function reviveOrphanedQuestions(session: AgentSession): Promise<void> {
   // A conversation whose newest tool call is an ask_user that never returned
   // successfully is parked on a promise this process no longer holds. That
   // includes one a previous resume already marked interrupted: marking it did
@@ -1899,6 +1899,16 @@ export function reviveOrphanedQuestions(session: AgentSession): void {
     .reverse()
     .find((event): event is Extract<AgentTranscriptEvent, { kind: 'tool' }> => event.kind === 'tool');
   if (!lastTool || lastTool.toolName !== 'ask_user' || lastTool.status === 'success') return;
+
+  // The runtime is still waiting for a tool result that can never arrive, and
+  // a session in that state accepts a prompt and then silently drops it — no
+  // reply, no error. Only aborting the dead turn releases it, and it must
+  // happen before we go idle and flush anything queued behind it.
+  try {
+    await session.sdk.abort();
+  } catch (err) {
+    console.error(`[agent-bridge] abort of an orphaned ask_user failed for ${session.sessionId}:`, err);
+  }
   setStatus(session, 'idle');
 
   const stuck = session.transcript.filter(
@@ -2588,7 +2598,7 @@ async function resumeAgentSessionUncached(
   session.unsubscribe = sdk.on((event) => handleSdkEvent(session, event));
   agentSessions.set(session.sessionId, session);
   ensureToolReconciliation(session);
-  reviveOrphanedQuestions(session);
+  await reviveOrphanedQuestions(session);
 
   // Ensure a DB row exists (older/remote sessions may not have one locally).
   getDb()
