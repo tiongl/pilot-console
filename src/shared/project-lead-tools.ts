@@ -128,8 +128,24 @@ async function findOrResumeWorker(projectId: string, worktreeId: string, userId?
   }
 }
 
-export function createProjectLeadTools(
-  projectId: string,
+/**
+ * The model a delegated worker should run on: whatever the lead itself is
+ * using.
+ *
+ * Workers were created with no model at all, so they silently fell back to
+ * `auto` however carefully the user had picked a model for the lead — the lead
+ * would reason on one model and its workers, which do the actual work, on
+ * another. Resolved at delegation time; changing the lead's model afterwards
+ * does not reach into workers that are already running.
+ */
+async function leadModel(getSessionId?: () => string | undefined): Promise<string | undefined> {
+  const sessionId = getSessionId?.();
+  if (!sessionId) return undefined;
+  const { getAgentSession } = await import('./agent-bridge');
+  return getAgentSession(sessionId)?.model;
+}
+
+export function createProjectLeadTools(  projectId: string,
   userId?: string,
   getSessionId?: () => string | undefined,
 ) {
@@ -477,11 +493,12 @@ export function createProjectLeadTools(
         // lead approves it through decide_worker_plan. It is also unattended —
         // no client is subscribed to answer permission prompts, so it must not
         // be asked any, or it would block forever on the first one.
+        const model = await leadModel(getSessionId);
         const session = await createAgentSession(
           userId,
           projectId,
           targetWorktreeId,
-          undefined,
+          model,
           'agent',
           'plan',
           { unattended: true },
@@ -510,6 +527,7 @@ export function createProjectLeadTools(
           worktreeId: targetWorktreeId,
           sessionId: session.sessionId,
           title: label,
+          model: session.model,
           note: 'Worker started and planning. End your turn; it will come back to you for plan review.',
         };
       },

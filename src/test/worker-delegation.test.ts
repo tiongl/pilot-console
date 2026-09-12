@@ -23,6 +23,7 @@ interface Harness {
   closeWorktreeMock: ReturnType<typeof vi.fn>;
   auditRows: () => Array<{ action: string; reasoning: string; subjectId: string | null }>;
   setWorktrees: (value: Array<{ id: string; name: string }>) => void;
+  setLeadModel: (value: string | undefined) => void;
   todoRows: () => Array<{ id: string; text: string; done: number; parentId: string | null }>;
 }
 
@@ -63,6 +64,7 @@ async function buildTools(options: { interventionMode?: string } = {}): Promise<
   vi.stubGlobal('crypto', { randomUUID: () => `id-${++idCounter}` } as typeof crypto);
 
   let liveWorktreeAgent: { sessionId: string } | undefined;
+  let leadSessionModel: string | undefined;
   let delegationForWorktree: Record<string, unknown> | undefined;
   let mergeRequest: Record<string, unknown> | undefined;
   const updated: Array<[string, Record<string, unknown>]> = [];
@@ -85,7 +87,12 @@ async function buildTools(options: { interventionMode?: string } = {}): Promise<
     assessment: { mergeEvidence: 'pull_request' },
   }));
 
-  const createAgentSession = vi.fn(async () => ({ sessionId: 'worker-session-1' }));
+  const createAgentSession = vi.fn(async (
+    _userId?: string,
+    _projectId?: string,
+    _worktreeId?: string,
+    model?: string,
+  ) => ({ sessionId: 'worker-session-1', model: model ?? 'auto' }));
   const sendToSession = vi.fn(async () => {});
   const sendAgentMessage = vi.fn(async () => {});
   const cancelAgent = vi.fn(async () => {});
@@ -103,6 +110,10 @@ async function buildTools(options: { interventionMode?: string } = {}): Promise<
     endWorktreeAgentSessions,
     resumeAgentSession,
     findLiveWorktreeAgent: () => liveWorktreeAgent,
+    getAgentSession: (id: string) =>
+      id === 'lead-session' && leadSessionModel !== undefined
+        ? { sessionId: id, model: leadSessionModel }
+        : undefined,
   }));
   vi.doMock('../shared/project-memory-store', () => ({
     getOrBootstrapProjectMemory: () => ({ summary: '' }),
@@ -182,8 +193,8 @@ async function buildTools(options: { interventionMode?: string } = {}): Promise<
         subjectId: string | null;
       }>,
     setWorktrees: (value: Array<{ id: string; name: string }>) => { worktrees = value; },
-    todoRows: () =>
-      db.prepare('SELECT id, text, done, parent_id AS parentId FROM project_todos ORDER BY position').all() as Array<{
+    setLeadModel: (value: string | undefined) => { leadSessionModel = value; },
+    todoRows: () =>      db.prepare('SELECT id, text, done, parent_id AS parentId FROM project_todos ORDER BY position').all() as Array<{
         id: string;
         text: string;
         done: number;
@@ -362,6 +373,55 @@ describe('approve_merge', () => {
 
   // Tabs on the lead page are per-worktree, so nothing shrank that strip until
   // the lead could retire finished worktrees itself.
+  /**
+   * The lead reasons about the work, but the worker is what actually writes the
+   * code. Creating workers with no model at all silently pinned them to `auto`
+   * however carefully the user had chosen a model for the lead.
+   */
+  describe('worker model', () => {
+    it('runs the worker on the model the lead is using', async () => {
+      const h = await buildTools();
+      h.setLeadModel('claude-opus-5');
+
+      const result = (await h.tool('delegate_to_worker').handler({
+        task: 'Fix the parser',
+        title: 'Parser fix',
+      })) as { model: string };
+
+      expect(h.createAgentSession.mock.calls[0][3]).toBe('claude-opus-5');
+      expect(result.model).toBe('claude-opus-5');
+    });
+
+    // Nothing here is worth failing a delegation over: falling back to the
+    // runtime default is what happened before this existed.
+    it('falls back to the default when the lead session is not live', async () => {
+      const h = await buildTools();
+      h.setLeadModel(undefined);
+
+      const result = (await h.tool('delegate_to_worker').handler({
+        task: 'Fix the parser',
+        title: 'Parser fix',
+      })) as { model: string };
+
+      expect(h.createAgentSession.mock.calls[0][3]).toBeUndefined();
+      expect(result.model).toBe('auto');
+    });
+
+    it('passes the lead model through when re-delegating to an existing worktree', async () => {
+      const h = await buildTools();
+      h.setLeadModel('gpt-5.6-sol');
+      h.setWorktrees([{ id: 'wt-1', name: 'parser' }]);
+
+      await h.tool('delegate_to_worker').handler({
+        task: 'Fix the parser again',
+        title: 'Parser fix',
+        worktreeId: 'wt-1',
+      });
+
+      expect(h.createAgentSession.mock.calls[0][3]).toBe('gpt-5.6-sol');
+    });
+  });
+
   describe('close_worktree', () => {
     it('closes a worktree and reports what it retired', async () => {
       const h = await buildTools();
