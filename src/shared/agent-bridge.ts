@@ -1738,6 +1738,14 @@ outlives this conversation when the transcript is compacted away. Call list_todo
 of a turn that involves planning, add_todos when work is identified, and update_todo to tick
 items off as they actually land. Do not keep a plan only in your reply: the user reads the
 list in the Project Lead detail panel and expects it to reflect reality.
+
+Clean up after yourself. Every worktree holds a tab on the user's Project Lead page and a node
+in their sidebar, so finished work that is never retired buries the work that is still live.
+Once a worker's changes have landed on the base branch, call list_closable_worktrees and then
+close_worktree on each one it reports as safe. Do this as part of wrapping up a piece of work —
+when a merge completes or a worker reports done — not only when the user asks. close_worktree
+refuses anything with uncommitted changes, unmerged commits, a merge in flight, or a worker
+mid-turn, so it is safe to try; report what it refused rather than working around it.
 `;
 
 export function deriveStatusFromEvents(events: SessionEvent[] | undefined): AgentStatus {
@@ -1880,6 +1888,41 @@ export function buildToolsForKind(
   return [askUser];
 }
 
+/**
+ * The appended system prompt for a session of this kind.
+ *
+ * Applied on resume as well as create. The runtime persists whatever was set
+ * when a session was first created, so a long-lived Chief of Staff or Project
+ * Lead conversation would otherwise keep its original instructions for ever:
+ * every guidance change here reached only brand-new sessions, and the durable
+ * ones — the only ones the user actually works in — silently never saw it.
+ */
+function buildSystemInstructions(
+  kind: AgentSessionKind,
+  projectId: string | null | undefined,
+  worktreeId: string | null | undefined,
+): string {
+  // Project Leads bootstrap (or reuse) a persistent project-memory summary so a fresh
+  // conversation is immediately grounded in the project's README, history, and open work.
+  let projectMemorySummary = '';
+  if (kind === 'project_lead' && projectId) {
+    try {
+      const memory = getOrBootstrapProjectMemory(projectId);
+      projectMemorySummary = `\n\n## Project memory (bootstrapped)\n${memory.summary}`;
+    } catch (err) {
+      console.warn(`[agent-bridge] Failed to bootstrap project memory for ${projectId}:`, err);
+    }
+  }
+
+  return [
+    AGENT_RENDERING_INSTRUCTIONS,
+    ASK_USER_INSTRUCTIONS,
+    worktreeId ? WORKTREE_DIGEST_INSTRUCTIONS : '',
+    kind === 'project_lead' ? `\n${PROJECT_LEAD_BASE_INSTRUCTIONS}${projectMemorySummary}` : '',
+    kind === 'chief_of_staff' ? CHIEF_OF_STAFF_INSTRUCTIONS : '',
+  ].join('');
+}
+
 export async function createAgentSession(
   userId: string,
   projectId: string | null,
@@ -1907,25 +1950,13 @@ export async function createAgentSession(
   );
   let sessionRef: AgentSession | undefined = session;
 
-  // Project Leads bootstrap (or reuse) a persistent project-memory summary so a fresh
-  // conversation is immediately grounded in the project's README, history, and open work.
-  let projectMemorySummary = '';
-  if (kind === 'project_lead' && projectId) {
-    try {
-      const memory = getOrBootstrapProjectMemory(projectId);
-      projectMemorySummary = `\n\n## Project memory (bootstrapped)\n${memory.summary}`;
-    } catch (err) {
-      console.warn(`[agent-bridge] Failed to bootstrap project memory for ${projectId}:`, err);
-    }
-  }
-
   const sdk = await client.createSession({
     model,
     streaming: true,
     workingDirectory: cwd,
     systemMessage: {
       mode: 'append',
-      content: `${AGENT_RENDERING_INSTRUCTIONS}${ASK_USER_INSTRUCTIONS}${worktreeId ? WORKTREE_DIGEST_INSTRUCTIONS : ''}${kind === 'project_lead' ? `\n${PROJECT_LEAD_BASE_INSTRUCTIONS}${projectMemorySummary}` : ''}${kind === 'chief_of_staff' ? CHIEF_OF_STAFF_INSTRUCTIONS : ''}`,
+      content: buildSystemInstructions(kind, projectId, worktreeId),
     },
     tools: buildToolsForKind(kind, projectId, worktreeId, userId, () => sessionRef?.sessionId),
     onPermissionRequest: makePermissionHandler(() => sessionRef),
@@ -2356,6 +2387,13 @@ async function resumeAgentSessionUncached(
     sdk = await client.resumeSession(sessionId, {
       streaming: true,
       continuePendingWork: true,
+      // Re-applied on every resume: the runtime keeps the prompt a session was
+      // created with, so without this a durable lead or CoS conversation never
+      // learns about tools or guidance added since the day it started.
+      systemMessage: {
+        mode: 'append',
+        content: buildSystemInstructions(kind, projectId, worktreeId),
+      },
       tools,
       onPermissionRequest: makePermissionHandler(() => sessionRef, {
         allowAllPermissions: persisted.allowAllPermissions,

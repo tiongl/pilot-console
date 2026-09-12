@@ -14,6 +14,7 @@ import { PilotConsoleLogo } from '../components/PilotConsoleLogo';
 import { useAutomation } from '../lib/automation-context';
 import CoSStatusWidget from '../components/cos/CoSStatusWidget';
 import FloatingLeadChat from '../components/cos/FloatingLeadChat';
+import { reconcileDelegatedWorktrees } from './sidebar-worktrees';
 
 const ProjectLayout = lazy(() => import('./ProjectLayout'));
 const WorktreeLayout = lazy(() => import('./WorktreeLayout'));
@@ -286,6 +287,11 @@ function ProjectNav({
   // them and pull in (and reveal) the worktree they created.
   useEffect(() => {
     let cancelled = false;
+    // Worktree ids we have seen a delegation for. The lead retires a merged
+    // worktree on its own, which deletes its delegations — without tracking
+    // what went away, the tree kept drawing worktrees that no longer exist
+    // until the user reloaded the page.
+    let knownDelegated = new Set<string>();
     const poll = async () => {
       try {
         const res = await fetch('/api/delegations');
@@ -297,20 +303,24 @@ function ProjectNav({
 
         // A delegation whose worktree we have never seen means the lead just
         // created one: refresh that project's tree and open it.
+        // A delegation whose worktree we have never seen means the lead just
+        // created one; one that has gone away, or gone `closed`, means the lead
+        // has retired it and the worktree may be gone with it.
         setWorktreeMap((current) => {
-          const missing = new Set<string>();
-          for (const d of Object.values(byWorktree)) {
-            const known = (current[d.projectId] || []).some((w) => w.id === d.worktreeId);
-            if (!known) missing.add(d.projectId);
-          }
-          if (missing.size > 0) {
-            missing.forEach((projectId) => {
-              void fetchWorktrees(projectId);
-              setExpandedIds((prev) => (prev.has(projectId) ? prev : new Set(prev).add(projectId)));
-            });
-          }
+          const { appeared, retired } = reconcileDelegatedWorktrees({
+            worktreesByProject: current,
+            delegationsByWorktree: byWorktree,
+            knownDelegated,
+          });
+
+          appeared.forEach((projectId) => {
+            void fetchWorktrees(projectId);
+            setExpandedIds((prev) => (prev.has(projectId) ? prev : new Set(prev).add(projectId)));
+          });
+          retired.forEach((projectId) => void fetchWorktrees(projectId));
           return current;
         });
+        knownDelegated = new Set(Object.keys(byWorktree));
       } catch { /* offline or server restarting */ }
     };
     void poll();

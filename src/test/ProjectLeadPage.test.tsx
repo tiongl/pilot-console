@@ -63,6 +63,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -137,6 +138,36 @@ describe('ProjectLeadPage worker tabs', () => {
 
     await screen.findByTestId('lead-tab-lead');
     expect(screen.queryByTestId('lead-tab-wt-1')).toBeNull();
+  });
+
+  /**
+   * The lead retires a merged worktree itself, which deletes its delegation and
+   * takes the tab with it. The selection was left pointing at a tab that no
+   * longer existed, so the page showed no pane at all.
+   */
+  it('falls back to the lead tab when the open worker is closed', async () => {
+    delegations = [liveDelegation];
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await renderPage();
+    fireEvent.click(await screen.findByTestId('lead-tab-wt-1'));
+    expect(screen.getByTestId('pane-agent-wt-1')).toBeTruthy();
+
+    // The lead closed it out: its delegation is gone on the next poll.
+    delegations = [];
+    await vi.advanceTimersByTimeAsync(9000);
+
+    await waitFor(() => expect(screen.queryByTestId('lead-tab-wt-1')).toBeNull());
+    expect(screen.getByTestId('lead-tab-lead').getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByTestId('pane-project_lead-lead')).toBeTruthy();
+  });
+
+  it('keeps the chosen worker tab selected while it is still open', async () => {
+    delegations = [liveDelegation];
+    await renderPage();
+
+    fireEvent.click(await screen.findByTestId('lead-tab-wt-1'));
+
+    expect(screen.getByTestId('lead-tab-wt-1').getAttribute('aria-selected')).toBe('true');
   });
 
   it('switches to the worker pane when its tab is clicked', async () => {    delegations = [liveDelegation];
@@ -241,3 +272,4 @@ describe('ProjectLeadPage details panel', () => {
     await waitFor(() => expect(grid?.className).toContain('xl:grid-cols-[minmax(0,1fr)]'));
   });
 });
+

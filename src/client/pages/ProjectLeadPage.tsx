@@ -165,6 +165,15 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
     })),
   ];
 
+  // The lead retires a merged worktree on its own, which takes its tab with it.
+  // Leaving the selection pointing at a tab that no longer exists left the page
+  // showing no pane at all, with every tab unselected.
+  const workerIds = workers.map((d) => d.worktreeId).join(',');
+  useEffect(() => {
+    if (activeTab === 'lead') return;
+    if (!workerIds.split(',').includes(activeTab)) setActiveTab('lead');
+  }, [activeTab, workerIds]);
+
   return (
     <div
       className={`grid h-[calc(100vh-4rem)] grid-cols-1 gap-4 overflow-auto p-4 xl:min-h-0 xl:overflow-hidden ${
