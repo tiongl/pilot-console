@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
+import { StrictMode } from 'react';
 import { useAgentSocket } from '@/hooks/useAgentSocket';
 
 // Minimal WebSocket spy mirroring the useCliSocket test harness.
@@ -141,5 +142,66 @@ describe('useAgentSocket session recovery', () => {
       flushReconnect();
       expect(latest().url).toContain('sessionId=sess-1');
     }
+  });
+});
+
+/**
+ * Streamed text arrives as deltas, which are appended rather than replaced. A
+ * second live socket on the same session therefore makes the pane append every
+ * fragment twice — the answer visibly repeats sub-phrases until the final full
+ * message lands and replaces it.
+ */
+describe('useAgentSocket duplicate delivery', () => {
+  beforeEach(() => {
+    wsInstances = [];
+    globalThis.WebSocket = SpyWebSocket as unknown as typeof WebSocket;
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    globalThis.WebSocket = OriginalWebSocket;
+    vi.useRealTimers();
+  });
+
+  function deltas(onMessage: ReturnType<typeof vi.fn>) {
+    return onMessage.mock.calls
+      .map(([m]) => m as { type: string; delta?: string })
+      .filter((m) => m.type === 'assistant_delta')
+      .map((m) => m.delta);
+  }
+
+  it('delivers each delta once when React mounts the effect twice', () => {
+    const onMessage = vi.fn();
+    renderHook(() => useAgentSocket({ sessionId: 'sess-1', onMessage }), { wrapper: StrictMode });
+
+    // Every socket the double-mount created gets the same frame from the server.
+    act(() => {
+      for (const ws of wsInstances) {
+        ws.simulateOpen();
+        ws.simulateMessage({ type: 'assistant_delta', id: 'a1', delta: 'hello' });
+      }
+    });
+
+    expect(deltas(onMessage)).toEqual(['hello']);
+  });
+
+  it('ignores frames from a socket that has been superseded', () => {
+    const onMessage = vi.fn();
+    const { result } = renderHook(() => useAgentSocket({ sessionId: 'sess-1', onMessage }));
+    const first = latest();
+    act(() => {
+      first.simulateOpen();
+      first.simulateMessage({ type: 'ready', sessionId: 'sess-1', model: 'auto', mode: 'interactive', status: 'idle' });
+    });
+
+    act(() => result.current.switchTo('sess-2'));
+    // The old socket is still finishing its close and can flush buffered frames.
+    act(() => first.simulateMessage({ type: 'assistant_delta', id: 'a1', delta: 'stale' }));
+    act(() => {
+      latest().simulateOpen();
+      latest().simulateMessage({ type: 'assistant_delta', id: 'a1', delta: 'live' });
+    });
+
+    expect(deltas(onMessage)).toEqual(['live']);
   });
 });

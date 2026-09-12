@@ -55,6 +55,28 @@ export function useAgentSocket(options: UseAgentSocketOptions = {}) {
   const closedIntentionally = useRef(false);
   const pending = useRef<AgentClientMessage[]>([]);
   const connectRef = useRef<() => void>(() => {});
+  /**
+   * Drop a socket's handlers before closing it.
+   *
+   * A socket that has been replaced can still deliver buffered frames while it
+   * finishes closing, and in dev React StrictMode mounts every effect twice, so
+   * the old socket overlaps the new one. Both called the same `onMessage`, and
+   * because streamed text arrives as *deltas* — appended, not replaced — the
+   * pane applied every fragment twice: the answer visibly repeated sub-phrases
+   * until the final full message landed and replaced it.
+   */
+  const discardSocket = useCallback((ws: WebSocket | null) => {
+    if (!ws) return;
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onerror = null;
+    ws.onclose = null;
+    try {
+      ws.close();
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   /**
    * Retry forever with exponential backoff (capped) plus jitter. The server can
@@ -72,6 +94,10 @@ export function useAgentSocket(options: UseAgentSocketOptions = {}) {
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    // A socket still completing its handshake is not OPEN, so without this the
+    // StrictMode double-mount leaves two live sockets on the same session.
+    discardSocket(wsRef.current);
+    wsRef.current = null;
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const params = new URLSearchParams();
@@ -163,15 +189,10 @@ export function useAgentSocket(options: UseAgentSocketOptions = {}) {
     const ws = wsRef.current;
     if (ws && ws.readyState !== WebSocket.OPEN) {
       wsRef.current = null;
-      ws.onclose = null;
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
-      }
+      discardSocket(ws);
     }
     connect();
-  }, [connect]);
+  }, [connect, discardSocket]);
 
   useEffect(() => {
     closedIntentionally.current = false;
@@ -179,9 +200,11 @@ export function useAgentSocket(options: UseAgentSocketOptions = {}) {
     return () => {
       closedIntentionally.current = true;
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-      wsRef.current?.close();
+      const ws = wsRef.current;
+      wsRef.current = null;
+      discardSocket(ws);
     };
-  }, [connect]);
+  }, [connect, discardSocket]);
 
   const send = useCallback((msg: AgentClientMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -200,17 +223,9 @@ export function useAgentSocket(options: UseAgentSocketOptions = {}) {
     reconnectAttempts.current = 0;
     const ws = wsRef.current;
     wsRef.current = null;
-    if (ws) {
-      // Detach the auto-reconnect handler so closing doesn't race with connect().
-      ws.onclose = null;
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
-      }
-    }
+    discardSocket(ws);
     connect();
-  }, [connect]);
+  }, [connect, discardSocket]);
 
   /** Switch to an existing session by id (resumes/reconnects to it). */
   const switchTo = useCallback(
@@ -223,18 +238,12 @@ export function useAgentSocket(options: UseAgentSocketOptions = {}) {
       reconnectAttempts.current = 0;
       const ws = wsRef.current;
       wsRef.current = null;
-      if (ws) {
-        ws.onclose = null;
-        try {
-          ws.close();
-        } catch {
-          /* ignore */
-        }
-      }
+      discardSocket(ws);
       connect();
     },
-    [connect],
+    [connect, discardSocket],
   );
 
   return { state, send, reset, switchTo, reconnect };
 }
+
