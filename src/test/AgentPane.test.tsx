@@ -1212,6 +1212,45 @@ describe('AgentPane', () => {
       emit(question);
       expect(screen.getAllByTestId('ask-user-prompt')).toHaveLength(1);
     });
+
+    // The agent's turn is parked inside the ask_user call, so a normal send
+    // would queue behind a turn that can never end. The buttons must never be
+    // a gate on typing.
+    it('answers the pending question with text typed in the main composer', () => {
+      renderPane();
+      emit(question);
+      const textarea = screen.getByPlaceholderText(/Click an option above/i);
+      fireEvent.change(textarea, { target: { value: 'actually use DuckDB' } });
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+      expect(hooked.send).toHaveBeenCalledWith({
+        type: 'ask_user_response',
+        requestId: 'q1',
+        answer: 'actually use DuckDB',
+      });
+      expect(hooked.send).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'send' }),
+      );
+      expect(screen.queryByTestId('ask-user-prompt')).toBeNull();
+    });
+
+    it('routes the composer back to a normal send once nothing is pending', () => {
+      renderPane();
+      emit(question);
+      emit({ type: 'ask_user_resolved', requestId: 'q1' });
+      const textarea = screen.getByPlaceholderText(/Message Copilot/i);
+      fireEvent.change(textarea, { target: { value: 'carry on' } });
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+      expect(hooked.send).toHaveBeenCalledWith({ type: 'send', prompt: 'carry on' });
+    });
+
+    it('still runs slash commands while a question is pending', () => {
+      renderPane();
+      emit(question);
+      const textarea = screen.getByPlaceholderText(/Click an option above/i);
+      fireEvent.change(textarea, { target: { value: '/mode autopilot' } });
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+      expect(hooked.send).toHaveBeenCalledWith({ type: 'set_mode', mode: 'autopilot' });
+    });
   });
 
   describe('voice input', () => {
@@ -1318,3 +1357,4 @@ describe('AgentPane', () => {
     });
   });
 });
+

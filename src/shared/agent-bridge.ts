@@ -1686,6 +1686,13 @@ yes/no, approve/revise, pick one of several approaches or files — call the ask
 they can answer with a single click. Offer specific, self-explanatory options. Do not end a
 turn with a question in prose when ask_user would do; only fall back to prose for genuinely
 open-ended questions.
+This applies above all to go-ahead checks. Whenever you would write "shall I proceed?",
+"want me to continue?", "ready for me to apply this?" or similar, ask it with ask_user and
+make the first option an explicit go-ahead ("Go ahead", "Yes, apply it") so the user can
+approve with one click instead of typing. Never leave a confirmation sitting in prose.
+The user may ignore the buttons and type something else; whatever they type comes back to
+you as the answer. Treat a typed reply as their real instruction and follow it, even when it
+does not match any option you offered.
 `;
 
 const WORKTREE_DIGEST_INSTRUCTIONS = `
@@ -1780,9 +1787,10 @@ export function createAskUserTool(getSession: () => AgentSession | undefined): T
   return defineTool('ask_user', {
     description:
       'Ask the user a question and let them answer by clicking a button. Use this for ANY ' +
-      'non-freeform question — yes/no confirmations, picking between approaches, choosing a ' +
-      'file or branch — instead of asking in prose and waiting for them to type. Returns the ' +
-      'option the user chose. Prefer this over ending your turn with a question.',
+      'non-freeform question — yes/no confirmations, "shall I proceed?" go-ahead checks, ' +
+      'picking between approaches, choosing a file or branch — instead of asking in prose and ' +
+      'waiting for them to type. Returns the option the user chose, or whatever they typed ' +
+      'instead. Prefer this over ending your turn with a question.',
     parameters: {
       type: 'object',
       properties: {

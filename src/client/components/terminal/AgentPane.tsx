@@ -1196,6 +1196,16 @@ export default function AgentPane({
       setSlashSel(0);
       return;
     }
+    // A pending ask_user call is blocking the agent's turn, so a normal send
+    // would queue behind a turn that can never end. Route the typed text to the
+    // question instead: the buttons are a shortcut, never a gate on typing.
+    const awaiting = questions[0];
+    if (awaiting) {
+      respondAskUser(awaiting.requestId, trimmed);
+      setInput('');
+      atBottomRef.current = true;
+      return;
+    }
     send({ type: 'send', prompt: trimmed });
     // Only anchor the clock when this prompt starts a turn; a follow-up typed
     // mid-turn is queued server-side and must not restart the running timer.
@@ -2197,6 +2207,8 @@ export default function AgentPane({
             onKeyDown={handleKeyDown}
             placeholder={speech.listening
               ? 'Listening… speak now, then edit before sending'
+              : questions.length > 0
+              ? 'Click an option above, or type an answer / a new instruction'
               : busy
               ? 'Message Copilot… (queued and sent when the current turn ends)'
               : 'Message Copilot… (/ for commands, Enter to send, Shift+Enter for newline)'}

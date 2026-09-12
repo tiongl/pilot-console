@@ -137,6 +137,10 @@ describe('system instructions on resume', () => {
       (resumeConfigs[0]?.systemMessage as { content?: string } | undefined)?.content ?? '',
     );
     expect(content).toContain('ask_user');
+    // The user's most common complaint is being made to type "go ahead", so
+    // the guidance has to name go-ahead checks specifically.
+    expect(content).toMatch(/shall I proceed/i);
+    expect(content).toMatch(/go ahead/i);
   });
 
   it('appends rather than replacing the runtime\'s own prompt', async () => {
