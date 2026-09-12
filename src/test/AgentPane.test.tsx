@@ -910,6 +910,98 @@ describe('AgentPane', () => {
     await waitFor(() => expect(screen.queryByTestId('agent-jump-to-bottom')).toBeNull());
   });
 
+  /**
+   * Following the bottom cannot rely on React commits alone. Markdown, diagrams
+   * and images settle afterwards, and that late growth fires no scroll event —
+   * so the view silently drifts up while the pane still thinks it is pinned.
+   */
+  describe('auto-follow', () => {
+    /** Give the pane a real geometry, since jsdom lays nothing out. */
+    const measure = (scroller: HTMLElement, scrollHeight: number, clientHeight = 400) => {
+      Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: scrollHeight });
+      Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: clientHeight });
+    };
+
+    const settled = async (scroller: HTMLElement) => {
+      // Content the pane did not render itself, e.g. a diagram finishing late.
+      scroller.appendChild(document.createElement('div'));
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => requestAnimationFrame(() => r(null)));
+    };
+
+    it('re-pins when content grows after the render', async () => {
+      const { container } = renderPane();
+      emit({ type: 'replay', events: [{ kind: 'assistant', id: 'a1', ts: 1, content: 'Reply' }] });
+      await waitFor(() => expect(screen.getByText('Reply')).toBeTruthy());
+
+      const scroller = container.querySelector('.overflow-y-auto') as HTMLElement;
+      measure(scroller, 2_000);
+      // The growth itself moved us off the bottom; no scroll event was fired.
+      scroller.scrollTop = 0;
+      await settled(scroller);
+
+      expect(scroller.scrollTop).toBe(2_000);
+    });
+
+    it('leaves the scroll alone once the user has scrolled away', async () => {
+      const { container } = renderPane();
+      emit({ type: 'replay', events: [{ kind: 'assistant', id: 'a1', ts: 1, content: 'Reply' }] });
+      await waitFor(() => expect(screen.getByText('Reply')).toBeTruthy());
+
+      const scroller = container.querySelector('.overflow-y-auto') as HTMLElement;
+      measure(scroller, 2_000);
+      scroller.scrollTop = 0;
+      fireEvent.scroll(scroller);
+      await screen.findByTestId('agent-jump-to-bottom');
+
+      await settled(scroller);
+      expect(scroller.scrollTop).toBe(0);
+    });
+
+    it('keeps following from a hair above the bottom', async () => {
+      const { container } = renderPane();
+      emit({ type: 'replay', events: [{ kind: 'assistant', id: 'a1', ts: 1, content: 'Reply' }] });
+      await waitFor(() => expect(screen.getByText('Reply')).toBeTruthy());
+
+      const scroller = container.querySelector('.overflow-y-auto') as HTMLElement;
+      measure(scroller, 2_000);
+      // 50px short of the bottom: a nudge of the wheel, not a decision to read back.
+      scroller.scrollTop = 1_550;
+      fireEvent.scroll(scroller);
+
+      expect(screen.queryByTestId('agent-jump-to-bottom')).toBeNull();
+      await settled(scroller);
+      expect(scroller.scrollTop).toBe(2_000);
+    });
+
+    it('says it is following while the agent writes', async () => {
+      renderPane();
+      expect(screen.queryByTestId('agent-following')).toBeNull();
+
+      emit({ type: 'status', status: 'busy' });
+      expect(await screen.findByTestId('agent-following')).toBeTruthy();
+
+      emit({ type: 'status', status: 'idle' });
+      await waitFor(() => expect(screen.queryByTestId('agent-following')).toBeNull());
+    });
+
+    it('calls out new messages rather than a plain jump while busy', async () => {
+      const { container } = renderPane();
+      emit({ type: 'status', status: 'busy' });
+      emit({ type: 'replay', events: [{ kind: 'assistant', id: 'a1', ts: 1, content: 'Reply' }] });
+      await waitFor(() => expect(screen.getByText('Reply')).toBeTruthy());
+
+      const scroller = container.querySelector('.overflow-y-auto') as HTMLElement;
+      measure(scroller, 2_000);
+      scroller.scrollTop = 0;
+      fireEvent.scroll(scroller);
+
+      const jump = await screen.findByTestId('agent-jump-to-bottom');
+      expect(jump.textContent).toContain('New messages');
+      expect(screen.queryByTestId('agent-following')).toBeNull();
+    });
+  });
+
   it('searches the conversation and reports the match count', async () => {
     renderPane();
     emit({

@@ -219,6 +219,13 @@ const MAX_TOOL_OUTPUT_CHARS = 50_000;
 // of DOM nodes at once.
 const RENDER_WINDOW = 400;
 
+/**
+ * How close to the bottom still counts as "at the bottom" for auto-follow.
+ * Generous on purpose: a line or two of slack keeps following after a nudge of
+ * the wheel or a trackpad's inertia, which is what the eye expects.
+ */
+const NEAR_BOTTOM_PX = 120;
+
 /** Bound live-streamed tool output kept in browser memory (matches the server). */
 const clampToolOutput = (text: string): string =>
   text.length > MAX_TOOL_OUTPUT_CHARS
@@ -750,7 +757,40 @@ export default function AgentPane({
     if (atBottomRef.current && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [events, visibility, permissions, exitPlans]);
+  }, [events, visibility, permissions, exitPlans, questions]);
+
+  /**
+   * Keep following the bottom as the content settles.
+   *
+   * The effect above only runs on commit, but plenty of height arrives later:
+   * markdown re-layout, diagrams, images, wrapped code. That late growth fires
+   * no scroll event, so the transcript drifted above the bottom while we still
+   * believed we were sitting on it — no auto-scroll, and no affordance either,
+   * because nothing told us we had fallen behind. Watching the subtree catches
+   * every one of those, and the frame coalesces a burst of streamed deltas into
+   * a single scroll.
+   */
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    let frame = 0;
+    const pin = () => {
+      if (!atBottomRef.current) return;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (atBottomRef.current) el.scrollTop = el.scrollHeight;
+      });
+    };
+    const mo = new MutationObserver(pin);
+    mo.observe(el, { childList: true, subtree: true, characterData: true });
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(pin);
+    ro?.observe(el);
+    return () => {
+      cancelAnimationFrame(frame);
+      mo.disconnect();
+      ro?.disconnect();
+    };
+  }, []);
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
@@ -762,7 +802,7 @@ export default function AgentPane({
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
     atBottomRef.current = bottom;
     setAtBottom((prev) => (prev === bottom ? prev : bottom));
   };
@@ -2080,8 +2120,25 @@ export default function AgentPane({
             }}
           >
             <ArrowDown className="h-3.5 w-3.5" />
-            Jump to latest
+            {busy ? 'New messages' : 'Jump to latest'}
           </button>
+        )}
+
+        {/* Says why the view is moving on its own while the agent writes. */}
+        {atBottom && !outline && busy && (
+          <div
+            data-testid="agent-following"
+            title="Scroll up to stop following"
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1 h-6 px-2.5 rounded-full border text-[10px] font-medium pointer-events-none"
+            style={{
+              borderColor: appearance.border,
+              backgroundColor: appearance.surfaceStrong,
+              color: appearance.muted,
+            }}
+          >
+            <ArrowDown className="h-3 w-3" />
+            Following
+          </div>
         )}
       </div>
 
