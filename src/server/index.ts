@@ -13,6 +13,7 @@ import { getGitHubCliProfile } from '../shared/gh-cli-auth';
 import { upsertUser, listUsers, updateUserRole, deleteUser } from '../shared/user-store';
 import { createProject, listProjects, getProjectById, updateProject, deleteProject, addSkill, listSkills, updateSkill, deleteSkill, listWorktrees, createWorktree, attachExistingWorktree, attachSubnode, getWorktreeById, consumeWorktreeSeed } from '../shared/project-store';
 import { assessWorktreeCleanup, closeWorktree } from '../shared/worktree-cleanup';
+import { createTodo, deleteTodo, listTodos, updateTodo } from '../shared/todo-store';
 import { listSessionsForUser, listAllSessions, getCopilotSessionDetail, listCopilotSessionsForProject } from '../shared/session-store';
 import { setupWebSocketServer } from './websocket';
 import { setupAgentWebSocketServer } from './agent-websocket';
@@ -645,36 +646,34 @@ app.delete('/api/projects/:id/skills/:skillId', (req, res) => {
 
 // --- Todos ---
 app.get('/api/projects/:id/todos', (req, res) => {
-  const db = getDb();
-  const todos = db.prepare('SELECT id, project_id as projectId, parent_id as parentId, text, done, position, created_at as createdAt FROM project_todos WHERE project_id = ? ORDER BY position').all(req.params.id);
-  res.json({ todos });
+  res.json({ todos: listTodos(req.params.id) });
 });
 
 app.post('/api/projects/:id/todos', (req, res) => {
-  const db = getDb();
-  const id = crypto.randomUUID();
-  const maxPos = db.prepare('SELECT COALESCE(MAX(position), -1) as maxPos FROM project_todos WHERE project_id = ? AND parent_id IS ?').get(req.params.id, req.body.parentId || null) as { maxPos: number };
-  db.prepare('INSERT INTO project_todos (id, project_id, parent_id, text, position) VALUES (?, ?, ?, ?, ?)').run(id, req.params.id, req.body.parentId || null, req.body.text || '', (maxPos?.maxPos ?? -1) + 1);
-  res.status(201).json({ id });
+  try {
+    const todo = createTodo({
+      projectId: req.params.id,
+      text: typeof req.body.text === 'string' ? req.body.text : '',
+      parentId: req.body.parentId ?? null,
+    });
+    res.status(201).json({ id: todo.id, todo });
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+  }
 });
 
 app.patch('/api/projects/:id/todos/:todoId', (req, res) => {
-  const db = getDb();
-  const sets: string[] = [];
-  const vals: unknown[] = [];
-  if (req.body.text !== undefined) { sets.push('text = ?'); vals.push(req.body.text); }
-  if (req.body.done !== undefined) { sets.push('done = ?'); vals.push(req.body.done ? 1 : 0); }
-  if (req.body.parentId !== undefined) { sets.push('parent_id = ?'); vals.push(req.body.parentId); }
-  if (req.body.position !== undefined) { sets.push('position = ?'); vals.push(req.body.position); }
-  if (sets.length > 0) {
-    vals.push(req.params.todoId, req.params.id);
-    db.prepare(`UPDATE project_todos SET ${sets.join(', ')} WHERE id = ? AND project_id = ?`).run(...vals);
+  try {
+    const todo = updateTodo(req.params.id, req.params.todoId, req.body);
+    if (!todo) return res.status(404).json({ error: 'Todo not found' });
+    res.json({ ok: true, todo });
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
   }
-  res.json({ ok: true });
 });
 
 app.delete('/api/projects/:id/todos/:todoId', (req, res) => {
-  getDb().prepare('DELETE FROM project_todos WHERE id = ? AND project_id = ?').run(req.params.todoId, req.params.id);
+  deleteTodo(req.params.id, req.params.todoId);
   res.json({ ok: true });
 });
 

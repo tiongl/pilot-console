@@ -23,6 +23,7 @@ interface Harness {
   closeWorktreeMock: ReturnType<typeof vi.fn>;
   auditRows: () => Array<{ action: string; reasoning: string; subjectId: string | null }>;
   setWorktrees: (value: Array<{ id: string; name: string }>) => void;
+  todoRows: () => Array<{ id: string; text: string; done: number; parentId: string | null }>;
 }
 
 const projectId = 'p1';
@@ -138,6 +139,18 @@ async function buildTools(options: { interventionMode?: string } = {}): Promise<
     hasPendingPlanReview: () => false,
     resolveLeadPlanReview: vi.fn(),
   }));
+  db.exec(`
+    CREATE TABLE project_todos (
+      id         TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      parent_id  TEXT REFERENCES project_todos(id) ON DELETE CASCADE,
+      text       TEXT NOT NULL DEFAULT '',
+      done       INTEGER NOT NULL DEFAULT 0,
+      position   INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+  db.pragma('foreign_keys = ON');
 
   const mod = await import('../shared/project-lead-tools');
   const built = mod.createProjectLeadTools(projectId, 'user-1', () => 'lead-session') as unknown as ToolLike[];
@@ -169,6 +182,13 @@ async function buildTools(options: { interventionMode?: string } = {}): Promise<
         subjectId: string | null;
       }>,
     setWorktrees: (value: Array<{ id: string; name: string }>) => { worktrees = value; },
+    todoRows: () =>
+      db.prepare('SELECT id, text, done, parent_id AS parentId FROM project_todos ORDER BY position').all() as Array<{
+        id: string;
+        text: string;
+        done: number;
+        parentId: string | null;
+      }>,
   };
 }
 
@@ -432,6 +452,121 @@ describe('approve_merge', () => {
 
       expect(result.worktrees[0]).toMatchObject({ safe: false, error: 'Worktree not found' });
       expect(result.worktrees[1]).toMatchObject({ worktreeId: 'wt-2', safe: true });
+    });
+  });
+
+  /**
+   * The lead's plan used to live only in its replies, so compaction eventually
+   * lost it and the user had no way to see what it thought was outstanding.
+   */
+  describe('todo tools', () => {
+    it('adds several items in one call, in order', async () => {
+      const h = await buildTools();
+
+      const result = (await h.tool('add_todos').handler({
+        items: [{ text: 'Ship login' }, { text: 'Ship search' }],
+      })) as { added: Array<{ id: string }> };
+
+      expect(result.added).toHaveLength(2);
+      expect(h.todoRows().map((r) => r.text)).toEqual(['Ship login', 'Ship search']);
+    });
+
+    it('nests an item under the one it was given', async () => {
+      const h = await buildTools();
+      const parent = (await h.tool('add_todos').handler({ items: [{ text: 'Ship login' }] })) as {
+        added: Array<{ id: string }>;
+      };
+
+      await h.tool('add_todos').handler({
+        items: [{ text: 'Write tests', parentId: parent.added[0].id }],
+      });
+
+      const child = h.todoRows().find((r) => r.text === 'Write tests');
+      expect(child?.parentId).toBe(parent.added[0].id);
+    });
+
+    // A batch that half-lands is worse than one that fails: the lead cannot
+    // tell which items it still owes without re-reading the whole list.
+    it('names the item that was rejected', async () => {
+      const h = await buildTools();
+
+      await expect(
+        h.tool('add_todos').handler({
+          items: [{ text: 'Ship login' }, { text: 'Write tests', parentId: 'ghost' }],
+        }),
+      ).rejects.toThrow(/Item 2 \("Write tests"\)/);
+    });
+
+    it('refuses an empty batch', async () => {
+      const h = await buildTools();
+
+      await expect(h.tool('add_todos').handler({ items: [] })).rejects.toThrow(/at least one/);
+    });
+
+    it('ticks an item off', async () => {
+      const h = await buildTools();
+      const added = (await h.tool('add_todos').handler({ items: [{ text: 'Ship login' }] })) as {
+        added: Array<{ id: string }>;
+      };
+
+      await h.tool('update_todo').handler({ todoId: added.added[0].id, done: true });
+
+      expect(h.todoRows()[0].done).toBe(1);
+    });
+
+    it('tells the lead when the id it used is gone', async () => {
+      const h = await buildTools();
+
+      await expect(
+        h.tool('update_todo').handler({ todoId: 'ghost', done: true }),
+      ).rejects.toThrow(/No todo ghost/);
+    });
+
+    it('reads the list back as an indented outline', async () => {
+      const h = await buildTools();
+      const parent = (await h.tool('add_todos').handler({ items: [{ text: 'Ship login' }] })) as {
+        added: Array<{ id: string }>;
+      };
+      await h.tool('add_todos').handler({
+        items: [{ text: 'Write tests', parentId: parent.added[0].id }],
+      });
+
+      const result = (await h.tool('list_todos').handler({})) as {
+        outline: string;
+        total: number;
+        remaining: number;
+      };
+
+      expect(result.outline).toContain('  - [ ] Write tests');
+      expect(result).toMatchObject({ total: 2, remaining: 2 });
+    });
+
+    it('counts only unfinished items as remaining', async () => {
+      const h = await buildTools();
+      const added = (await h.tool('add_todos').handler({
+        items: [{ text: 'Ship login' }, { text: 'Ship search' }],
+      })) as { added: Array<{ id: string }> };
+      await h.tool('update_todo').handler({ todoId: added.added[0].id, done: true });
+
+      const result = (await h.tool('list_todos').handler({})) as { remaining: number };
+      expect(result.remaining).toBe(1);
+    });
+
+    it('deletes an item and says how many sub-items went with it', async () => {
+      const h = await buildTools();
+      const parent = (await h.tool('add_todos').handler({ items: [{ text: 'Ship login' }] })) as {
+        added: Array<{ id: string }>;
+      };
+      await h.tool('add_todos').handler({
+        items: [{ text: 'Write tests', parentId: parent.added[0].id }],
+      });
+
+      const result = (await h.tool('delete_todo').handler({ todoId: parent.added[0].id })) as {
+        alsoDeletedSubItems: number;
+      };
+
+      expect(result.alsoDeletedSubItems).toBe(1);
+      expect(h.todoRows()).toEqual([]);
     });
   });
 });

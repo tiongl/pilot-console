@@ -17,14 +17,20 @@ interface TodoItem {
 interface Props {
   projectId: string;
   projectName?: string;
+  /**
+   * Poll interval in ms. The Project Lead edits this same list through its own
+   * tools, so a panel that only loaded once would show a stale plan.
+   */
+  pollMs?: number;
 }
 
-export default function ProjectTodoPanel({ projectId, projectName }: Props) {
+export default function ProjectTodoPanel({ projectId, projectName, pollMs = 8000 }: Props) {
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [newText, setNewText] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
 
   const copyTodo = (text: string, id: string) => {
     navigator.clipboard.writeText(text);
@@ -43,6 +49,19 @@ export default function ProjectTodoPanel({ projectId, projectName }: Props) {
   }, [projectId]);
 
   useEffect(() => { fetchTodos(); }, [fetchTodos]);
+
+  // Text boxes are uncontrolled and keyed on their text, so applying a poll
+  // while the user is typing would remount the box out from under them and
+  // lose the edit. Skip those rounds; the next one picks the changes up.
+  useEffect(() => {
+    if (!pollMs) return;
+    const timer = setInterval(() => {
+      const active = document.activeElement;
+      if (active && rootRef.current?.contains(active)) return;
+      void fetchTodos();
+    }, pollMs);
+    return () => clearInterval(timer);
+  }, [fetchTodos, pollMs]);
 
   const addTodo = async (parentId: string | null = null) => {
     const text = parentId ? '' : newText.trim();
@@ -145,11 +164,19 @@ export default function ProjectTodoPanel({ projectId, projectName }: Props) {
             className="h-3.5 w-3.5 shrink-0 rounded border-muted-foreground/50 mt-1"
           />
 
-          {/* Text — multi-line, auto-resize */}
+          {/* Text — multi-line, auto-resize. Keyed on the text so an edit made
+              elsewhere (the lead's tools, the other panel) is picked up; the
+              poll never lands while this box has focus, so it cannot clobber
+              what the user is typing. */}
           <textarea
+            key={todo.text}
             defaultValue={todo.text}
             rows={1}
+            data-testid={`todo-text-${todo.id}`}
             onBlur={(e) => {
+              // An empty box is an accidental clear, not a request to store a
+              // blank row: the server rejects it, so restore what was there.
+              if (!e.target.value.trim()) { e.target.value = todo.text; return; }
               if (e.target.value !== todo.text) updateTodo(todo.id, { text: e.target.value });
             }}
             onKeyDown={(e) => {
@@ -199,7 +226,7 @@ export default function ProjectTodoPanel({ projectId, projectName }: Props) {
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full" ref={rootRef} data-testid="todo-panel">
       <div className="px-3 py-2 border-b flex items-center gap-2">
         <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">TODO Prompt</h3>
         {todos.length > 0 && (

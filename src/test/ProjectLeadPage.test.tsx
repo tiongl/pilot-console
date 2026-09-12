@@ -42,6 +42,7 @@ const liveDelegation = {
 };
 
 let delegations: Array<Record<string, unknown>> = [];
+let leadTodos: Array<Record<string, unknown>> = [];
 
 function jsonResponse(body: unknown) {
   return { ok: true, json: async () => body } as unknown as Response;
@@ -50,8 +51,10 @@ function jsonResponse(body: unknown) {
 beforeEach(() => {
   paneProps.length = 0;
   delegations = [];
+  leadTodos = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     if (url.endsWith('/delegations')) return jsonResponse({ delegations });
+    if (url.endsWith('/todos')) return jsonResponse({ todos: leadTodos });
     if (url.endsWith('/audit-log')) return jsonResponse({ entries: [] });
     if (url.endsWith('/decision-threads')) return jsonResponse({ threads: [] });
     if (url.endsWith('/memory')) return jsonResponse(null);
@@ -189,8 +192,35 @@ describe('ProjectLeadPage details panel', () => {
     expect(await screen.findByTestId('lead-side-panel')).toBeTruthy();
   });
 
-  it('remembers that the panel was hidden', async () => {
+  /**
+   * The lead keeps its plan in the project todo list rather than in its replies,
+   * where compaction would eventually lose it. The panel is where the user reads
+   * that plan back.
+   */
+  it('shows the project todo list', async () => {
+    leadTodos = [
+      { id: 't1', projectId, parentId: null, text: 'Ship login', done: 0, position: 0, createdAt: null },
+    ];
     await renderPage();
+
+    const panel = await screen.findByTestId('lead-todos');
+    expect((await screen.findByTestId('todo-text-t1') as HTMLTextAreaElement).value).toBe('Ship login');
+    expect(panel.contains(screen.getByTestId('todo-text-t1'))).toBe(true);
+  });
+
+  it('hides the todo list with the rest of the panel', async () => {
+    leadTodos = [
+      { id: 't1', projectId, parentId: null, text: 'Ship login', done: 0, position: 0, createdAt: null },
+    ];
+    await renderPage();
+    await screen.findByTestId('todo-text-t1');
+
+    fireEvent.click(screen.getByTestId('lead-side-panel-toggle'));
+
+    await waitFor(() => expect(screen.queryByTestId('lead-todos')).toBeNull());
+  });
+
+  it('remembers that the panel was hidden', async () => {    await renderPage();
     fireEvent.click(await screen.findByTestId('lead-side-panel-toggle'));
     await waitFor(() => expect(localStorage.getItem('pilot-console:lead-side-panel')).toBe('hidden'));
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router';
 import { Compass, Users, ChevronRight, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import AgentPane from '../components/terminal/AgentPane';
+import ProjectTodoPanel from '../components/project/ProjectTodoPanel';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 
@@ -262,6 +263,19 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
             ) : (
               <p className="text-sm text-muted-foreground">No memory bootstrapped yet.</p>
             )}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="space-y-0 pb-2">
+            <CardTitle className="text-base">Todo list</CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            {/* The same list the project page shows, and the same one the lead
+                edits with its todo tools — so the plan the lead is working to
+                is visible here rather than buried in the transcript. */}
+            <div className="flex h-80 flex-col overflow-hidden" data-testid="lead-todos">
+              <ProjectTodoPanel projectId={projectId} />
+            </div>
           </CardContent>
         </Card>
         <Card>

@@ -1732,6 +1732,12 @@ completing a significant review, call brief_chief_of_staff with a headline-style
 one or two sentences (280 characters or less) so the Chief of Staff stays aware of this
 project's conversation without reading the full transcript. Briefings are a digest, not a
 recap: state what was decided and what it unblocks, and leave the detail in the transcript.
+
+Keep the project todo list current — it is your plan of record, shared with the user, and it
+outlives this conversation when the transcript is compacted away. Call list_todos at the start
+of a turn that involves planning, add_todos when work is identified, and update_todo to tick
+items off as they actually land. Do not keep a plan only in your reply: the user reads the
+list in the Project Lead detail panel and expects it to reflect reality.
 `;
 
 export function deriveStatusFromEvents(events: SessionEvent[] | undefined): AgentStatus {

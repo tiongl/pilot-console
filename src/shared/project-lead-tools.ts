@@ -15,6 +15,14 @@ import {
   updateDelegation,
 } from './delegation-store';
 import { hasPendingPlanReview, resolveLeadPlanReview } from './delegation-runtime';
+import {
+  createTodo,
+  deleteTodo,
+  getTodo,
+  listTodos,
+  renderTodoOutline,
+  updateTodo,
+} from './todo-store';
 
 /** Ceiling on workers one project may have in flight at once. */
 export const MAX_ACTIVE_DELEGATIONS = 3;
@@ -666,6 +674,130 @@ export function createProjectLeadTools(
           closedDelegations: result.closedDelegations,
           mergeEvidence: result.assessment.mergeEvidence,
           note: `Worktree ${result.name} removed; its sessions and delegations are closed.`,
+        };
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    // The lead's own working list. It is the same list the user edits on the
+    // project page, so it is a shared plan rather than scratch memory the user
+    // cannot see — which is the point of storing it instead of keeping it in
+    // the conversation, where compaction eventually loses it.
+    defineTool('list_todos', {
+      description:
+        "Read this project's todo list: the shared plan shown on the project page and in the " +
+        'Project Lead detail panel. Each line carries the id the other todo tools take. ' +
+        'Check this before planning work so you build on the list instead of duplicating it.',
+      parameters: { type: 'object', properties: {} },
+      handler: async () => {
+        const todos = listTodos(projectId);
+        return {
+          outline: renderTodoOutline(projectId),
+          total: todos.length,
+          remaining: todos.filter((t) => !t.done).length,
+        };
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    defineTool('add_todos', {
+      description:
+        'Add items to the project todo list. Pass several at once when breaking work down. ' +
+        'Give parentId (a todo id from list_todos) to nest an item under another. ' +
+        'The user sees these immediately, so write them as work to be done, not as notes.',
+      parameters: {
+        type: 'object',
+        properties: {
+          items: {
+            type: 'array',
+            description: 'The todos to add, in the order they should appear.',
+            items: {
+              type: 'object',
+              properties: {
+                text: { type: 'string' },
+                parentId: {
+                  type: 'string',
+                  description: 'Optional id of the todo to nest this one under.',
+                },
+              },
+              required: ['text'],
+            },
+          },
+        },
+        required: ['items'],
+      },
+      handler: async ({ items }: { items: Array<{ text: string; parentId?: string }> }) => {
+        if (!Array.isArray(items) || items.length === 0) {
+          throw new Error('Pass at least one todo to add.');
+        }
+        // Added one at a time so a bad parentId reports which item failed
+        // rather than rolling back the whole batch silently.
+        const added = items.map((item, index) => {
+          try {
+            const todo = createTodo({ projectId, text: item.text, parentId: item.parentId ?? null });
+            return { id: todo.id, text: todo.text };
+          } catch (error) {
+            throw new Error(`Item ${index + 1} ("${item.text}") was rejected: ${(error as Error).message}`);
+          }
+        });
+        return { ok: true, added, outline: renderTodoOutline(projectId) };
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    defineTool('update_todo', {
+      description:
+        'Change one todo: tick it off with done, reword it with text, or renest it with ' +
+        'parentId (null moves it to the top level). Tick items off as work actually lands, ' +
+        'so the list the user reads matches the state of the project.',
+      parameters: {
+        type: 'object',
+        properties: {
+          todoId: { type: 'string' },
+          text: { type: 'string' },
+          done: { type: 'boolean' },
+          parentId: {
+            type: ['string', 'null'],
+            description: 'New parent todo id, or null for the top level.',
+          },
+        },
+        required: ['todoId'],
+      },
+      handler: async ({
+        todoId,
+        ...patch
+      }: {
+        todoId: string;
+        text?: string;
+        done?: boolean;
+        parentId?: string | null;
+      }) => {
+        const todo = updateTodo(projectId, todoId, patch);
+        if (!todo) throw new Error(`No todo ${todoId} in this project`);
+        return { ok: true, todo: { id: todo.id, text: todo.text, done: !!todo.done } };
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    defineTool('delete_todo', {
+      description:
+        'Remove a todo and everything nested under it. Only for items that should never be ' +
+        'done — tick off finished work with update_todo instead, so the user keeps the record.',
+      parameters: {
+        type: 'object',
+        properties: { todoId: { type: 'string' } },
+        required: ['todoId'],
+      },
+      handler: async ({ todoId }: { todoId: string }) => {
+        const todo = getTodo(projectId, todoId);
+        if (!todo) throw new Error(`No todo ${todoId} in this project`);
+        const removed = listTodos(projectId).filter((t) => t.parentId === todoId).length;
+        deleteTodo(projectId, todoId);
+        return {
+          ok: true,
+          deleted: todo.text,
+          alsoDeletedSubItems: removed,
+          outline: renderTodoOutline(projectId),
         };
       },
       skipPermission: true,
