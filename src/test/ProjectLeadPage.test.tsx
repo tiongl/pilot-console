@@ -105,8 +105,38 @@ describe('ProjectLeadPage worker tabs', () => {
     expect(screen.getByTestId('pane-agent-wt-1').getAttribute('data-session-id')).toBe('session-new');
   });
 
-  it('switches to the worker pane when its tab is clicked', async () => {
-    delegations = [liveDelegation];
+  /**
+   * Nothing ever removed a tab, so the strip grew with every worktree the
+   * project had ever used. Closing a worktree retires its delegations, and
+   * those must drop out of the strip.
+   */
+  it('drops the tab for a worktree that has been closed', async () => {
+    delegations = [{ ...liveDelegation, status: 'closed' }];
+    await renderPage();
+
+    await screen.findByTestId('lead-tab-lead');
+    expect(screen.queryByTestId('lead-tab-wt-1')).toBeNull();
+    expect(screen.queryByTestId('pane-agent-wt-1')).toBeNull();
+  });
+
+  it('keeps the tab for a worktree whose worker merely finished', async () => {
+    delegations = [{ ...liveDelegation, status: 'done' }];
+    await renderPage();
+
+    expect(await screen.findByTestId('lead-tab-wt-1')).toBeTruthy();
+  });
+
+  // A re-delegated worktree keeps its old rows; a closed one must not be
+  // resurrected by an earlier, still-open delegation on the same worktree.
+  it('ignores an older open delegation once the worktree is closed', async () => {
+    delegations = [liveDelegation, { ...cancelledDelegation, id: 'deleg-newest', status: 'closed' }];
+    await renderPage();
+
+    await screen.findByTestId('lead-tab-lead');
+    expect(screen.queryByTestId('lead-tab-wt-1')).toBeNull();
+  });
+
+  it('switches to the worker pane when its tab is clicked', async () => {    delegations = [liveDelegation];
     await renderPage();
 
     fireEvent.click(await screen.findByTestId('lead-tab-wt-1'));

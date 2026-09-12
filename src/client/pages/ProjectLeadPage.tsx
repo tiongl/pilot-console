@@ -35,7 +35,7 @@ interface Delegation {
   /** The worker's own Copilot session. Without it a worker tab has to guess. */
   sessionId: string | null;
   title: string;
-  status: 'planning' | 'awaiting_plan_review' | 'working' | 'blocked' | 'done' | 'cancelled';
+  status: 'planning' | 'awaiting_plan_review' | 'working' | 'blocked' | 'done' | 'cancelled' | 'closed';
   note: string | null;
   unread: number;
 }
@@ -142,9 +142,15 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
   // delegation in place, and rendering both gave the worktree two tabs with the
   // same id — so clicking either displayed both panes stacked on top of each
   // other. Rows arrive oldest-first, so the last one wins.
+  //
+  // The newest row decides, and only then is `closed` applied: a retired
+  // worktree must not be resurrected by an older delegation that never got
+  // closed out. Keeping those tabs is what made this strip grow without bound.
   const workers = Array.from(
-    delegations.reduce((byWorktree, d) => byWorktree.set(d.worktreeId, d), new Map<string, Delegation>()).values(),
-  );
+    delegations
+      .reduce((byWorktree, d) => byWorktree.set(d.worktreeId, d), new Map<string, Delegation>())
+      .values(),
+  ).filter((d) => d.status !== 'closed');
 
   // Tabs are never closable: the lead is permanent, and a worker tab is the
   // only way back into that worker's session from here.

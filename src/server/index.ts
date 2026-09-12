@@ -11,11 +11,12 @@ import { parse } from 'url';
 import { requireAuth, SESSION_COOKIE, createSession, destroySession, getUserFromToken } from './middleware/auth';
 import { getGitHubCliProfile } from '../shared/gh-cli-auth';
 import { upsertUser, listUsers, updateUserRole, deleteUser } from '../shared/user-store';
-import { createProject, listProjects, getProjectById, updateProject, deleteProject, addSkill, listSkills, updateSkill, deleteSkill, listWorktrees, createWorktree, attachExistingWorktree, attachSubnode, getWorktreeById, deleteWorktree, consumeWorktreeSeed } from '../shared/project-store';
+import { createProject, listProjects, getProjectById, updateProject, deleteProject, addSkill, listSkills, updateSkill, deleteSkill, listWorktrees, createWorktree, attachExistingWorktree, attachSubnode, getWorktreeById, consumeWorktreeSeed } from '../shared/project-store';
+import { assessWorktreeCleanup, closeWorktree } from '../shared/worktree-cleanup';
 import { listSessionsForUser, listAllSessions, getCopilotSessionDetail, listCopilotSessionsForProject } from '../shared/session-store';
 import { setupWebSocketServer } from './websocket';
 import { setupAgentWebSocketServer } from './agent-websocket';
-import { listAgentModels, detachAgentBridge, listLiveAgentSessions, endWorktreeAgentSessions } from '../shared/agent-bridge';
+import { listAgentModels, detachAgentBridge, listLiveAgentSessions } from '../shared/agent-bridge';
 import { getAllSessions, getAllSessionsWithExited, getSessionStatus, endCliSession, endSessionByProject, initDaemonBridge } from '../shared/cli-bridge';
 import { getDb } from '../shared/db';
 import { getDigest, listDigests, bootstrapDigest, reconcileDigest } from '../shared/digest-store';
@@ -532,13 +533,22 @@ app.delete('/api/projects/:id/worktrees/:worktreeId', async (req, res) => {
   const projectId = String(req.params.id);
   const worktreeId = String(req.params.worktreeId);
   try {
-    // Any agent still running in this worktree is about to lose its working
-    // directory, so let it go before the directory disappears.
-    await endWorktreeAgentSessions(projectId, worktreeId);
-    deleteWorktree(worktreeId, projectId);
-    res.json({ ok: true });
+    // The dialog spells out what will be lost, so a user-driven delete is
+    // always allowed — but it still routes through closeWorktree so sessions
+    // are released and delegations retired the same way the lead's are.
+    const result = await closeWorktree(projectId, worktreeId, { force: true });
+    res.json({ ok: true, closedSessions: result.closedSessions.length });
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+/** What, if anything, stops this worktree being cleaned up. */
+app.get('/api/projects/:id/worktrees/:worktreeId/cleanup-check', async (req, res) => {
+  try {
+    res.json(await assessWorktreeCleanup(String(req.params.id), String(req.params.worktreeId)));
+  } catch (err) {
+    res.status(404).json({ error: (err as Error).message });
   }
 });
 

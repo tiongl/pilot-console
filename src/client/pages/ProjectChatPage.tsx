@@ -596,13 +596,22 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
         const response = await fetch(`/api/projects/${projectId}/delegations`);
         if (!response.ok) return;
         const data = (await response.json()) as {
-          delegations?: Array<{ worktreeId: string; sessionId: string | null; title: string }>;
+          delegations?: Array<{
+            worktreeId: string;
+            sessionId: string | null;
+            title: string;
+            status: string;
+          }>;
         };
         // Newest delegation wins: a re-delegated worktree keeps the old rows.
+        // Pick it first and only then check `closed`, so a retired worktree is
+        // not reopened by an older delegation that never got closed out.
         const found = [...(data.delegations ?? [])]
           .reverse()
           .find((d) => d.worktreeId === worktreeId && d.sessionId);
-        if (found?.sessionId) worker = { sessionId: found.sessionId, title: found.title };
+        if (found?.sessionId && found.status !== 'closed') {
+          worker = { sessionId: found.sessionId, title: found.title };
+        }
       } catch {
         return;
       }

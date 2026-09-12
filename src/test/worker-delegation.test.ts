@@ -19,6 +19,10 @@ interface Harness {
   setLiveAgent: (value: { sessionId: string } | undefined) => void;
   setDelegation: (value: Record<string, unknown> | undefined) => void;
   setMergeRequest: (value: Record<string, unknown> | undefined) => void;
+  assessCleanup: ReturnType<typeof vi.fn>;
+  closeWorktreeMock: ReturnType<typeof vi.fn>;
+  auditRows: () => Array<{ action: string; reasoning: string; subjectId: string | null }>;
+  setWorktrees: (value: Array<{ id: string; name: string }>) => void;
 }
 
 const projectId = 'p1';
@@ -62,6 +66,23 @@ async function buildTools(options: { interventionMode?: string } = {}): Promise<
   let mergeRequest: Record<string, unknown> | undefined;
   const updated: Array<[string, Record<string, unknown>]> = [];
   const executeMerge = vi.fn(async () => ({ pullRequestUrl: 'https://example/pr/1' }));
+  let worktrees: Array<{ id: string; name: string }> = [];
+  const assessCleanup = vi.fn(async (_p: string, worktreeId: string) => ({
+    worktreeId,
+    name: `name-${worktreeId}`,
+    safe: true,
+    blockers: [],
+    merged: true,
+    mergeEvidence: 'pull_request',
+  }));
+  const closeWorktreeMock = vi.fn(async (_p: string, worktreeId: string) => ({
+    worktreeId,
+    name: 'feature',
+    branch: 'feature/login',
+    closedSessions: ['sess-1'],
+    closedDelegations: 1,
+    assessment: { mergeEvidence: 'pull_request' },
+  }));
 
   const createAgentSession = vi.fn(async () => ({ sessionId: 'worker-session-1' }));
   const sendToSession = vi.fn(async () => {});
@@ -88,7 +109,11 @@ async function buildTools(options: { interventionMode?: string } = {}): Promise<
   }));
   vi.doMock('../shared/project-store', () => ({
     createWorktree: () => ({ id: 'wt-new' }),
-    listWorktrees: () => [],
+    listWorktrees: () => worktrees,
+  }));
+  vi.doMock('../shared/worktree-cleanup', () => ({
+    assessWorktreeCleanup: assessCleanup,
+    closeWorktree: closeWorktreeMock,
   }));
   vi.doMock('../shared/digest-store', () => ({ getDigest: () => undefined, listDigests: () => [] }));
   vi.doMock('../shared/merge-store', () => ({
@@ -135,6 +160,15 @@ async function buildTools(options: { interventionMode?: string } = {}): Promise<
     setLiveAgent: (value) => { liveWorktreeAgent = value; },
     setDelegation: (value) => { delegationForWorktree = value; },
     setMergeRequest: (value: Record<string, unknown> | undefined) => { mergeRequest = value; },
+    assessCleanup,
+    closeWorktreeMock,
+    auditRows: () =>
+      db.prepare('SELECT action, reasoning, subject_id AS subjectId FROM project_audit_log').all() as Array<{
+        action: string;
+        reasoning: string;
+        subjectId: string | null;
+      }>,
+    setWorktrees: (value: Array<{ id: string; name: string }>) => { worktrees = value; },
   };
 }
 
@@ -304,5 +338,100 @@ describe('approve_merge', () => {
     };
 
     expect(result.pullRequestUrl).toBe('https://example/pr/1');
+  });
+
+  // Tabs on the lead page are per-worktree, so nothing shrank that strip until
+  // the lead could retire finished worktrees itself.
+  describe('close_worktree', () => {
+    it('closes a worktree and reports what it retired', async () => {
+      const h = await buildTools();
+
+      const result = (await h.tool('close_worktree').handler({
+        worktreeId: 'wt-1',
+        reason: 'Login work merged in #42',
+      })) as { ok: boolean; closedSessions: number; closedDelegations: number };
+
+      expect(result.ok).toBe(true);
+      expect(result.closedSessions).toBe(1);
+      expect(result.closedDelegations).toBe(1);
+      expect(h.closeWorktreeMock).toHaveBeenCalledWith(projectId, 'wt-1');
+    });
+
+    // The lead cannot see what uncommitted work it would destroy, so it must
+    // never be able to override the safety checks.
+    it('never forces past the safety checks', async () => {
+      const h = await buildTools();
+
+      await h.tool('close_worktree').handler({ worktreeId: 'wt-1', reason: 'tidy up' });
+
+      const [, , options] = h.closeWorktreeMock.mock.calls[0];
+      expect(options).toBeUndefined();
+    });
+
+    it('surfaces the refusal instead of swallowing it', async () => {
+      const h = await buildTools();
+      h.closeWorktreeMock.mockRejectedValueOnce(
+        new Error('Worktree feature is not safe to close — uncommitted_changes: 2 files'),
+      );
+
+      await expect(
+        h.tool('close_worktree').handler({ worktreeId: 'wt-1', reason: 'tidy up' }),
+      ).rejects.toThrow('not safe to close');
+    });
+
+    it('does not record an audit entry for a close that failed', async () => {
+      const h = await buildTools();
+      h.closeWorktreeMock.mockRejectedValueOnce(new Error('nope'));
+
+      await expect(
+        h.tool('close_worktree').handler({ worktreeId: 'wt-1', reason: 'tidy up' }),
+      ).rejects.toThrow();
+
+      expect(h.auditRows()).toEqual([]);
+    });
+
+    it('records the reason against the worktree it closed', async () => {
+      const h = await buildTools();
+
+      await h.tool('close_worktree').handler({ worktreeId: 'wt-1', reason: 'merged in #42' });
+
+      expect(h.auditRows()).toEqual([
+        { action: 'close_worktree', reasoning: 'merged in #42', subjectId: 'wt-1' },
+      ]);
+    });
+  });
+
+  describe('list_closable_worktrees', () => {
+    it('assesses every worktree in the project', async () => {
+      const h = await buildTools();
+      h.setWorktrees([
+        { id: 'wt-1', name: 'login' },
+        { id: 'wt-2', name: 'search' },
+      ]);
+
+      const result = (await h.tool('list_closable_worktrees').handler({})) as {
+        worktrees: Array<{ worktreeId: string; safe: boolean }>;
+      };
+
+      expect(result.worktrees.map((w) => w.worktreeId)).toEqual(['wt-1', 'wt-2']);
+      expect(result.worktrees.every((w) => w.safe)).toBe(true);
+    });
+
+    // One broken worktree must not hide the state of all the others.
+    it('reports a worktree it could not assess without failing the rest', async () => {
+      const h = await buildTools();
+      h.setWorktrees([
+        { id: 'wt-1', name: 'login' },
+        { id: 'wt-2', name: 'search' },
+      ]);
+      h.assessCleanup.mockRejectedValueOnce(new Error('Worktree not found'));
+
+      const result = (await h.tool('list_closable_worktrees').handler({})) as {
+        worktrees: Array<{ worktreeId: string; safe: boolean; error?: string }>;
+      };
+
+      expect(result.worktrees[0]).toMatchObject({ safe: false, error: 'Worktree not found' });
+      expect(result.worktrees[1]).toMatchObject({ worktreeId: 'wt-2', safe: true });
+    });
   });
 });

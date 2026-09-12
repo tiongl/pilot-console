@@ -110,6 +110,25 @@ describe('worktree worker tab', () => {
     await waitFor(() => expect(screen.queryByTestId('worker-tab')).toBeNull());
   });
 
+  // The lead can retire a merged worktree. Its delegation rows go `closed`, and
+  // the pinned tab must not resurrect the dead session.
+  it('drops the worker tab once the worktree is closed', async () => {
+    delegations = [{ worktreeId, sessionId: 'session-1', title: 'W29 parser fix', status: 'closed' }];
+    await renderWorktree();
+
+    await waitFor(() => expect(screen.queryByTestId('worker-tab')).toBeNull());
+  });
+
+  it('ignores an older open delegation once the worktree is closed', async () => {
+    delegations = [
+      { worktreeId, sessionId: 'session-old', title: 'W29 parser fix', status: 'working' },
+      { worktreeId, sessionId: 'session-new', title: 'W29 parser fix', status: 'closed' },
+    ];
+    await renderWorktree();
+
+    await waitFor(() => expect(screen.queryByTestId('worker-tab')).toBeNull());
+  });
+
   it('does not persist the worker tab, so a stale session is never restored', async () => {
     delegations = [{ worktreeId, sessionId: 'session-1', title: 'W29 parser fix' }];
     await renderWorktree();

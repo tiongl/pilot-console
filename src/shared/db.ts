@@ -222,7 +222,7 @@ function initSchema(db: Database.Database) {
       session_id  TEXT,
       title       TEXT NOT NULL,
       task        TEXT NOT NULL,
-      -- planning | awaiting_plan_review | working | blocked | done | cancelled
+      -- planning | awaiting_plan_review | working | blocked | done | cancelled | closed
       status      TEXT NOT NULL DEFAULT 'planning',
       note        TEXT,
       unread      INTEGER NOT NULL DEFAULT 0,

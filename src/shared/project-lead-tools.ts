@@ -612,5 +612,64 @@ export function createProjectLeadTools(
       skipPermission: true,
       defer: 'never',
     }),
+    defineTool('list_closable_worktrees', {
+      description:
+        'Check which worktrees can be cleaned up. Reports, for every worktree in the project, ' +
+        'whether its work has already been merged and what (if anything) still blocks removal. ' +
+        'Use this before close_worktree to find finished work that is still holding a tab open.',
+      parameters: { type: 'object', properties: {} },
+      handler: async () => {
+        const { assessWorktreeCleanup } = await import('./worktree-cleanup');
+        const results = [];
+        for (const worktree of listWorktrees(projectId)) {
+          try {
+            results.push(await assessWorktreeCleanup(projectId, worktree.id));
+          } catch (error) {
+            results.push({
+              worktreeId: worktree.id,
+              name: worktree.name,
+              safe: false,
+              error: (error as Error).message,
+            });
+          }
+        }
+        return { worktrees: results };
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    defineTool('close_worktree', {
+      description:
+        'Remove a worktree once its work is merged: ends its agent sessions, closes its ' +
+        'delegations so the tab disappears, and deletes the worktree. Refuses when the ' +
+        'worktree has uncommitted changes, unmerged commits, a merge in flight, or a worker ' +
+        'mid-turn — ask the user to clean those up rather than trying to work around them.',
+      parameters: {
+        type: 'object',
+        properties: {
+          worktreeId: { type: 'string' },
+          reason: { type: 'string', description: 'Why this worktree is finished with.' },
+        },
+        required: ['worktreeId', 'reason'],
+      },
+      handler: async ({ worktreeId, reason }: { worktreeId: string; reason: string }) => {
+        const { closeWorktree } = await import('./worktree-cleanup');
+        // Never forced: the lead has no way to see what uncommitted work would
+        // be destroyed, so an unsafe close is always the user's call.
+        const result = await closeWorktree(projectId, worktreeId);
+        audit(projectId, 'close_worktree', reason, 'medium', worktreeId);
+        return {
+          ok: true,
+          worktree: result.name,
+          branch: result.branch,
+          closedSessions: result.closedSessions.length,
+          closedDelegations: result.closedDelegations,
+          mergeEvidence: result.assessment.mergeEvidence,
+          note: `Worktree ${result.name} removed; its sessions and delegations are closed.`,
+        };
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
   ];
 }

@@ -7,7 +7,9 @@ export type DelegationStatus =
   | 'working'
   | 'blocked'
   | 'done'
-  | 'cancelled';
+  | 'cancelled'
+  /** Cleaned up: the worktree is gone and the lead page no longer lists it. */
+  | 'closed';
 
 /** Statuses that still occupy a slot against the per-project concurrency cap. */
 const ACTIVE_STATUSES: DelegationStatus[] = ['planning', 'awaiting_plan_review', 'working', 'blocked'];
@@ -121,10 +123,24 @@ export function markWorktreeDelegation(
   return updateDelegation(existing.id, patch);
 }
 
+/**
+ * Retire every delegation on a worktree that is being removed, and report how
+ * many changed. Marking them first means any UI poll that lands between this
+ * and the worktree's deletion already sees them as finished; the rows
+ * themselves then go with the worktree via `ON DELETE CASCADE`.
+ */
+export function closeDelegationsForWorktree(worktreeId: string): number {
+  return getDb()
+    .prepare(
+      "UPDATE delegations SET status = 'closed', unread = 0, updated_at = datetime('now') " +
+        "WHERE worktree_id = ? AND status != 'closed'",
+    )
+    .run(worktreeId).changes;
+}
+
 export function clearDelegationUnread(id: string): void {
   getDb().prepare("UPDATE delegations SET unread = 0, updated_at = datetime('now') WHERE id = ?").run(id);
 }
-
 /** Per-project unread counts, for sidebar badges. */
 export function unreadDelegationCounts(): Record<string, number> {
   const rows = getDb().prepare(`

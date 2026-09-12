@@ -44,7 +44,7 @@ interface Delegation {
   projectId: string;
   worktreeId: string;
   title: string;
-  status: 'planning' | 'awaiting_plan_review' | 'working' | 'blocked' | 'done' | 'cancelled';
+  status: 'planning' | 'awaiting_plan_review' | 'working' | 'blocked' | 'done' | 'cancelled' | 'closed';
   unread: number;
 }
 
