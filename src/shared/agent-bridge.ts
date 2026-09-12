@@ -1877,6 +1877,69 @@ export function resolveAskUser(session: AgentSession, requestId: string, answer:
   emit(session, { type: 'ask_user_resolved', requestId });
 }
 
+/**
+ * Re-raise an `ask_user` question that a restart left unanswered.
+ *
+ * The promise the tool call is parked on lives in this process, so a server
+ * restart orphans it: the transcript still shows the call running, the browser
+ * has no card to click, and the turn can never end. That looks exactly like a
+ * broken ask_user — the tool appears in the transcript with no question.
+ *
+ * Rebuild the prompt from the recorded arguments and deliver the answer as an
+ * ordinary message. The tool result itself has nowhere to go now, but the agent
+ * still gets its answer and the conversation moves again.
+ */
+export function reviveOrphanedQuestions(session: AgentSession): void {
+  const stuck = session.transcript.filter(
+    (event): event is Extract<AgentTranscriptEvent, { kind: 'tool' }> =>
+      event.kind === 'tool' && event.toolName === 'ask_user' && event.status === 'running',
+  );
+  if (stuck.length === 0) return;
+
+  for (const event of stuck) {
+    upsertEvent(session, {
+      ...event,
+      status: 'error',
+      output: 'Interrupted by a restart before the user answered.',
+    });
+  }
+
+  // Only the most recent question is still worth asking; anything older was
+  // superseded by whatever the conversation did next.
+  const last = stuck[stuck.length - 1];
+  const args = (last.args ?? {}) as {
+    question?: unknown;
+    detail?: unknown;
+    options?: unknown;
+    allowText?: unknown;
+  };
+  const question = String(args.question ?? '').trim();
+  if (!question) return;
+
+  const options = Array.isArray(args.options)
+    ? args.options
+        .map((option) => String(option ?? '').trim())
+        .filter(Boolean)
+        .slice(0, MAX_ASK_OPTIONS)
+    : [];
+  const requestId = randomUUID();
+  const message: Extract<AgentServerMessage, { type: 'ask_user_request' }> = {
+    type: 'ask_user_request',
+    requestId,
+    question,
+    detail: args.detail ? String(args.detail) : undefined,
+    options: options.length ? options : DEFAULT_ASK_OPTIONS,
+    allowText: args.allowText !== false,
+  };
+  session.pendingQuestions.set(requestId, {
+    message,
+    resolve: (answer) => {
+      void sendToSession(session, answer);
+    },
+  });
+  emit(session, message);
+}
+
 export function buildToolsForKind(
   kind: AgentSessionKind,
   projectId: string | null,
@@ -2514,6 +2577,7 @@ async function resumeAgentSessionUncached(
   session.unsubscribe = sdk.on((event) => handleSdkEvent(session, event));
   agentSessions.set(session.sessionId, session);
   ensureToolReconciliation(session);
+  reviveOrphanedQuestions(session);
 
   // Ensure a DB row exists (older/remote sessions may not have one locally).
   getDb()

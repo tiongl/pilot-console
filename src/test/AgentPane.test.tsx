@@ -1233,6 +1233,16 @@ describe('AgentPane', () => {
       expect(screen.queryByTestId('ask-user-prompt')).toBeNull();
     });
 
+    it('still shows a pending question while the Outline view is open', async () => {
+      renderPane();
+      emit(question);
+      fireEvent.click(screen.getByTestId('agent-outline-toggle'));
+      await screen.findByTestId('agent-outline');
+      // The agent's turn is parked on this question; hiding it behind a view
+      // toggle makes the session look hung with nothing to click.
+      expect(screen.getByTestId('ask-user-prompt')).toBeTruthy();
+    });
+
     it('routes the composer back to a normal send once nothing is pending', () => {
       renderPane();
       emit(question);

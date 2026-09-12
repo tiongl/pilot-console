@@ -1971,6 +1971,12 @@ export default function AgentPane({
           );
         })}
 
+          </>
+        )}
+
+        {/* Prompts that block the turn sit outside the transcript branch: the
+            Outline view would otherwise hide the very card the agent is
+            waiting on, and the session would look hung for no visible reason. */}
         {/* Pending permission prompts */}
         {permissions.map((p) => (
           <div key={p.requestId} className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 space-y-2">
@@ -2058,8 +2064,6 @@ export default function AgentPane({
             surface={appearance.surfaceStrong}
           />
         ))}
-          </>
-        )}
       </div>
 
         {!atBottom && !outline && (
