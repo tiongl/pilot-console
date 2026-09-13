@@ -303,20 +303,37 @@ export class DaemonClient {
       } catch { /* ignore */ }
     }
 
-    const daemonScript = path.join(__dirname, 'index.ts');
-
-    // On Windows, spawn via cmd.exe to resolve .cmd shims; on Unix use tsx directly
+    // In a published/compiled install the daemon is emitted to dist/daemon/index.js
+    // and this file has been bundled into dist/server, so __dirname is dist/server.
+    // In a dev checkout __dirname is src/daemon and only the TS source exists.
+    const compiledDaemon = path.join(__dirname, '..', 'daemon', 'index.js');
+    const sourceDaemon = path.join(__dirname, 'index.ts');
     const IS_WINDOWS = process.platform === 'win32';
-    const tsxBin = IS_WINDOWS ? 'npx' : path.join(
-      path.dirname(path.dirname(__dirname)),
-      'node_modules', '.bin', 'tsx',
-    );
-    const tsxArgs = IS_WINDOWS ? ['tsx', daemonScript] : [daemonScript];
 
-    const child = spawn(tsxBin, tsxArgs, {
+    let spawnCmd: string;
+    let spawnArgs: string[];
+    let useShell: boolean;
+
+    if (fs.existsSync(compiledDaemon)) {
+      // Production: run the compiled daemon directly with the current Node binary.
+      spawnCmd = process.execPath;
+      spawnArgs = [compiledDaemon];
+      useShell = false;
+    } else {
+      // Development: run the TypeScript source via tsx. On Windows spawn via
+      // cmd.exe (shell) to resolve the npx .cmd shim; on Unix use tsx directly.
+      spawnCmd = IS_WINDOWS ? 'npx' : path.join(
+        path.dirname(path.dirname(__dirname)),
+        'node_modules', '.bin', 'tsx',
+      );
+      spawnArgs = IS_WINDOWS ? ['tsx', sourceDaemon] : [sourceDaemon];
+      useShell = IS_WINDOWS;
+    }
+
+    const child = spawn(spawnCmd, spawnArgs, {
       detached: true,
       stdio: 'ignore',
-      shell: IS_WINDOWS,
+      shell: useShell,
       windowsHide: true,
       env: { ...process.env },
     });
