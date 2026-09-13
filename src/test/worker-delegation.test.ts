@@ -53,6 +53,7 @@ async function buildTools(options: { interventionMode?: string; skillInstallMode
       merge_mode TEXT NOT NULL DEFAULT 'advisory',
       intervention_mode TEXT NOT NULL DEFAULT 'flag_only',
       skill_install_mode TEXT NOT NULL DEFAULT 'suggest_only',
+      github_task_mode TEXT NOT NULL DEFAULT 'off',
       dnd INTEGER NOT NULL DEFAULT 0
     );
   `);

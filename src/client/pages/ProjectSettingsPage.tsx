@@ -17,6 +17,7 @@ interface AutonomySettings {
   mergeMode: 'advisory' | 'auto_queue' | 'full_auto';
   interventionMode: 'flag_only' | 'flag_nudge' | 'flag_nudge_cancel';
   skillInstallMode: 'suggest_only' | 'approve_and_install';
+  githubTaskMode: 'off' | 'read_only' | 'manage';
   dnd: number;
 }
 
@@ -33,6 +34,7 @@ export default function ProjectSettingsPage() {
     mergeMode: 'advisory',
     interventionMode: 'flag_only',
     skillInstallMode: 'suggest_only',
+    githubTaskMode: 'off',
     dnd: 0,
   });
   const [autonomySaving, setAutonomySaving] = useState(false);
@@ -174,6 +176,19 @@ export default function ProjectSettingsPage() {
               >
                 <option value="suggest_only">Suggest only - recommend, never install</option>
                 <option value="approve_and_install">Approve and install - install after user approval</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="github-task-mode">GitHub task management</Label>
+              <select
+                id="github-task-mode"
+                className="flex h-9 w-full rounded-md border bg-background px-3 text-sm"
+                value={autonomy.githubTaskMode}
+                onChange={(e) => setAutonomy((current) => ({ ...current, githubTaskMode: e.target.value as AutonomySettings['githubTaskMode'] }))}
+              >
+                <option value="off">Off - no GitHub task tools</option>
+                <option value="read_only">Read only - examine issues, PRs, and board</option>
+                <option value="manage">Manage - file/update issues, move cards, open PRs</option>
               </select>
             </div>
             <label className="flex items-center gap-2 text-sm">

@@ -16,6 +16,19 @@ import {
 } from './delegation-store';
 import { hasPendingPlanReview, resolveLeadPlanReview } from './delegation-runtime';
 import {
+  GitHubCliError,
+  createBoardIssue,
+  createPullRequest,
+  getBoard,
+  getDefaultProjectLink,
+  getIssueDetail,
+  listIssues,
+  listMilestones,
+  listPullRequests,
+  moveBoardItem,
+  updateIssue,
+} from './github-store';
+import {
   createTodo,
   deleteTodo,
   getTodo,
@@ -73,6 +86,22 @@ function skillInstallMode(projectId: string): 'suggest_only' | 'approve_and_inst
     'SELECT skill_install_mode FROM project_autonomy_settings WHERE project_id = ?',
   ).get(projectId) as { skill_install_mode?: string } | undefined;
   return row?.skill_install_mode === 'approve_and_install' ? 'approve_and_install' : 'suggest_only';
+}
+
+function githubTaskMode(projectId: string): 'off' | 'read_only' | 'manage' {
+  let mode: string | undefined;
+  try {
+    const row = getDb().prepare(
+      'SELECT github_task_mode FROM project_autonomy_settings WHERE project_id = ?',
+    ).get(projectId) as { github_task_mode?: string } | undefined;
+    mode = row?.github_task_mode;
+  } catch {
+    // Older databases/harnesses without the column (or table) default to off.
+    return 'off';
+  }
+  if (mode === 'manage') return 'manage';
+  if (mode === 'read_only') return 'read_only';
+  return 'off';
 }
 
 export function reviewPlanForWorker(
@@ -156,7 +185,8 @@ export function createProjectLeadTools(  projectId: string,
   userId?: string,
   getSessionId?: () => string | undefined,
 ) {
-  return [
+  const ghMode = githubTaskMode(projectId);
+  const tools = [
     defineTool('get_project_memory', {
       description: 'Read (and bootstrap if missing) this Project Lead\'s persistent understanding of the project: README, recent commits, worktrees, digests, and open decisions. Call this at the start of a new conversation to get up to speed.',
       parameters: { type: 'object', properties: {} },
@@ -1158,6 +1188,241 @@ export function createProjectLeadTools(  projectId: string,
         return { uninstalled: true, plugin: pluginRef(plugin, marketplace), output };
       },
       skipPermission: true,
+      defer: 'never',
+    }),
+    ...(ghMode !== 'off' ? createGitHubTaskReadTools(projectId) : []),
+    ...(ghMode === 'manage' ? createGitHubTaskWriteTools(projectId) : []),
+  ];
+
+  return tools;
+}
+
+/** Turn a thrown GitHubCliError into a structured result so a tool never throws `gh` failures. */
+function ghErrorResult(err: unknown): { ok: false; code: string; message: string } {
+  if (err instanceof GitHubCliError) {
+    return { ok: false, code: err.code, message: err.message };
+  }
+  return { ok: false, code: 'failed', message: err instanceof Error ? err.message : String(err) };
+}
+
+/** Message returned when a write tool is called without an ask_user go-ahead. */
+function needsConfirmation(action: string): { ok: false; confirmed: false; message: string } {
+  return {
+    ok: false,
+    confirmed: false,
+    message: `${action} changes GitHub on the user's behalf. Get an explicit go-ahead first with ask_user, then call this tool again with confirmed:true — only once they have said yes.`,
+  };
+}
+
+/**
+ * Read-only GitHub task tools. Registered when github_task_mode is read_only or
+ * manage. Each wraps the matching github-store reader and returns its result (or
+ * a structured error) so the Lead can ground planning in real issues/PRs/board.
+ */
+function createGitHubTaskReadTools(projectId: string) {
+  return [
+    defineTool('list_github_issues', {
+      description: 'List this repository\'s GitHub issues (open and closed) to ground planning in real work. Read-only.',
+      parameters: { type: 'object', properties: {} },
+      handler: async () => {
+        try {
+          return { ok: true, issues: await listIssues(projectId) };
+        } catch (err) {
+          return ghErrorResult(err);
+        }
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    defineTool('get_github_issue', {
+      description: 'Fetch a single GitHub issue with its full body/markdown by number. Read-only.',
+      parameters: {
+        type: 'object',
+        properties: {
+          number: { type: 'number', description: 'The issue number.' },
+        },
+        required: ['number'],
+      },
+      handler: async ({ number }: { number: number }) => {
+        try {
+          return { ok: true, issue: await getIssueDetail(projectId, number) };
+        } catch (err) {
+          return ghErrorResult(err);
+        }
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    defineTool('list_pull_requests', {
+      description: 'List this repository\'s pull requests (open and closed). Read-only.',
+      parameters: { type: 'object', properties: {} },
+      handler: async () => {
+        try {
+          return { ok: true, pullRequests: await listPullRequests(projectId) };
+        } catch (err) {
+          return ghErrorResult(err);
+        }
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    defineTool('list_milestones', {
+      description: 'List this repository\'s milestones with open/closed issue counts. Read-only.',
+      parameters: { type: 'object', properties: {} },
+      handler: async () => {
+        try {
+          return { ok: true, milestones: await listMilestones(projectId) };
+        } catch (err) {
+          return ghErrorResult(err);
+        }
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    defineTool('get_github_board', {
+      description: 'Fetch the linked GitHub Projects V2 board (columns and cards). Defaults to the project\'s default linked board. Read-only.',
+      parameters: {
+        type: 'object',
+        properties: {
+          ghProjectId: { type: 'string', description: 'Optional Projects V2 node ID. Omit to use the default linked board.' },
+        },
+      },
+      handler: async ({ ghProjectId }: { ghProjectId?: string }) => {
+        const resolved = ghProjectId || getDefaultProjectLink(projectId)?.ghProjectId;
+        if (!resolved) {
+          return { ok: false, message: 'No GitHub Project is linked to this project. Link a board in project settings first.' };
+        }
+        try {
+          return { ok: true, board: await getBoard(projectId, resolved) };
+        } catch (err) {
+          return ghErrorResult(err);
+        }
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+  ];
+}
+
+/**
+ * Write GitHub task tools. Registered ONLY when github_task_mode is manage. Each
+ * takes confirmed?:boolean and refuses unless confirmed===true, mirroring the
+ * install_skill approval contract: the Lead must get an ask_user go-ahead first.
+ */
+function createGitHubTaskWriteTools(projectId: string) {
+  return [
+    defineTool('create_github_issue', {
+      description: 'File a new GitHub issue on the default linked board. Requires an ask_user go-ahead: call with confirmed:true only after the user approves. Refuses otherwise.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'The issue title.' },
+          body: { type: 'string', description: 'Optional issue body (markdown).' },
+          confirmed: { type: 'boolean', description: 'Set true ONLY after the user has approved filing this issue via ask_user.' },
+        },
+        required: ['title'],
+      },
+      handler: async ({ title, body, confirmed }: { title: string; body?: string; confirmed?: boolean }) => {
+        if (confirmed !== true) return needsConfirmation('Filing a GitHub issue');
+        const ghProjectId = getDefaultProjectLink(projectId)?.ghProjectId;
+        if (!ghProjectId) {
+          return { ok: false, message: 'No GitHub Project is linked to this project. Link a board in project settings first.' };
+        }
+        try {
+          const created = await createBoardIssue(projectId, ghProjectId, null, null, title, body ?? '');
+          audit(projectId, 'create_github_issue', `Filed issue #${created.number}: ${condenseBriefing(title)}`, 'medium', String(created.number));
+          return { ok: true, ...created };
+        } catch (err) {
+          return ghErrorResult(err);
+        }
+      },
+      skipPermission: false,
+      defer: 'never',
+    }),
+    defineTool('update_github_issue', {
+      description: 'Update a GitHub issue\'s title and/or body. Requires an ask_user go-ahead: call with confirmed:true only after the user approves. Refuses otherwise.',
+      parameters: {
+        type: 'object',
+        properties: {
+          number: { type: 'number', description: 'The issue number to update.' },
+          title: { type: 'string', description: 'New title (optional).' },
+          body: { type: 'string', description: 'New body/markdown (optional).' },
+          confirmed: { type: 'boolean', description: 'Set true ONLY after the user has approved this update via ask_user.' },
+        },
+        required: ['number'],
+      },
+      handler: async ({ number, title, body, confirmed }: { number: number; title?: string; body?: string; confirmed?: boolean }) => {
+        if (confirmed !== true) return needsConfirmation('Updating a GitHub issue');
+        try {
+          await updateIssue(projectId, number, { title, body });
+          audit(projectId, 'update_github_issue', `Updated issue #${number}`, 'medium', String(number));
+          return { ok: true, number };
+        } catch (err) {
+          return ghErrorResult(err);
+        }
+      },
+      skipPermission: false,
+      defer: 'never',
+    }),
+    defineTool('open_pull_request', {
+      description: 'Push a worker\'s worktree branch and open the pull request that checks it in (auto-closing its linked issue). Requires an ask_user go-ahead: call with confirmed:true only after the user approves. Refuses otherwise.',
+      parameters: {
+        type: 'object',
+        properties: {
+          worktreeId: { type: 'string', description: 'The worktree whose branch to push and open a PR for.' },
+          title: { type: 'string', description: 'The pull request title.' },
+          body: { type: 'string', description: 'Optional PR body (markdown).' },
+          draft: { type: 'boolean', description: 'Open as a draft PR.' },
+          base: { type: 'string', description: 'Optional base branch. Defaults to the repo default.' },
+          confirmed: { type: 'boolean', description: 'Set true ONLY after the user has approved opening this PR via ask_user.' },
+        },
+        required: ['worktreeId', 'title'],
+      },
+      handler: async ({ worktreeId, title, body, draft, base, confirmed }: {
+        worktreeId: string; title: string; body?: string; draft?: boolean; base?: string; confirmed?: boolean;
+      }) => {
+        if (confirmed !== true) return needsConfirmation('Opening a pull request');
+        try {
+          const pr = await createPullRequest(projectId, worktreeId, { title, body, draft, base });
+          audit(projectId, 'open_pull_request', `Opened PR #${pr.number}: ${condenseBriefing(title)}`, 'high', worktreeId);
+          return { ok: true, ...pr };
+        } catch (err) {
+          return ghErrorResult(err);
+        }
+      },
+      skipPermission: false,
+      defer: 'never',
+    }),
+    defineTool('move_board_item', {
+      description: 'Move a board card to a Status column (or clear it). Requires an ask_user go-ahead: call with confirmed:true only after the user approves. Refuses otherwise.',
+      parameters: {
+        type: 'object',
+        properties: {
+          itemId: { type: 'string', description: 'The board item (card) node ID.' },
+          fieldId: { type: 'string', description: 'The Status field node ID.' },
+          optionId: { type: 'string', description: 'The target option node ID. Omit to clear the field.' },
+          ghProjectId: { type: 'string', description: 'Optional Projects V2 node ID. Omit to use the default linked board.' },
+          confirmed: { type: 'boolean', description: 'Set true ONLY after the user has approved this move via ask_user.' },
+        },
+        required: ['itemId', 'fieldId'],
+      },
+      handler: async ({ itemId, fieldId, optionId, ghProjectId, confirmed }: {
+        itemId: string; fieldId: string; optionId?: string; ghProjectId?: string; confirmed?: boolean;
+      }) => {
+        if (confirmed !== true) return needsConfirmation('Moving a board card');
+        const resolved = ghProjectId || getDefaultProjectLink(projectId)?.ghProjectId;
+        if (!resolved) {
+          return { ok: false, message: 'No GitHub Project is linked to this project. Link a board in project settings first.' };
+        }
+        try {
+          await moveBoardItem(projectId, resolved, itemId, fieldId, optionId ?? null);
+          audit(projectId, 'move_board_item', `Moved board card ${itemId}`, 'medium', itemId);
+          return { ok: true, itemId };
+        } catch (err) {
+          return ghErrorResult(err);
+        }
+      },
+      skipPermission: false,
       defer: 'never',
     }),
   ];
