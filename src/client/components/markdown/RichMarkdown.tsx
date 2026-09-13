@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useState, type ReactNode, Suspense, lazy } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
@@ -10,6 +10,8 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import MermaidDiagram from './MermaidDiagram';
 import 'katex/dist/katex.min.css';
+
+const FilePreviewModal = lazy(() => import('../project/FilePreviewModal'));
 
 function CodeBlock({
   language,
@@ -61,7 +63,10 @@ function CodeBlock({
   );
 }
 
-function markdownComponents(darkMode: boolean): Components {
+function markdownComponents(
+  darkMode: boolean,
+  onFilePreviewRequest?: (filePath: string) => void,
+): Components {
   return {
     table: ({ children }: { children?: ReactNode }) => (
       <div className="my-2 overflow-x-auto">
@@ -76,6 +81,23 @@ function markdownComponents(darkMode: boolean): Components {
     ),
     a: ({ href, children }: { href?: string; children?: ReactNode }) => {
       const external = Boolean(href && (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//')));
+      const isFilePath = href && !external && onFilePreviewRequest;
+
+      if (isFilePath) {
+        return (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              onFilePreviewRequest?.(href);
+            }}
+            className="text-blue-400 underline hover:text-blue-300 cursor-pointer"
+          >
+            {children}
+          </button>
+        );
+      }
+
       return (
         <a
           href={href}
@@ -103,15 +125,50 @@ function markdownComponents(darkMode: boolean): Components {
   };
 }
 
-export default function RichMarkdown({ content, darkMode }: { content: string; darkMode: boolean }) {
-  const components = useMemo(() => markdownComponents(darkMode), [darkMode]);
+export default function RichMarkdown({
+  content,
+  darkMode,
+  projectId,
+  worktreeId,
+}: {
+  content: string;
+  darkMode: boolean;
+  projectId?: string;
+  worktreeId?: string;
+}) {
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewFile, setPreviewFile] = useState<string>('');
+
+  const handleFilePreview = (filePath: string) => {
+    setPreviewFile(filePath);
+    setPreviewOpen(true);
+  };
+
+  const components = useMemo(
+    () => (projectId ? markdownComponents(darkMode, handleFilePreview) : markdownComponents(darkMode)),
+    [darkMode, projectId],
+  );
+
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm, remarkMath]}
-      rehypePlugins={[rehypeKatex]}
-      components={components}
-    >
-      {content}
-    </ReactMarkdown>
+    <>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex]}
+        components={components}
+      >
+        {content}
+      </ReactMarkdown>
+      {projectId && (
+        <Suspense fallback={null}>
+          <FilePreviewModal
+            open={previewOpen}
+            onOpenChange={setPreviewOpen}
+            projectId={projectId}
+            filePath={previewFile}
+            worktreeId={worktreeId}
+          />
+        </Suspense>
+      )}
+    </>
   );
 }

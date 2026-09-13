@@ -821,5 +821,120 @@ export function createProjectLeadTools(  projectId: string,
       skipPermission: true,
       defer: 'never',
     }),
+    defineTool('start_server', {
+      description:
+        'Start a server (dev server, API server, etc.) with live console output streamed to a dedicated tab. ' +
+        'The server persists independently; if this session restarts, the server keeps running. ' +
+        'User can stop/restart via the tab or you can call stop_server.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: {
+            type: 'string',
+            description: 'Shell command to run (e.g., "npm run dev", "python app.py", "cargo run")',
+          },
+          name: {
+            type: 'string',
+            description: 'Display name for the tab (e.g., "Dev Server", "API Server")',
+          },
+          cwd: {
+            type: 'string',
+            description: 'Working directory for the command. Defaults to project root if not specified.',
+          },
+          env: {
+            type: 'object',
+            description: 'Additional environment variables to set (e.g., {"PORT": "3001", "DEBUG": "true"})',
+            additionalProperties: { type: 'string' },
+          },
+        },
+        required: ['command', 'name'],
+      },
+      handler: async ({
+        command,
+        name,
+        cwd,
+        env,
+      }: {
+        command: string;
+        name: string;
+        cwd?: string;
+        env?: Record<string, string>;
+      }) => {
+        const { createServer } = await import('./server-store');
+        const { spawnServer } = await import('./server-runtime');
+
+        const server = createServer({
+          projectId,
+          command,
+          name,
+          cwd,
+          env,
+        });
+
+        try {
+          const result = await spawnServer(userId, server);
+          audit(projectId, 'start_server', `Started server: ${name} (${command})`, 'low');
+          return {
+            ok: true,
+            serverId: result.serverId,
+            name: server.name,
+            status: result.status,
+          };
+        } catch (err) {
+          audit(projectId, 'start_server', `Failed to start server: ${name} - ${err instanceof Error ? err.message : String(err)}`, 'high');
+          throw err;
+        }
+      },
+      skipPermission: false,
+      defer: 'always',
+    }),
+    defineTool('stop_server', {
+      description: 'Stop a running server by its ID. The server tab persists but shows stopped state.',
+      parameters: {
+        type: 'object',
+        properties: {
+          serverId: {
+            type: 'string',
+            description: 'The server ID returned by start_server',
+          },
+        },
+        required: ['serverId'],
+      },
+      handler: async ({ serverId }: { serverId: string }) => {
+        const { getServerById } = await import('./server-store');
+        const { stopServer: stopServerProcess } = await import('./server-runtime');
+
+        const server = getServerById(serverId);
+        if (!server) {
+          throw new Error(`Server ${serverId} not found`);
+        }
+
+        stopServerProcess(serverId);
+        audit(projectId, 'stop_server', `Stopped server: ${server.name}`, 'low');
+
+        return { ok: true, serverId, status: 'stopped' };
+      },
+      skipPermission: false,
+      defer: 'never',
+    }),
+    defineTool('list_servers', {
+      description: 'List all servers (running or stopped) that have been started for this project.',
+      parameters: { type: 'object', properties: {} },
+      handler: async () => {
+        const { listServersByProject } = await import('./server-store');
+        const servers = listServersByProject(projectId);
+        return {
+          servers: servers.map((s) => ({
+            id: s.id,
+            name: s.name,
+            command: s.command,
+            status: s.status,
+            startedAt: s.startedAt,
+          })),
+        };
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
   ];
 }

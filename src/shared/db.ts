@@ -268,6 +268,26 @@ function initSchema(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_report_runs_schedule_id ON report_runs(schedule_id);
     CREATE INDEX IF NOT EXISTS idx_report_runs_status ON report_runs(status);
+
+    -- Project Lead-managed servers: dev servers, API servers, etc.
+    CREATE TABLE IF NOT EXISTS project_servers (
+      id              TEXT PRIMARY KEY,
+      project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      session_id      TEXT UNIQUE REFERENCES cli_sessions(id) ON DELETE SET NULL,
+      name            TEXT NOT NULL,
+      command         TEXT NOT NULL,
+      cwd             TEXT,
+      env             TEXT,
+      status          TEXT NOT NULL DEFAULT 'pending',
+      started_at      TEXT,
+      stopped_at      TEXT,
+      exit_code       INTEGER,
+      created_at      TEXT DEFAULT (datetime('now')),
+      updated_at      TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_project_servers_project_id ON project_servers(project_id);
+    CREATE INDEX IF NOT EXISTS idx_project_servers_status ON project_servers(status);
   `);
 
   // Migrations: add columns that may not exist in older DBs

@@ -2003,6 +2003,9 @@ export default function AgentPane({
                   codeSize={codeSize}
                   showToolOutput={visibility.toolOutput}
                   showReasoning={visibility.reasoning}
+                  projectId={projectId}
+                  worktreeId={worktreeId}
+                  sessionKind={sessionKind}
                 />
               ) : (
                 <ToolBadgeStrip tools={item.tools} appearance={appearance} codeSize={codeSize} />
@@ -2397,12 +2400,18 @@ const TranscriptItem = memo(function TranscriptItem({
   codeSize,
   showToolOutput,
   showReasoning,
+  projectId,
+  worktreeId,
+  sessionKind,
 }: {
   event: AgentTranscriptEvent;
   appearance: Appearance;
   codeSize: number;
   showToolOutput: boolean;
   showReasoning: boolean;
+  projectId?: string;
+  worktreeId?: string;
+  sessionKind?: 'agent' | 'project_lead' | 'chief_of_staff';
 }) {
   if (event.kind === 'user') {
     return (
@@ -2425,7 +2434,7 @@ const TranscriptItem = memo(function TranscriptItem({
   }
 
   if (event.kind === 'assistant') {
-    return <AssistantItem event={event} appearance={appearance} />;
+    return <AssistantItem event={event} appearance={appearance} projectId={projectId} worktreeId={worktreeId} sessionKind={sessionKind} />;
   }
 
   if (event.kind === 'reasoning') {
@@ -2466,9 +2475,15 @@ const TranscriptItem = memo(function TranscriptItem({
 const AssistantItem = memo(function AssistantItem({
   event,
   appearance,
+  projectId,
+  worktreeId,
+  sessionKind,
 }: {
   event: Extract<AgentTranscriptEvent, { kind: 'assistant' }>;
   appearance: Appearance;
+  projectId?: string;
+  worktreeId?: string;
+  sessionKind?: 'agent' | 'project_lead' | 'chief_of_staff';
 }) {
   const contentRef = useRef<HTMLDivElement>(null);
   return (
@@ -2489,7 +2504,12 @@ const AssistantItem = memo(function AssistantItem({
         className="max-w-[85%] rounded-2xl rounded-bl-sm px-4 py-2 overflow-hidden prose prose-sm dark:prose-invert max-w-none"
         style={{ backgroundColor: appearance.surface, color: appearance.fg }}
       >
-        <RichMarkdown content={event.content || '…'} darkMode={isDarkHexColor(appearance.bg)} />
+        <RichMarkdown
+          content={event.content || '…'}
+          darkMode={isDarkHexColor(appearance.bg)}
+          projectId={sessionKind === 'project_lead' ? projectId : undefined}
+          worktreeId={sessionKind === 'project_lead' ? worktreeId : undefined}
+        />
       </div>
     </div>
   );
