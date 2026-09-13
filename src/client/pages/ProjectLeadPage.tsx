@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router';
-import { Compass, Users, ChevronRight, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { Compass, Users, ChevronRight, PanelRightClose, PanelRightOpen, Server } from 'lucide-react';
 import AgentPane from '../components/terminal/AgentPane';
 import ProjectTodoPanel from '../components/project/ProjectTodoPanel';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
@@ -40,6 +40,18 @@ interface Delegation {
   note: string | null;
   unread: number;
 }
+
+interface ManagedServer {
+  id: string;
+  projectId: string;
+  name: string;
+  command: string;
+  status: 'pending' | 'starting' | 'running' | 'stopped' | 'failed';
+  exitCode: number | null;
+  running: boolean;
+}
+
+const SERVER_TAB_PREFIX = 'srv-';
 
 export default function ProjectLeadPage() {
   const { id } = useParams<{ id: string }>();
@@ -111,6 +123,7 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
   };
 
   const [delegations, setDelegations] = useState<Delegation[]>([]);
+  const [servers, setServers] = useState<ManagedServer[]>([]);
   const [activeTab, setActiveTab] = useState<string>('lead');
 
   const refreshDelegations = useCallback(() => {
@@ -120,12 +133,23 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
       .catch(() => {});
   }, [projectId]);
 
-  // Workers appear without any action on this page, so poll for new tabs.
+  const refreshServers = useCallback(() => {
+    fetch(`/api/projects/${projectId}/servers`)
+      .then((r) => (r.ok ? r.json() : { servers: [] }))
+      .then((data: { servers: ManagedServer[] }) => setServers(data.servers || []))
+      .catch(() => {});
+  }, [projectId]);
+
+  // Workers and servers appear without any action on this page, so poll for new tabs.
   useEffect(() => {
     refreshDelegations();
-    const timer = setInterval(refreshDelegations, 8000);
+    refreshServers();
+    const timer = setInterval(() => {
+      refreshDelegations();
+      refreshServers();
+    }, 8000);
     return () => clearInterval(timer);
-  }, [refreshDelegations]);
+  }, [refreshDelegations, refreshServers]);
 
   // Opening a worker's tab clears its "needs attention" flag. A worktree can
   // have older, closed-out delegations too; the newest one owns the tab.
@@ -155,6 +179,8 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
 
   // Tabs are never closable: the lead is permanent, and a worker tab is the
   // only way back into that worker's session from here.
+  const serverTabId = (s: ManagedServer) => `${SERVER_TAB_PREFIX}${s.id}`;
+  const runningServerCount = servers.filter((s) => s.status === 'running' || s.status === 'starting').length;
   const tabs = [
     { id: 'lead', label: 'Lead', status: null as string | null, unread: 0 },
     ...workers.map((d) => ({
@@ -163,16 +189,29 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
       status: d.status,
       unread: d.unread,
     })),
+    ...servers.map((s) => ({
+      id: serverTabId(s),
+      label: s.name,
+      status: s.status,
+      unread: 0,
+    })),
   ];
+
+  const focusFirstServerTab = () => {
+    const target = servers.find((s) => s.status === 'running' || s.status === 'starting') ?? servers[0];
+    if (target) setActiveTab(serverTabId(target));
+  };
 
   // The lead retires a merged worktree on its own, which takes its tab with it.
   // Leaving the selection pointing at a tab that no longer exists left the page
   // showing no pane at all, with every tab unselected.
   const workerIds = workers.map((d) => d.worktreeId).join(',');
+  const serverTabIds = servers.map((s) => serverTabId(s)).join(',');
   useEffect(() => {
     if (activeTab === 'lead') return;
-    if (!workerIds.split(',').includes(activeTab)) setActiveTab('lead');
-  }, [activeTab, workerIds]);
+    const valid = new Set([...workerIds.split(','), ...serverTabIds.split(',')].filter(Boolean));
+    if (!valid.has(activeTab)) setActiveTab('lead');
+  }, [activeTab, workerIds, serverTabIds]);
 
   return (
     <div
@@ -215,11 +254,36 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
                 : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
             }`}
           >
-            {tab.id === 'lead' ? <Compass className="h-3.5 w-3.5 shrink-0" /> : <Users className="h-3.5 w-3.5 shrink-0" />}
+            {tab.id === 'lead' ? (
+              <Compass className="h-3.5 w-3.5 shrink-0" />
+            ) : tab.id.startsWith(SERVER_TAB_PREFIX) ? (
+              <Server className="h-3.5 w-3.5 shrink-0" />
+            ) : (
+              <Users className="h-3.5 w-3.5 shrink-0" />
+            )}
             <span className="truncate">{tab.label}</span>
             {tab.unread ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" /> : null}
           </button>
         ))}
+        {servers.length > 0 && (
+          <button
+            type="button"
+            data-testid="lead-server-badge"
+            onClick={focusFirstServerTab}
+            title={`${runningServerCount} server${runningServerCount === 1 ? '' : 's'} running`}
+            className={`ml-auto flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors ${
+              runningServerCount > 0
+                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500'
+                : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
+            }`}
+          >
+            <Server className="h-3.5 w-3.5 shrink-0" />
+            <span className="font-medium">{runningServerCount}</span>
+            <span
+              className={`h-2 w-2 rounded-full ${runningServerCount > 0 ? 'bg-emerald-500' : 'bg-muted-foreground'}`}
+            />
+          </button>
+        )}
       </div>
       {/* Every pane stays mounted so switching tabs never drops a live session. */}
       <div className="relative min-h-0 flex-1 overflow-hidden rounded-md border">
@@ -246,6 +310,30 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
             />
           </div>
         ))}
+        {servers.map((s) => {
+          const tabId = serverTabId(s);
+          return (
+            <div
+              key={tabId}
+              className="absolute inset-0"
+              style={{ display: activeTab === tabId ? 'block' : 'none' }}
+            >
+              <AgentPane
+                projectId={projectId}
+                active={activeTab === tabId}
+                sessionKind="server"
+                serverId={s.id}
+                serverName={s.name}
+                serverCommand={s.command}
+                serverStatus={s.status}
+                onServerDeleted={() => {
+                  setActiveTab('lead');
+                  refreshServers();
+                }}
+              />
+            </div>
+          );
+        })}
       </div>
       </div>
       {sidePanelOpen && (

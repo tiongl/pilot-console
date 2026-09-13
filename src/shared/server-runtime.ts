@@ -1,8 +1,6 @@
 import { spawn } from 'child_process';
-import path from 'path';
-import { getDb } from './db';
 import { getProjectById } from './project-store';
-import { updateServerStatus, setServerExitCode } from './server-store';
+import { updateServerStatus, setServerExitCode, getServerById } from './server-store';
 import type { ProjectServer } from './server-store';
 
 interface ServerProcess {
@@ -12,6 +10,72 @@ interface ServerProcess {
 }
 
 const activeServerProcesses = new Map<string, ServerProcess>();
+
+/**
+ * Live output/status streaming layer.
+ *
+ * Server stdout/stderr is buffered per-server (surviving process exit so a tab
+ * opened after the fact can replay the backlog) and fanned out to any attached
+ * subscribers (the `/ws/server` sockets). This mirrors the patterns used by the
+ * agent/terminal sockets without touching the agent SDK machinery.
+ */
+export type ServerStreamEvent =
+  | { type: 'output'; data: string }
+  | { type: 'status'; status: ProjectServer['status']; exitCode: number | null };
+
+type ServerStreamListener = (event: ServerStreamEvent) => void;
+
+const MAX_BUFFER = 100_000; // Keep last 100KB of output per server.
+const serverOutputBuffers = new Map<string, string>();
+const serverListeners = new Map<string, Set<ServerStreamListener>>();
+
+function emitServer(serverId: string, event: ServerStreamEvent): void {
+  const listeners = serverListeners.get(serverId);
+  if (!listeners) return;
+  for (const listener of listeners) {
+    try {
+      listener(event);
+    } catch {
+      /* ignore subscriber errors */
+    }
+  }
+}
+
+function appendServerOutput(serverId: string, text: string): void {
+  let buffer = (serverOutputBuffers.get(serverId) ?? '') + text;
+  if (buffer.length > MAX_BUFFER) {
+    buffer = buffer.slice(-MAX_BUFFER);
+  }
+  serverOutputBuffers.set(serverId, buffer);
+  emitServer(serverId, { type: 'output', data: text });
+}
+
+/** Update persisted status and notify attached subscribers. */
+function setStatus(serverId: string, status: ProjectServer['status'], exitCode: number | null): void {
+  updateServerStatus(serverId, status);
+  emitServer(serverId, { type: 'status', status, exitCode });
+}
+
+/** Current buffered output for a server (used to replay backlog on attach). */
+export function getServerBacklog(serverId: string): string {
+  return serverOutputBuffers.get(serverId) ?? '';
+}
+
+/** Attach a listener for a server's live output/status. Returns an unsubscribe. */
+export function subscribeServer(serverId: string, listener: ServerStreamListener): () => void {
+  let listeners = serverListeners.get(serverId);
+  if (!listeners) {
+    listeners = new Set();
+    serverListeners.set(serverId, listeners);
+  }
+  listeners.add(listener);
+  return () => {
+    const set = serverListeners.get(serverId);
+    if (!set) return;
+    set.delete(listener);
+    if (set.size === 0) serverListeners.delete(serverId);
+  };
+}
 
 export async function spawnServer(
   userId: string,
@@ -23,8 +87,11 @@ export async function spawnServer(
   }
 
   try {
+    // Fresh run — clear any prior output backlog so the tab shows this run.
+    serverOutputBuffers.set(server.id, '');
+
     // Update server status to starting
-    updateServerStatus(server.id, 'starting');
+    setStatus(server.id, 'starting', null);
 
     const cwd = server.cwd || project.repoPath;
     const env = {
@@ -48,24 +115,12 @@ export async function spawnServer(
     };
     activeServerProcesses.set(server.id, serverProcess);
 
-    // Pipe stdout/stderr to database for retrieval
-    let outputBuffer = '';
-    const maxBuffer = 100000; // Keep last 100KB
-
-    const appendOutput = (text: string) => {
-      outputBuffer += text;
-      if (outputBuffer.length > maxBuffer) {
-        outputBuffer = outputBuffer.slice(-maxBuffer);
-      }
-      // Store in CLI session output log if needed
-    };
-
     childProcess.stdout?.on('data', (data) => {
-      appendOutput(data.toString());
+      appendServerOutput(server.id, data.toString());
     });
 
     childProcess.stderr?.on('data', (data) => {
-      appendOutput(data.toString());
+      appendServerOutput(server.id, data.toString());
     });
 
     // Handle process exit
@@ -73,20 +128,21 @@ export async function spawnServer(
       activeServerProcesses.delete(server.id);
       const exitCode = code ?? -1;
       setServerExitCode(server.id, exitCode);
-      updateServerStatus(server.id, exitCode === 0 ? 'stopped' : 'failed');
+      setStatus(server.id, exitCode === 0 ? 'stopped' : 'failed', exitCode);
     });
 
     // Handle errors
     childProcess.on('error', (err) => {
       activeServerProcesses.delete(server.id);
       console.error(`[server-runtime] Error spawning server ${server.id}:`, err);
-      updateServerStatus(server.id, 'failed');
+      appendServerOutput(server.id, `\r\n[error] ${err instanceof Error ? err.message : String(err)}\r\n`);
+      setStatus(server.id, 'failed', null);
     });
 
     // Update to running after a short delay (gives time for immediate errors)
     setTimeout(() => {
       if (!childProcess.killed && activeServerProcesses.has(server.id)) {
-        updateServerStatus(server.id, 'running');
+        setStatus(server.id, 'running', null);
       }
     }, 500);
 
@@ -95,7 +151,7 @@ export async function spawnServer(
       status: 'starting',
     };
   } catch (err) {
-    updateServerStatus(server.id, 'failed');
+    setStatus(server.id, 'failed', null);
     throw new Error(`Failed to spawn server: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
@@ -123,6 +179,43 @@ export function stopServer(serverId: string): void {
   }
 }
 
+/** True if a server currently has a live child process. */
+export function isServerActive(serverId: string): boolean {
+  return activeServerProcesses.has(serverId);
+}
+
+/**
+ * Restart a server: stop any running process, wait for it to exit, then spawn a
+ * fresh one from the persisted definition.
+ */
+export async function restartServer(
+  userId: string,
+  serverId: string,
+): Promise<{ serverId: string; status: string }> {
+  const server = getServerById(serverId);
+  if (!server) {
+    throw new Error(`Server ${serverId} not found`);
+  }
+
+  const existing = activeServerProcesses.get(serverId);
+  if (existing) {
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      existing.process.once('exit', done);
+      stopServer(serverId);
+      // Safety net in case the exit event never fires.
+      setTimeout(done, 6000);
+    });
+  }
+
+  return spawnServer(userId, server);
+}
+
 export function getServerHealth(serverId: string): {
   status: 'running' | 'stopped' | 'unhealthy';
   uptime: number;
@@ -140,4 +233,3 @@ export function getServerHealth(serverId: string): {
     uptime,
   };
 }
-

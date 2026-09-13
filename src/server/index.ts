@@ -17,6 +17,9 @@ import { createTodo, deleteTodo, listTodos, updateTodo } from '../shared/todo-st
 import { listSessionsForUser, listAllSessions, getCopilotSessionDetail, listCopilotSessionsForProject } from '../shared/session-store';
 import { setupWebSocketServer } from './websocket';
 import { setupAgentWebSocketServer } from './agent-websocket';
+import { setupServerWebSocketServer } from './server-websocket';
+import { listServersByProject, getServerById, deleteServer } from '../shared/server-store';
+import { stopServer, restartServer, isServerActive } from '../shared/server-runtime';
 import { listAgentModels, detachAgentBridge, listLiveAgentSessions } from '../shared/agent-bridge';
 import { getAllSessions, getAllSessionsWithExited, getSessionStatus, endCliSession, endSessionByProject, initDaemonBridge } from '../shared/cli-bridge';
 import { getDb } from '../shared/db';
@@ -275,6 +278,52 @@ app.get('/api/delegations/unread', requireAuth, (_req, res) => {
 
 app.get('/api/delegations', requireAuth, (_req, res) => {
   res.json({ delegations: listAllDelegations() });
+});
+
+// --- Managed servers (Project Lead "start server" feature) ---
+app.get('/api/projects/:id/servers', requireAuth, (req, res) => {
+  const projectId = String(req.params.id);
+  const project = getProjectById(projectId);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const servers = listServersByProject(projectId).map((s) => ({
+    id: s.id,
+    projectId: s.projectId,
+    name: s.name,
+    command: s.command,
+    status: s.status,
+    exitCode: s.exitCode,
+    startedAt: s.startedAt,
+    stoppedAt: s.stoppedAt,
+    createdAt: s.createdAt,
+    running: isServerActive(s.id),
+  }));
+  res.json({ servers });
+});
+
+app.post('/api/servers/:serverId/stop', requireAuth, (req, res) => {
+  const server = getServerById(String(req.params.serverId));
+  if (!server) { res.status(404).json({ error: 'Server not found' }); return; }
+  stopServer(server.id);
+  res.json({ ok: true, serverId: server.id });
+});
+
+app.post('/api/servers/:serverId/restart', requireAuth, async (req, res) => {
+  const server = getServerById(String(req.params.serverId));
+  if (!server) { res.status(404).json({ error: 'Server not found' }); return; }
+  try {
+    const result = await restartServer(req.user?.id ?? '', server.id);
+    res.json({ ok: true, serverId: server.id, status: result.status });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.delete('/api/servers/:serverId', requireAuth, (req, res) => {
+  const server = getServerById(String(req.params.serverId));
+  if (!server) { res.status(404).json({ error: 'Server not found' }); return; }
+  if (isServerActive(server.id)) stopServer(server.id);
+  deleteServer(server.id);
+  res.json({ ok: true, serverId: server.id });
 });
 
 app.get('/api/projects/:id/memory', (req, res) => {  const project = getProjectById(req.params.id);
@@ -1510,6 +1559,7 @@ const httpServer = createServer(app);
 // WebSocket
 const wss = setupWebSocketServer();
 const agentWss = setupAgentWebSocketServer();
+const serverWss = setupServerWebSocketServer();
 httpServer.on('upgrade', (req, socket, head) => {
   const { pathname } = parse(req.url!, true);
   if (pathname === '/ws') {
@@ -1519,6 +1569,10 @@ httpServer.on('upgrade', (req, socket, head) => {
   } else if (pathname === '/ws/agent') {
     agentWss.handleUpgrade(req, socket, head, (ws) => {
       agentWss.emit('connection', ws, req);
+    });
+  } else if (pathname === '/ws/server') {
+    serverWss.handleUpgrade(req, socket, head, (ws) => {
+      serverWss.emit('connection', ws, req);
     });
   } else {
     socket.destroy();

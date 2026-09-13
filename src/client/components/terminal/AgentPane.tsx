@@ -5,6 +5,7 @@ import RichMarkdown from '@/components/markdown/RichMarkdown';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { useSpeechInput } from '@/hooks/useSpeechInput';
+import ServerTab, { type ServerStatus } from './ServerTab';
 import {
   Dialog,
   DialogContent,
@@ -76,7 +77,13 @@ interface Props {
   fontSize?: number;
   onSessionId?: (sessionId: string) => void;
   onStatusChange?: (status: string) => void;
-  sessionKind?: 'agent' | 'project_lead' | 'chief_of_staff';
+  sessionKind?: 'agent' | 'project_lead' | 'chief_of_staff' | 'server';
+  /** Server-tab metadata (only used when sessionKind === 'server'). */
+  serverId?: string;
+  serverName?: string;
+  serverCommand?: string;
+  serverStatus?: ServerStatus;
+  onServerDeleted?: () => void;
 }
 
 interface PermissionPrompt {
@@ -436,7 +443,31 @@ export default function AgentPane({
   onSessionId,
   onStatusChange,
   sessionKind = 'agent',
+  serverId,
+  serverName,
+  serverCommand,
+  serverStatus,
+  onServerDeleted,
 }: Props) {
+  // Server tabs render a live console instead of the agent transcript. This
+  // early return runs before any hook, so a given instance (fixed sessionKind)
+  // consistently takes the same branch — keeping the rules of hooks intact.
+  if (sessionKind === 'server' && serverId) {
+    return (
+      <ServerTab
+        serverId={serverId}
+        name={serverName ?? 'Server'}
+        command={serverCommand ?? ''}
+        initialStatus={serverStatus}
+        active={active}
+        fontFamily={fontFamily}
+        fontSize={fontSize}
+        themeName={themeName}
+        onDeleted={onServerDeleted}
+      />
+    );
+  }
+
   const [events, setEvents] = useState<AgentTranscriptEvent[]>([]);
   // Older events stay on the server until the user asks for them, so a long
   // conversation does not ship its whole history on connect.
@@ -2005,7 +2036,7 @@ export default function AgentPane({
                   showReasoning={visibility.reasoning}
                   projectId={projectId}
                   worktreeId={worktreeId}
-                  sessionKind={sessionKind}
+                  sessionKind={sessionKind === 'server' ? undefined : sessionKind}
                 />
               ) : (
                 <ToolBadgeStrip tools={item.tools} appearance={appearance} codeSize={codeSize} />
