@@ -43,6 +43,7 @@ const liveDelegation = {
 
 let delegations: Array<Record<string, unknown>> = [];
 let leadTodos: Array<Record<string, unknown>> = [];
+let artifacts: Array<Record<string, unknown>> = [];
 
 function jsonResponse(body: unknown) {
   return { ok: true, json: async () => body } as unknown as Response;
@@ -52,12 +53,14 @@ beforeEach(() => {
   paneProps.length = 0;
   delegations = [];
   leadTodos = [];
+  artifacts = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     if (url.endsWith('/delegations')) return jsonResponse({ delegations });
     if (url.endsWith('/todos')) return jsonResponse({ todos: leadTodos });
     if (url.endsWith('/audit-log')) return jsonResponse({ entries: [] });
     if (url.endsWith('/decision-threads')) return jsonResponse({ threads: [] });
     if (url.endsWith('/memory')) return jsonResponse(null);
+    if (url.endsWith('/lavish')) return jsonResponse({ artifacts });
     return jsonResponse({});
   }));
 });
@@ -168,6 +171,30 @@ describe('ProjectLeadPage worker tabs', () => {
     fireEvent.click(await screen.findByTestId('lead-tab-wt-1'));
 
     expect(screen.getByTestId('lead-tab-wt-1').getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('renders a Lavish artifact tab and routes it through AgentPane', async () => {
+    artifacts = [
+      {
+        id: 'a1',
+        projectId,
+        name: 'Architecture Plan',
+        status: 'ready',
+        sessionKey: 'key1',
+        proxyPath: '/api/lavish/a1/session/key1',
+      },
+    ];
+    await renderPage();
+
+    const tab = await screen.findByTestId('lead-tab-art-a1');
+    expect(tab.textContent).toContain('Architecture Plan');
+
+    const pane = screen.getByTestId('pane-artifact-lead');
+    expect(pane).toBeTruthy();
+    const props = paneProps.find((p) => p.sessionKind === 'artifact');
+    expect(props?.artifactId).toBe('a1');
+    expect(props?.artifactSessionKey).toBe('key1');
+    expect(props?.artifactStatus).toBe('ready');
   });
 
   it('switches to the worker pane when its tab is clicked', async () => {    delegations = [liveDelegation];

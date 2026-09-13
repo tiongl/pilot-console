@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router';
-import { Compass, Users, ChevronRight, PanelRightClose, PanelRightOpen, Server } from 'lucide-react';
+import { Compass, Users, ChevronRight, PanelRightClose, PanelRightOpen, Server, FileCode } from 'lucide-react';
 import AgentPane from '../components/terminal/AgentPane';
 import ProjectTodoPanel from '../components/project/ProjectTodoPanel';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
@@ -52,6 +52,16 @@ interface ManagedServer {
 }
 
 const SERVER_TAB_PREFIX = 'srv-';
+const ARTIFACT_TAB_PREFIX = 'art-';
+
+interface LavishArtifactTab {
+  id: string;
+  projectId: string;
+  name: string;
+  status: 'starting' | 'ready' | 'failed' | 'stopped';
+  sessionKey: string | null;
+  proxyPath: string | null;
+}
 
 export default function ProjectLeadPage() {
   const { id } = useParams<{ id: string }>();
@@ -124,6 +134,7 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
 
   const [delegations, setDelegations] = useState<Delegation[]>([]);
   const [servers, setServers] = useState<ManagedServer[]>([]);
+  const [artifacts, setArtifacts] = useState<LavishArtifactTab[]>([]);
   const [activeTab, setActiveTab] = useState<string>('lead');
 
   const refreshDelegations = useCallback(() => {
@@ -140,16 +151,25 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
       .catch(() => {});
   }, [projectId]);
 
+  const refreshArtifacts = useCallback(() => {
+    fetch(`/api/projects/${projectId}/lavish`)
+      .then((r) => (r.ok ? r.json() : { artifacts: [] }))
+      .then((data: { artifacts: LavishArtifactTab[] }) => setArtifacts(data.artifacts || []))
+      .catch(() => {});
+  }, [projectId]);
+
   // Workers and servers appear without any action on this page, so poll for new tabs.
   useEffect(() => {
     refreshDelegations();
     refreshServers();
+    refreshArtifacts();
     const timer = setInterval(() => {
       refreshDelegations();
       refreshServers();
+      refreshArtifacts();
     }, 8000);
     return () => clearInterval(timer);
-  }, [refreshDelegations, refreshServers]);
+  }, [refreshDelegations, refreshServers, refreshArtifacts]);
 
   // Opening a worker's tab clears its "needs attention" flag. A worktree can
   // have older, closed-out delegations too; the newest one owns the tab.
@@ -180,6 +200,7 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
   // Tabs are never closable: the lead is permanent, and a worker tab is the
   // only way back into that worker's session from here.
   const serverTabId = (s: ManagedServer) => `${SERVER_TAB_PREFIX}${s.id}`;
+  const artifactTabId = (a: LavishArtifactTab) => `${ARTIFACT_TAB_PREFIX}${a.id}`;
   const runningServerCount = servers.filter((s) => s.status === 'running' || s.status === 'starting').length;
   const tabs = [
     { id: 'lead', label: 'Lead', status: null as string | null, unread: 0 },
@@ -195,6 +216,12 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
       status: s.status,
       unread: 0,
     })),
+    ...artifacts.map((a) => ({
+      id: artifactTabId(a),
+      label: a.name,
+      status: a.status,
+      unread: 0,
+    })),
   ];
 
   const focusFirstServerTab = () => {
@@ -207,11 +234,14 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
   // showing no pane at all, with every tab unselected.
   const workerIds = workers.map((d) => d.worktreeId).join(',');
   const serverTabIds = servers.map((s) => serverTabId(s)).join(',');
+  const artifactTabIds = artifacts.map((a) => artifactTabId(a)).join(',');
   useEffect(() => {
     if (activeTab === 'lead') return;
-    const valid = new Set([...workerIds.split(','), ...serverTabIds.split(',')].filter(Boolean));
+    const valid = new Set(
+      [...workerIds.split(','), ...serverTabIds.split(','), ...artifactTabIds.split(',')].filter(Boolean),
+    );
     if (!valid.has(activeTab)) setActiveTab('lead');
-  }, [activeTab, workerIds, serverTabIds]);
+  }, [activeTab, workerIds, serverTabIds, artifactTabIds]);
 
   return (
     <div
@@ -258,6 +288,8 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
               <Compass className="h-3.5 w-3.5 shrink-0" />
             ) : tab.id.startsWith(SERVER_TAB_PREFIX) ? (
               <Server className="h-3.5 w-3.5 shrink-0" />
+            ) : tab.id.startsWith(ARTIFACT_TAB_PREFIX) ? (
+              <FileCode className="h-3.5 w-3.5 shrink-0" />
             ) : (
               <Users className="h-3.5 w-3.5 shrink-0" />
             )}
@@ -329,6 +361,30 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
                 onServerDeleted={() => {
                   setActiveTab('lead');
                   refreshServers();
+                }}
+              />
+            </div>
+          );
+        })}
+        {artifacts.map((a) => {
+          const tabId = artifactTabId(a);
+          return (
+            <div
+              key={tabId}
+              className="absolute inset-0"
+              style={{ display: activeTab === tabId ? 'block' : 'none' }}
+            >
+              <AgentPane
+                projectId={projectId}
+                active={activeTab === tabId}
+                sessionKind="artifact"
+                artifactId={a.id}
+                artifactName={a.name}
+                artifactSessionKey={a.sessionKey}
+                artifactStatus={a.status}
+                onArtifactDeleted={() => {
+                  setActiveTab('lead');
+                  refreshArtifacts();
                 }}
               />
             </div>
