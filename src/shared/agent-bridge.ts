@@ -1761,6 +1761,15 @@ approve_and_install may you offer to install it: ask the user to approve with as
 only if they say yes call install_skill with approved:true (it also loads the plugin into your
 live session so you can start using it). Under suggest_only, recommend the skill and how it
 helps but never install it — install_skill will refuse.
+
+When this project's github_task_mode is not off, you have first-class GitHub task tools. Use
+the read tools (list_github_issues, get_github_issue, list_pull_requests, list_milestones,
+get_github_board) to ground planning in real issues, PRs, and the board. Under read_only you may
+only examine. Under manage you may also file and update issues, move board cards, and open the
+pull request that closes an issue — but every such write requires an explicit user go-ahead: ask
+with ask_user first and only if they say yes call the tool with confirmed:true (never write
+without it). The typical loop is: examine an issue, delegate a worker to a worktree to do the
+work, then open the PR that closes it.
 `;
 
 export function deriveStatusFromEvents(events: SessionEvent[] | undefined): AgentStatus {

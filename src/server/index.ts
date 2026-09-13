@@ -436,32 +436,34 @@ app.get('/api/projects/:id/autonomy', (req, res) => {
   const project = getProjectById(req.params.id);
   if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
   const settings = getDb().prepare(
-    'SELECT project_id as projectId, merge_mode as mergeMode, intervention_mode as interventionMode, skill_install_mode as skillInstallMode, dnd FROM project_autonomy_settings WHERE project_id = ?',
-  ).get(req.params.id) ?? { projectId: req.params.id, mergeMode: 'advisory', interventionMode: 'flag_only', skillInstallMode: 'suggest_only', dnd: 0 };
+    'SELECT project_id as projectId, merge_mode as mergeMode, intervention_mode as interventionMode, skill_install_mode as skillInstallMode, github_task_mode as githubTaskMode, dnd FROM project_autonomy_settings WHERE project_id = ?',
+  ).get(req.params.id) ?? { projectId: req.params.id, mergeMode: 'advisory', interventionMode: 'flag_only', skillInstallMode: 'suggest_only', githubTaskMode: 'off', dnd: 0 };
   res.json({ settings });
 });
 
 app.patch('/api/projects/:id/autonomy', (req, res) => {
   const project = getProjectById(req.params.id);
   if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
-  const { mergeMode = 'advisory', interventionMode = 'flag_only', skillInstallMode = 'suggest_only', dnd = false } = req.body as {
-    mergeMode?: string; interventionMode?: string; skillInstallMode?: string; dnd?: boolean;
+  const { mergeMode = 'advisory', interventionMode = 'flag_only', skillInstallMode = 'suggest_only', githubTaskMode = 'off', dnd = false } = req.body as {
+    mergeMode?: string; interventionMode?: string; skillInstallMode?: string; githubTaskMode?: string; dnd?: boolean;
   };
   if (!['advisory', 'auto_queue', 'full_auto'].includes(mergeMode) ||
       !['flag_only', 'flag_nudge', 'flag_nudge_cancel'].includes(interventionMode) ||
-      !['suggest_only', 'approve_and_install'].includes(skillInstallMode)) {
+      !['suggest_only', 'approve_and_install'].includes(skillInstallMode) ||
+      !['off', 'read_only', 'manage'].includes(githubTaskMode)) {
     res.status(400).json({ error: 'Invalid autonomy settings' });
     return;
   }
   getDb().prepare(`
-    INSERT INTO project_autonomy_settings (project_id, merge_mode, intervention_mode, skill_install_mode, dnd)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO project_autonomy_settings (project_id, merge_mode, intervention_mode, skill_install_mode, github_task_mode, dnd)
+    VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT(project_id) DO UPDATE SET
       merge_mode = excluded.merge_mode,
       intervention_mode = excluded.intervention_mode,
       skill_install_mode = excluded.skill_install_mode,
+      github_task_mode = excluded.github_task_mode,
       dnd = excluded.dnd
-  `).run(req.params.id, mergeMode, interventionMode, skillInstallMode, dnd ? 1 : 0);
+  `).run(req.params.id, mergeMode, interventionMode, skillInstallMode, githubTaskMode, dnd ? 1 : 0);
   res.json({ ok: true });
 });
 

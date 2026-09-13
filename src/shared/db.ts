@@ -171,6 +171,7 @@ function initSchema(db: Database.Database) {
       merge_mode        TEXT NOT NULL DEFAULT 'advisory',
       intervention_mode TEXT NOT NULL DEFAULT 'flag_only',
       skill_install_mode TEXT NOT NULL DEFAULT 'suggest_only',
+      github_task_mode  TEXT NOT NULL DEFAULT 'off',
       dnd               INTEGER NOT NULL DEFAULT 0
     );
 
@@ -372,8 +373,15 @@ function initSchema(db: Database.Database) {
   // Migration: add skill_install_mode to project_autonomy_settings so the
   // Project Lead can be gated between suggest-only and approve-and-install.
   const autonomyCols = db.pragma('table_info(project_autonomy_settings)') as Array<{ name: string }>;
-  if (!new Set(autonomyCols.map((c) => c.name)).has('skill_install_mode')) {
+  const autonomyColNames = new Set(autonomyCols.map((c) => c.name));
+  if (!autonomyColNames.has('skill_install_mode')) {
     db.exec("ALTER TABLE project_autonomy_settings ADD COLUMN skill_install_mode TEXT NOT NULL DEFAULT 'suggest_only'");
+  }
+
+  // Migration: add github_task_mode to project_autonomy_settings so the Project
+  // Lead's GitHub task tools can be gated between off, read_only, and manage.
+  if (!autonomyColNames.has('github_task_mode')) {
+    db.exec("ALTER TABLE project_autonomy_settings ADD COLUMN github_task_mode TEXT NOT NULL DEFAULT 'off'");
   }
 
   // Migration: link an audit entry to the record it acted on (currently the
