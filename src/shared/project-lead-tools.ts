@@ -936,5 +936,119 @@ export function createProjectLeadTools(  projectId: string,
       skipPermission: true,
       defer: 'never',
     }),
+    defineTool('open_artifact', {
+      description:
+        'Open an HTML artifact file in a LIVE Lavish review tab (via `lavish-axi`), embedded same-origin in a ' +
+        'dedicated pilot-console tab. Returns an artifactId. The artifact renders with the Lavish SDK ' +
+        '(annotations, editable Mermaid whiteboards, layout-issue inbox, human feedback). After opening, call ' +
+        'poll_artifact_feedback to receive queued human feedback. Use for visual artifacts, plans, comparisons, ' +
+        'diagrams, or any browser-based review surface.',
+      parameters: {
+        type: 'object',
+        properties: {
+          htmlPath: {
+            type: 'string',
+            description: 'Absolute path to the .html artifact file to open in Lavish.',
+          },
+          name: {
+            type: 'string',
+            description: 'Display name for the tab (e.g., "Architecture Plan", "API Comparison").',
+          },
+        },
+        required: ['htmlPath', 'name'],
+      },
+      handler: async ({ htmlPath, name }: { htmlPath: string; name: string }) => {
+        const { createArtifact } = await import('./lavish-store');
+        const { spawnLavishArtifact } = await import('./lavish-runtime');
+
+        const artifact = createArtifact({ projectId, name, htmlPath });
+        try {
+          const result = await spawnLavishArtifact(userId ?? '', artifact);
+          audit(projectId, 'open_artifact', `Opened Lavish artifact: ${name} (${htmlPath})`, 'low');
+          return {
+            ok: true,
+            artifactId: result.artifactId,
+            name: artifact.name,
+            status: result.status,
+            note: 'A live Lavish tab is opening. Call poll_artifact_feedback to receive human feedback.',
+          };
+        } catch (err) {
+          audit(projectId, 'open_artifact', `Failed to open artifact: ${name} - ${err instanceof Error ? err.message : String(err)}`, 'high');
+          throw err;
+        }
+      },
+      skipPermission: false,
+      defer: 'never',
+    }),
+    defineTool('poll_artifact_feedback', {
+      description:
+        'Check for queued human feedback on a live Lavish artifact. This is a BOUNDED, non-blocking poll: it ' +
+        'returns any feedback the reviewer has queued, or { pending: true } if none arrived within the timeout ' +
+        '(then you may poll again later). Optionally include an agentReply to show your response to the reviewer ' +
+        'in Lavish Editor. Does NOT block your turn indefinitely.',
+      parameters: {
+        type: 'object',
+        properties: {
+          artifactId: {
+            type: 'string',
+            description: 'The artifact ID returned by open_artifact.',
+          },
+          agentReply: {
+            type: 'string',
+            description: 'Optional message to show the reviewer in Lavish Editor as your reply.',
+          },
+          timeoutMs: {
+            type: 'number',
+            description: 'How long to wait for feedback (1000–120000 ms). Defaults to 20000.',
+          },
+        },
+        required: ['artifactId'],
+      },
+      handler: async ({
+        artifactId,
+        agentReply,
+        timeoutMs,
+      }: {
+        artifactId: string;
+        agentReply?: string;
+        timeoutMs?: number;
+      }) => {
+        const { pollArtifactFeedback } = await import('./lavish-runtime');
+        const feedback = await pollArtifactFeedback(artifactId, { agentReply, timeoutMs });
+        if (feedback.timedOut || !feedback.raw) {
+          return { ok: true, pending: true, note: 'No feedback yet. Poll again later.' };
+        }
+        return { ok: true, pending: false, feedback: feedback.raw };
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    defineTool('close_artifact', {
+      description: 'Close a live Lavish artifact tab by its ID (ends the session and removes the tab).',
+      parameters: {
+        type: 'object',
+        properties: {
+          artifactId: {
+            type: 'string',
+            description: 'The artifact ID returned by open_artifact.',
+          },
+        },
+        required: ['artifactId'],
+      },
+      handler: async ({ artifactId }: { artifactId: string }) => {
+        const { getArtifactById, deleteArtifact } = await import('./lavish-store');
+        const { stopLavishArtifact } = await import('./lavish-runtime');
+
+        const artifact = getArtifactById(artifactId);
+        if (!artifact) throw new Error(`Artifact ${artifactId} not found`);
+
+        stopLavishArtifact(artifactId);
+        deleteArtifact(artifactId);
+        audit(projectId, 'close_artifact', `Closed Lavish artifact: ${artifact.name}`, 'low');
+        return { ok: true, artifactId };
+      },
+      skipPermission: false,
+      defer: 'never',
+    }),
   ];
 }

@@ -288,6 +288,24 @@ function initSchema(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_project_servers_project_id ON project_servers(project_id);
     CREATE INDEX IF NOT EXISTS idx_project_servers_status ON project_servers(status);
+
+    CREATE TABLE IF NOT EXISTS lavish_artifacts (
+      id              TEXT PRIMARY KEY,
+      project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      name            TEXT NOT NULL,
+      html_path       TEXT NOT NULL,
+      session_key     TEXT,
+      host            TEXT,
+      port            INTEGER,
+      session_url     TEXT,
+      status          TEXT NOT NULL DEFAULT 'starting',
+      exit_code       INTEGER,
+      created_at      TEXT DEFAULT (datetime('now')),
+      updated_at      TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_lavish_artifacts_project_id ON lavish_artifacts(project_id);
+    CREATE INDEX IF NOT EXISTS idx_lavish_artifacts_status ON lavish_artifacts(status);
   `);
 
   // Migrations: add columns that may not exist in older DBs

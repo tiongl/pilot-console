@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { useSpeechInput } from '@/hooks/useSpeechInput';
 import ServerTab, { type ServerStatus } from './ServerTab';
+import ArtifactTab, { type ArtifactStatus } from './ArtifactTab';
 import {
   Dialog,
   DialogContent,
@@ -77,13 +78,19 @@ interface Props {
   fontSize?: number;
   onSessionId?: (sessionId: string) => void;
   onStatusChange?: (status: string) => void;
-  sessionKind?: 'agent' | 'project_lead' | 'chief_of_staff' | 'server';
+  sessionKind?: 'agent' | 'project_lead' | 'chief_of_staff' | 'server' | 'artifact';
   /** Server-tab metadata (only used when sessionKind === 'server'). */
   serverId?: string;
   serverName?: string;
   serverCommand?: string;
   serverStatus?: ServerStatus;
   onServerDeleted?: () => void;
+  /** Artifact-tab metadata (only used when sessionKind === 'artifact'). */
+  artifactId?: string;
+  artifactName?: string;
+  artifactSessionKey?: string | null;
+  artifactStatus?: ArtifactStatus;
+  onArtifactDeleted?: () => void;
 }
 
 interface PermissionPrompt {
@@ -448,6 +455,11 @@ export default function AgentPane({
   serverCommand,
   serverStatus,
   onServerDeleted,
+  artifactId,
+  artifactName,
+  artifactSessionKey,
+  artifactStatus,
+  onArtifactDeleted,
 }: Props) {
   // Server tabs render a live console instead of the agent transcript. This
   // early return runs before any hook, so a given instance (fixed sessionKind)
@@ -464,6 +476,21 @@ export default function AgentPane({
         fontSize={fontSize}
         themeName={themeName}
         onDeleted={onServerDeleted}
+      />
+    );
+  }
+
+  // Artifact tabs embed a live Lavish session iframe. Same rules-of-hooks note
+  // as the server branch above.
+  if (sessionKind === 'artifact' && artifactId) {
+    return (
+      <ArtifactTab
+        artifactId={artifactId}
+        name={artifactName ?? 'Artifact'}
+        sessionKey={artifactSessionKey}
+        initialStatus={artifactStatus}
+        active={active}
+        onDeleted={onArtifactDeleted}
       />
     );
   }
@@ -2036,7 +2063,7 @@ export default function AgentPane({
                   showReasoning={visibility.reasoning}
                   projectId={projectId}
                   worktreeId={worktreeId}
-                  sessionKind={sessionKind === 'server' ? undefined : sessionKind}
+                  sessionKind={sessionKind === 'server' || sessionKind === 'artifact' ? undefined : sessionKind}
                 />
               ) : (
                 <ToolBadgeStrip tools={item.tools} appearance={appearance} codeSize={codeSize} />

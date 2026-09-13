@@ -22,7 +22,7 @@ interface UseAgentSocketOptions {
   sessionId?: string;
   model?: string;
   forceNew?: boolean;
-  kind?: 'agent' | 'project_lead' | 'chief_of_staff' | 'server';
+  kind?: 'agent' | 'project_lead' | 'chief_of_staff' | 'server' | 'artifact';
   onMessage?: (msg: AgentServerMessage) => void;
   onReady?: (sessionId: string) => void;
 }

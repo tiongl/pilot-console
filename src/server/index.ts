@@ -20,6 +20,9 @@ import { setupAgentWebSocketServer } from './agent-websocket';
 import { setupServerWebSocketServer } from './server-websocket';
 import { listServersByProject, getServerById, deleteServer } from '../shared/server-store';
 import { stopServer, restartServer, isServerActive } from '../shared/server-runtime';
+import { listArtifactsByProject, getArtifactById, deleteArtifact } from '../shared/lavish-store';
+import { stopLavishArtifact } from '../shared/lavish-runtime';
+import { lavishProxyMiddleware, handleLavishUpgrade } from './lavish-proxy';
 import { listAgentModels, detachAgentBridge, listLiveAgentSessions } from '../shared/agent-bridge';
 import { getAllSessions, getAllSessionsWithExited, getSessionStatus, endCliSession, endSessionByProject, initDaemonBridge } from '../shared/cli-bridge';
 import { getDb } from '../shared/db';
@@ -37,6 +40,12 @@ import { startLagMonitor, getPerfSnapshot, recordApiCall } from './perf-monitor'
 import './renderers'; // register built-in renderers
 
 const app = express();
+
+// The Lavish reverse proxy must forward the RAW request body to the Lavish
+// daemon, so it is mounted before express.json() (which would otherwise consume
+// the body). It authenticates via the session cookie internally.
+app.use('/api/lavish/:artifactId', lavishProxyMiddleware);
+
 app.use(express.json());
 app.use(cookieParser());
 
@@ -324,6 +333,31 @@ app.delete('/api/servers/:serverId', requireAuth, (req, res) => {
   if (isServerActive(server.id)) stopServer(server.id);
   deleteServer(server.id);
   res.json({ ok: true, serverId: server.id });
+});
+
+// --- Lavish artifacts (Project Lead "open artifact" live-embed feature) ---
+app.get('/api/projects/:id/lavish', requireAuth, (req, res) => {
+  const projectId = String(req.params.id);
+  const project = getProjectById(projectId);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const artifacts = listArtifactsByProject(projectId).map((a) => ({
+    id: a.id,
+    projectId: a.projectId,
+    name: a.name,
+    status: a.status,
+    sessionKey: a.sessionKey,
+    proxyPath: a.sessionKey ? `/api/lavish/${a.id}/session/${a.sessionKey}` : null,
+    createdAt: a.createdAt,
+  }));
+  res.json({ artifacts });
+});
+
+app.delete('/api/lavish-artifacts/:artifactId', requireAuth, (req, res) => {
+  const artifact = getArtifactById(String(req.params.artifactId));
+  if (!artifact) { res.status(404).json({ error: 'Artifact not found' }); return; }
+  stopLavishArtifact(artifact.id);
+  deleteArtifact(artifact.id);
+  res.json({ ok: true, artifactId: artifact.id });
 });
 
 app.get('/api/projects/:id/memory', (req, res) => {  const project = getProjectById(req.params.id);
@@ -1562,7 +1596,9 @@ const agentWss = setupAgentWebSocketServer();
 const serverWss = setupServerWebSocketServer();
 httpServer.on('upgrade', (req, socket, head) => {
   const { pathname } = parse(req.url!, true);
-  if (pathname === '/ws') {
+  if (pathname && pathname.startsWith('/api/lavish/')) {
+    handleLavishUpgrade(req, socket, head);
+  } else if (pathname === '/ws') {
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req);
     });
