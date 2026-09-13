@@ -13,6 +13,10 @@ export interface GitChangedDetail {
   worktreeId: string | null;
 }
 
+export interface WorktreesChangedDetail {
+  projectId: string;
+}
+
 /**
  * Hook that listens for automation WebSocket notifications.
  */
@@ -55,6 +59,10 @@ export function useReportNotifications() {
           } else if (msg.type === 'git-changed') {
             window.dispatchEvent(new CustomEvent<GitChangedDetail>('git-changed', {
               detail: { projectId: msg.projectId, worktreeId: msg.worktreeId ?? null },
+            }));
+          } else if (msg.type === 'worktrees-changed') {
+            window.dispatchEvent(new CustomEvent<WorktreesChangedDetail>('worktrees-changed', {
+              detail: { projectId: msg.projectId },
             }));
           }
         } catch {}

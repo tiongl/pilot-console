@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
 import { getDb } from './db';
+import { emitWorktreesChanged } from './worktree-events';
 import type { Project, ProjectSkill, SkillType, Worktree, WorktreeType } from './types';
 
 // ---------------------------------------------------------------------------
@@ -269,6 +270,7 @@ export function createWorktree(
     .prepare('INSERT INTO worktrees (id, project_id, name, branch, worktree_path, is_managed, issue_number, seed_prompt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
     .run(id, projectId, slug, branch.trim(), wtPath, 1, opts?.issueNumber ?? null, opts?.seedPrompt ?? null);
 
+  emitWorktreesChanged(projectId);
   return getWorktreeById(id)!;
 }
 
@@ -342,6 +344,7 @@ export function attachExistingWorktree(
     .prepare('INSERT INTO worktrees (id, project_id, name, branch, worktree_path, is_managed) VALUES (?, ?, ?, ?, ?, ?)')
     .run(id, projectId, displayName, detectedBranch, resolvedPath, 0);
 
+  emitWorktreesChanged(projectId);
   return getWorktreeById(id)!;
 }
 
@@ -372,6 +375,7 @@ export function attachSubnode(
     .prepare('INSERT INTO worktrees (id, project_id, name, branch, worktree_path, is_managed, type) VALUES (?, ?, ?, ?, ?, ?, ?)')
     .run(id, projectId, displayName, '', canonicalPath, 0, 'directory');
 
+  emitWorktreesChanged(projectId);
   return getWorktreeById(id)!;
 }
 
@@ -417,4 +421,5 @@ export function deleteWorktree(id: string, projectId: string): void {
   }
 
   getDb().prepare('DELETE FROM worktrees WHERE id = ?').run(id);
+  emitWorktreesChanged(projectId);
 }

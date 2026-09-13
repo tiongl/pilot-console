@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import { getDb } from './db';
+import { emitWorktreesChanged } from './worktree-events';
 
 export type DelegationStatus =
   | 'planning'
@@ -58,6 +59,7 @@ export function createDelegation(input: {
     INSERT INTO delegations (id, project_id, worktree_id, session_id, title, task, status)
     VALUES (?, ?, ?, ?, ?, ?, 'planning')
   `).run(id, input.projectId, input.worktreeId, input.sessionId ?? null, shortTitle(input.title), input.task);
+  emitWorktreesChanged(input.projectId);
   return getDelegation(id)!;
 }
 
@@ -110,7 +112,9 @@ export function updateDelegation(
   if (sets.length === 0) return getDelegation(id);
   sets.push("updated_at = datetime('now')");
   getDb().prepare(`UPDATE delegations SET ${sets.join(', ')} WHERE id = ?`).run(...values, id);
-  return getDelegation(id);
+  const updated = getDelegation(id);
+  if (updated) emitWorktreesChanged(updated.projectId);
+  return updated;
 }
 
 /** Flag a worktree's delegation as needing attention (plan review, blocker). */
