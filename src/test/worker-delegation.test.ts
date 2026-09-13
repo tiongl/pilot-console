@@ -33,7 +33,7 @@ const projectId = 'p1';
  * Builds the Project Lead's tool set against in-memory stores. Each call gets
  * its own module registry so mocked state cannot leak between tests.
  */
-async function buildTools(options: { interventionMode?: string } = {}): Promise<Harness> {
+async function buildTools(options: { interventionMode?: string; skillInstallMode?: string } = {}): Promise<Harness> {
   vi.resetModules();
 
   const db = new Database(':memory:');
@@ -52,12 +52,14 @@ async function buildTools(options: { interventionMode?: string } = {}): Promise<
       project_id TEXT PRIMARY KEY,
       merge_mode TEXT NOT NULL DEFAULT 'advisory',
       intervention_mode TEXT NOT NULL DEFAULT 'flag_only',
+      skill_install_mode TEXT NOT NULL DEFAULT 'suggest_only',
       dnd INTEGER NOT NULL DEFAULT 0
     );
   `);
-  db.prepare('INSERT INTO project_autonomy_settings (project_id, intervention_mode) VALUES (?, ?)').run(
+  db.prepare('INSERT INTO project_autonomy_settings (project_id, intervention_mode, skill_install_mode) VALUES (?, ?, ?)').run(
     projectId,
     options.interventionMode ?? 'flag_only',
+    options.skillInstallMode ?? 'suggest_only',
   );
 
   let idCounter = 0;

@@ -1753,6 +1753,14 @@ close_worktree on each one it reports as safe. Do this as part of wrapping up a 
 when a merge completes or a worker reports done — not only when the user asks. close_worktree
 refuses anything with uncommitted changes, unmerged commits, a merge in flight, or a worker
 mid-turn, so it is safe to try; report what it refused rather than working around it.
+
+When a task would clearly benefit from a skill you don't have — interactive HTML/diagram
+editing is the canonical case, where the Lavish skill helps — suggest installing it. Use
+browse_skills to see what is available. Only when the project's skill_install_mode is
+approve_and_install may you offer to install it: ask the user to approve with ask_user, and
+only if they say yes call install_skill with approved:true (it also loads the plugin into your
+live session so you can start using it). Under suggest_only, recommend the skill and how it
+helps but never install it — install_skill will refuse.
 `;
 
 export function deriveStatusFromEvents(events: SessionEvent[] | undefined): AgentStatus {
