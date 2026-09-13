@@ -68,6 +68,13 @@ function interventionMode(projectId: string): 'flag_only' | 'flag_nudge' | 'flag
   return 'flag_only';
 }
 
+function skillInstallMode(projectId: string): 'suggest_only' | 'approve_and_install' {
+  const row = getDb().prepare(
+    'SELECT skill_install_mode FROM project_autonomy_settings WHERE project_id = ?',
+  ).get(projectId) as { skill_install_mode?: string } | undefined;
+  return row?.skill_install_mode === 'approve_and_install' ? 'approve_and_install' : 'suggest_only';
+}
+
 export function reviewPlanForWorker(
   projectId: string,
   worktreeId: string,
@@ -1048,6 +1055,109 @@ export function createProjectLeadTools(  projectId: string,
         return { ok: true, artifactId };
       },
       skipPermission: false,
+      defer: 'never',
+    }),
+    defineTool('browse_skills', {
+      description: 'List Copilot skills/plugins available to suggest to the user: the plugins already installed, plus (optionally) plugins browsable from a given marketplace. Use this to decide what skill would help with a task (e.g. Lavish for interactive HTML/diagram editing) before suggesting it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          marketplace: {
+            type: 'string',
+            description: 'Optional marketplace name to browse for installable plugins. Omit to only list installed plugins.',
+          },
+        },
+      },
+      handler: async ({ marketplace }: { marketplace?: string }) => {
+        const { listInstalledPlugins, browsePlugins } = await import('./skill-catalog');
+        const installed = listInstalledPlugins();
+        const browsable = marketplace ? browsePlugins(marketplace) : [];
+        return { installed, browsable, marketplace: marketplace ?? null };
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    defineTool('install_skill', {
+      description: 'Install a Copilot skill/plugin on the user\'s behalf. Behavior is gated by the project\'s skill_install_mode setting. Under "suggest_only" this REFUSES and tells you to only recommend the skill to the user. Under "approve_and_install" it installs — but ONLY after the user has approved via ask_user; you must pass approved:true, which you may only set once the user has said yes. On success it installs persistently AND loads the plugin into your own live session.',
+      parameters: {
+        type: 'object',
+        properties: {
+          plugin: {
+            type: 'string',
+            description: 'The plugin to install: a marketplace plugin name, or a repo slug like "kunchenguid/lavish-axi".',
+          },
+          marketplace: {
+            type: 'string',
+            description: 'Optional marketplace name. Omit for a repo-slug plugin (e.g. kunchenguid/lavish-axi).',
+          },
+          approved: {
+            type: 'boolean',
+            description: 'Set to true ONLY after the user has explicitly approved the install via ask_user. Required for the install to proceed under approve_and_install mode.',
+          },
+        },
+        required: ['plugin'],
+      },
+      handler: async ({ plugin, marketplace, approved }: { plugin: string; marketplace?: string; approved?: boolean }) => {
+        const mode = skillInstallMode(projectId);
+        const { pluginRef, installPlugin } = await import('./skill-catalog');
+        const ref = pluginRef(plugin, marketplace);
+
+        if (mode === 'suggest_only') {
+          return {
+            installed: false,
+            mode,
+            message: `This project is in "suggest_only" mode, so I can't install ${ref} for you. Recommend the skill to the user and explain how it would help; they can install it themselves, or an admin can switch this project to "approve_and_install".`,
+          };
+        }
+
+        if (!approved) {
+          return {
+            installed: false,
+            mode,
+            message: `Installing ${ref} needs the user's explicit approval first. Ask them with ask_user, then call install_skill again with approved:true only if they say yes.`,
+          };
+        }
+
+        const output = installPlugin(plugin, marketplace);
+
+        // Load the plugin into the Lead's own live session so it is usable
+        // without a restart. Guard against a missing/closed session.
+        let sessionLoaded = false;
+        let sessionNote = 'Installed. Start or resume this Project Lead session to load the plugin.';
+        try {
+          const sessionId = getSessionId?.();
+          if (sessionId) {
+            const { writeToSession } = await import('./cli-bridge');
+            sessionLoaded = writeToSession(sessionId, `/plugin install ${ref}\n`);
+            if (sessionLoaded) sessionNote = 'Installed and loaded into this live session.';
+          }
+        } catch {
+          sessionLoaded = false;
+        }
+
+        audit(projectId, 'install_skill', `Installed skill ${ref} (session loaded: ${sessionLoaded})`, 'medium');
+        return { installed: true, mode, plugin: ref, sessionLoaded, note: sessionNote, output };
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    defineTool('uninstall_skill', {
+      description: 'Uninstall a Copilot skill/plugin. Use for symmetry when a suggested skill is no longer wanted.',
+      parameters: {
+        type: 'object',
+        properties: {
+          plugin: { type: 'string', description: 'The plugin name or repo slug to uninstall.' },
+          marketplace: { type: 'string', description: 'Optional marketplace name.' },
+        },
+        required: ['plugin'],
+      },
+      handler: async ({ plugin, marketplace }: { plugin: string; marketplace?: string }) => {
+        const { pluginRef, uninstallPlugin } = await import('./skill-catalog');
+        const output = uninstallPlugin(plugin, marketplace);
+        audit(projectId, 'uninstall_skill', `Uninstalled skill ${pluginRef(plugin, marketplace)}`, 'low');
+        return { uninstalled: true, plugin: pluginRef(plugin, marketplace), output };
+      },
+      skipPermission: true,
       defer: 'never',
     }),
   ];

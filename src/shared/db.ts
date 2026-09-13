@@ -170,6 +170,7 @@ function initSchema(db: Database.Database) {
       project_id        TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
       merge_mode        TEXT NOT NULL DEFAULT 'advisory',
       intervention_mode TEXT NOT NULL DEFAULT 'flag_only',
+      skill_install_mode TEXT NOT NULL DEFAULT 'suggest_only',
       dnd               INTEGER NOT NULL DEFAULT 0
     );
 
@@ -366,6 +367,13 @@ function initSchema(db: Database.Database) {
   }
   if (!worktreeColNames.has('seed_prompt')) {
     db.exec('ALTER TABLE worktrees ADD COLUMN seed_prompt TEXT');
+  }
+
+  // Migration: add skill_install_mode to project_autonomy_settings so the
+  // Project Lead can be gated between suggest-only and approve-and-install.
+  const autonomyCols = db.pragma('table_info(project_autonomy_settings)') as Array<{ name: string }>;
+  if (!new Set(autonomyCols.map((c) => c.name)).has('skill_install_mode')) {
+    db.exec("ALTER TABLE project_autonomy_settings ADD COLUMN skill_install_mode TEXT NOT NULL DEFAULT 'suggest_only'");
   }
 
   // Migration: link an audit entry to the record it acted on (currently the

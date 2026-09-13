@@ -16,6 +16,7 @@ interface Project {
 interface AutonomySettings {
   mergeMode: 'advisory' | 'auto_queue' | 'full_auto';
   interventionMode: 'flag_only' | 'flag_nudge' | 'flag_nudge_cancel';
+  skillInstallMode: 'suggest_only' | 'approve_and_install';
   dnd: number;
 }
 
@@ -31,6 +32,7 @@ export default function ProjectSettingsPage() {
   const [autonomy, setAutonomy] = useState<AutonomySettings>({
     mergeMode: 'advisory',
     interventionMode: 'flag_only',
+    skillInstallMode: 'suggest_only',
     dnd: 0,
   });
   const [autonomySaving, setAutonomySaving] = useState(false);
@@ -160,6 +162,18 @@ export default function ProjectSettingsPage() {
                 <option value="flag_only">Flag only</option>
                 <option value="flag_nudge">Allow soft nudges</option>
                 <option value="flag_nudge_cancel">Allow nudges and cancellation</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="skill-install-mode">Skill install mode</Label>
+              <select
+                id="skill-install-mode"
+                className="flex h-9 w-full rounded-md border bg-background px-3 text-sm"
+                value={autonomy.skillInstallMode}
+                onChange={(e) => setAutonomy((current) => ({ ...current, skillInstallMode: e.target.value as AutonomySettings['skillInstallMode'] }))}
+              >
+                <option value="suggest_only">Suggest only - recommend, never install</option>
+                <option value="approve_and_install">Approve and install - install after user approval</option>
               </select>
             </div>
             <label className="flex items-center gap-2 text-sm">
