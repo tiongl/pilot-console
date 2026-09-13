@@ -1,0 +1,84 @@
+{
+  "generatedAt": "2026-09-13T21:10:48.581Z",
+  "baseUrl": "http://localhost:5173",
+  "shots": [
+    {
+      "name": "login",
+      "route": "/login",
+      "caption": "Sign-in screen (GitHub CLI authentication).",
+      "file": "docs\\user-guide\\images\\login.png"
+    },
+    {
+      "name": "home-chief-of-staff",
+      "route": "/",
+      "caption": "Chief of Staff home: portfolio overview, running workers, and merge queue.",
+      "file": "docs\\user-guide\\images\\home-chief-of-staff.png"
+    },
+    {
+      "name": "project-lead",
+      "route": "/projects/proj-web/lead",
+      "caption": "Project Lead workspace with worker tabs and the detail panel.",
+      "file": "docs\\user-guide\\images\\project-lead.png"
+    },
+    {
+      "name": "project-settings",
+      "route": "/projects/proj-web/settings",
+      "caption": "Project settings, including Chief of Staff autonomy modes.",
+      "file": "docs\\user-guide\\images\\project-settings.png"
+    },
+    {
+      "name": "project-skills",
+      "route": "/projects/proj-web/skills",
+      "caption": "Skill catalog, installed plugins, and MCP servers.",
+      "file": "docs\\user-guide\\images\\project-skills.png"
+    },
+    {
+      "name": "github-board",
+      "route": "/projects/proj-web/view/board",
+      "caption": "GitHub Projects board view.",
+      "file": "docs\\user-guide\\images\\github-board.png"
+    },
+    {
+      "name": "github-issues",
+      "route": "/projects/proj-web/view/issues",
+      "caption": "GitHub issues list with filters and “Work locally”.",
+      "file": "docs\\user-guide\\images\\github-issues.png"
+    },
+    {
+      "name": "github-pulls",
+      "route": "/projects/proj-web/view/pulls",
+      "caption": "Pull requests, grouped by task or listed together.",
+      "file": "docs\\user-guide\\images\\github-pulls.png"
+    },
+    {
+      "name": "github-milestones",
+      "route": "/projects/proj-web/view/milestones",
+      "caption": "Milestone progress.",
+      "file": "docs\\user-guide\\images\\github-milestones.png"
+    },
+    {
+      "name": "automation-schedules",
+      "route": "/automation/config",
+      "caption": "Automation schedules configuration.",
+      "file": "docs\\user-guide\\images\\automation-schedules.png"
+    },
+    {
+      "name": "automation-history",
+      "route": "/automation",
+      "caption": "Automation run history across all schedules.",
+      "file": "docs\\user-guide\\images\\automation-history.png"
+    },
+    {
+      "name": "admin-users",
+      "route": "/admin",
+      "caption": "Admin user management.",
+      "file": "docs\\user-guide\\images\\admin-users.png"
+    },
+    {
+      "name": "admin-daemon",
+      "route": "/daemon",
+      "caption": "Session daemon status and controls.",
+      "file": "docs\\user-guide\\images\\admin-daemon.png"
+    }
+  ]
+}

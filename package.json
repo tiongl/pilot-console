@@ -46,6 +46,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "docs:screens": "node scripts/docs-screenshots/capture.mjs",
     "prepublishOnly": "npm run build"
   },
   "bin": {
