@@ -12,10 +12,27 @@ import {
   eventTs,
   emptyAgentUsage,
   cwdMatches,
+  buildToolsForKind,
+  createAskUserTool,
+  resolveAskUser,
+  sliceReplayTail,
+  sliceReplayBefore,
+  serializeTranscriptWithinBudget,
   type AgentSession,
   type AgentSubscriber,
 } from '../shared/agent-bridge';
 import type { AgentServerMessage } from '../shared/types';
+
+/**
+ * The SDK types a tool handler as optional and two-argument; `ask_user` only
+ * ever reads its input, so tests call it through this narrow wrapper.
+ */
+function callAskUser(
+  tool: ReturnType<typeof createAskUserTool>,
+  input: Record<string, unknown>,
+): Promise<string> {
+  return (tool.handler as unknown as (i: Record<string, unknown>) => Promise<string>)(input);
+}
 
 function makeSession(): { session: AgentSession; messages: AgentServerMessage[] } {
   const messages: AgentServerMessage[] = [];
@@ -34,12 +51,15 @@ function makeSession(): { session: AgentSession; messages: AgentServerMessage[] 
     subscribers: new Set<AgentSubscriber>([sub]),
     pendingPermissions: new Map(),
     pendingPlans: new Map(),
+    pendingQuestions: new Map(),
     saveTimer: null,
     toolReconcileTimer: null,
     toolReconcileInFlight: false,
     assistantByMessageId: new Map<string, string>(),
     assistantStartTs: new Map<string, number>(),
+    turnStartTs: null,
     toolByCallId: new Map<string, string>(),
+    toolPartialLen: new Map<string, number>(),
     share: { mode: 'off', steerable: false },
     usage: emptyAgentUsage(),
     allowAllPermissions: false,
@@ -139,8 +159,64 @@ describe('agent-bridge handleSdkEvent', () => {
     expect(tool.output).toContain('[truncated');
   });
 
-  it('records tool progress so clients can explain a long-running call', () => {
-    const { session } = makeSession();
+  // `tool.execution_partial_result` reports everything the tool has produced so
+  // far, not just the new bytes. Appending each snapshot made streamed output
+  // visibly repeat itself until execution_complete overwrote it.
+  it('treats streamed tool output as a cumulative snapshot rather than an increment', () => {
+    const { session, messages } = makeSession();
+    drive(session, ev('tool.execution_start', 't1', { toolCallId: 'c1', toolName: 'bash' }));
+    drive(session, ev('tool.execution_partial_result', 'p1', { toolCallId: 'c1', partialOutput: 'line 1' }));
+    drive(session, ev('tool.execution_partial_result', 'p2', { toolCallId: 'c1', partialOutput: 'line 1\nline 2' }));
+
+    const tool = session.transcript.find((e) => e.kind === 'tool') as { output?: string };
+    expect(tool.output).toBe('line 1\nline 2');
+
+    // Clients are sent only the new suffix, so appending reaches the same text.
+    const deltas = messages.filter((m) => m.type === 'tool_delta') as { delta: string }[];
+    expect(deltas.map((d) => d.delta)).toEqual(['line 1', '\nline 2']);
+  });
+
+  it('ignores a repeated tool snapshot that adds nothing', () => {
+    const { session, messages } = makeSession();
+    drive(session, ev('tool.execution_start', 't1', { toolCallId: 'c1', toolName: 'bash' }));
+    drive(session, ev('tool.execution_partial_result', 'p1', { toolCallId: 'c1', partialOutput: 'same' }));
+    drive(session, ev('tool.execution_partial_result', 'p2', { toolCallId: 'c1', partialOutput: 'same' }));
+
+    const tool = session.transcript.find((e) => e.kind === 'tool') as { output?: string };
+    expect(tool.output).toBe('same');
+    expect(messages.filter((m) => m.type === 'tool_delta')).toHaveLength(1);
+  });
+
+  // Some tools redraw their output (progress bars) instead of extending it; a
+  // client cannot append its way to a shorter string, so it gets a replacement.
+  it('sends a replacement when a tool rewrites its output instead of extending it', () => {
+    const { session, messages } = makeSession();
+    drive(session, ev('tool.execution_start', 't1', { toolCallId: 'c1', toolName: 'bash' }));
+    drive(session, ev('tool.execution_partial_result', 'p1', { toolCallId: 'c1', partialOutput: '50% done' }));
+    drive(session, ev('tool.execution_partial_result', 'p2', { toolCallId: 'c1', partialOutput: 'done' }));
+
+    const tool = session.transcript.find((e) => e.kind === 'tool') as { output?: string };
+    expect(tool.output).toBe('done');
+    expect(messages.filter((m) => m.type === 'tool_output')).toMatchObject([{ output: 'done' }]);
+  });
+
+  // Two calls to the same tool must not be measured against each other.
+  it('restarts output tracking for a new tool call', () => {
+    const { session, messages } = makeSession();
+    drive(session, ev('tool.execution_start', 't1', { toolCallId: 'c1', toolName: 'bash' }));
+    drive(session, ev('tool.execution_partial_result', 'p1', { toolCallId: 'c1', partialOutput: 'first run output' }));
+    drive(session, ev('tool.execution_complete', 't2', { toolCallId: 'c1', success: true, result: 'first run output' }));
+
+    drive(session, ev('tool.execution_start', 't3', { toolCallId: 'c2', toolName: 'bash' }));
+    drive(session, ev('tool.execution_partial_result', 'p2', { toolCallId: 'c2', partialOutput: 'second' }));
+
+    const tools = session.transcript.filter((e) => e.kind === 'tool') as { output?: string }[];
+    expect(tools[1].output).toBe('second');
+    const deltas = messages.filter((m) => m.type === 'tool_delta') as { delta: string }[];
+    expect(deltas[deltas.length - 1].delta).toBe('second');
+  });
+
+  it('records tool progress so clients can explain a long-running call', () => {    const { session } = makeSession();
     drive(session, ev('tool.execution_start', 't1', { toolCallId: 'c1', toolName: 'apply_patch' }));
     drive(
       session,
@@ -248,6 +324,72 @@ describe('agent-bridge handleSdkEvent', () => {
     expect(pendingMessagesForSession(session)).toEqual([permission, plan]);
   });
 
+  // The user wanted to answer agent questions with the mouse, so `ask_user`
+  // blocks the tool call until a click arrives from the pane.
+  it('blocks ask_user until the user answers, then returns their choice', async () => {
+    const { session, messages } = makeSession();
+    const tool = createAskUserTool(() => session);
+
+    const pending = callAskUser(tool, {
+      question: 'Ship it?',
+      detail: 'The branch is green.',
+      options: ['Ship', 'Hold'],
+    }) as Promise<string>;
+    await Promise.resolve();
+
+    const asked = messages.find((m) => m.type === 'ask_user_request');
+    expect(asked).toMatchObject({
+      question: 'Ship it?',
+      detail: 'The branch is green.',
+      options: ['Ship', 'Hold'],
+      allowText: true,
+    });
+    expect(session.pendingQuestions.size).toBe(1);
+
+    resolveAskUser(session, (asked as { requestId: string }).requestId, 'Hold');
+    await expect(pending).resolves.toBe('Hold');
+    expect(session.pendingQuestions.size).toBe(0);
+    expect(messages.some((m) => m.type === 'ask_user_resolved')).toBe(true);
+  });
+
+  it('offers Yes/No when the agent supplies no options', async () => {
+    const { session, messages } = makeSession();
+    const tool = createAskUserTool(() => session);
+
+    void callAskUser(tool, { question: 'Continue?' });
+    await Promise.resolve();
+
+    expect(messages.find((m) => m.type === 'ask_user_request')).toMatchObject({
+      options: ['Yes', 'No'],
+    });
+  });
+
+  // A delegated worker has no one watching its pane; blocking there would hang
+  // the run until someone cancelled it by hand.
+  it('does not block an unattended session on ask_user', async () => {
+    const { session, messages } = makeSession();
+    session.unattended = true;
+    const tool = createAskUserTool(() => session);
+
+    await expect(callAskUser(tool, { question: 'Continue?' })).resolves.toContain('unattended');
+    expect(messages.some((m) => m.type === 'ask_user_request')).toBe(false);
+  });
+
+  it('does not block when no session is attached', async () => {
+    const tool = createAskUserTool(() => undefined);
+    await expect(callAskUser(tool, { question: 'Continue?' })).resolves.toContain('No interactive user');
+  });
+
+  it('replays unanswered questions to a reconnecting client', async () => {
+    const { session, messages } = makeSession();
+    const tool = createAskUserTool(() => session);
+    void callAskUser(tool, { question: 'Ship it?', options: ['Ship'] });
+    await Promise.resolve();
+
+    const asked = messages.find((m) => m.type === 'ask_user_request');
+    expect(pendingMessagesForSession(session)).toContainEqual(asked);
+  });
+
   it('auto-approves permissions in auto-pilot or when allow-all is on', () => {
     const { session } = makeSession();
     expect(autoApprovesPermissions(session)).toBe(false);
@@ -257,6 +399,18 @@ describe('agent-bridge handleSdkEvent', () => {
 
     session.mode = 'plan';
     session.allowAllPermissions = true;
+    expect(autoApprovesPermissions(session)).toBe(true);
+  });
+
+  // A worker the Project Lead delegated to has no client subscribed, so a
+  // permission prompt has nobody to answer it and the run blocks forever.
+  it('auto-approves permissions for an unattended delegated worker', () => {
+    const { session } = makeSession();
+    session.mode = 'plan';
+    session.allowAllPermissions = false;
+    expect(autoApprovesPermissions(session)).toBe(false);
+
+    session.unattended = true;
     expect(autoApprovesPermissions(session)).toBe(true);
   });
 
@@ -339,6 +493,31 @@ describe('event timestamps and durations', () => {
     expect(entry).toBeDefined();
     expect(entry?.ts).toBe(Date.parse(start));
     expect(entry?.kind === 'assistant' && entry.durationMs).toBe(4_500);
+  });
+
+  it('measures assistant duration from the user request, not the first token', () => {
+    const { session } = makeSession();
+    const ask = '2024-05-01T10:20:00.000Z';
+    const start = '2024-05-01T10:20:30.000Z';
+    const end = '2024-05-01T10:20:34.500Z';
+    handleSdkEvent(session, ev('user.message', 'u1', { content: 'hi' }, ask));
+    handleSdkEvent(session, ev('assistant.message_start', 'a0', { messageId: 'm1' }, start));
+    handleSdkEvent(session, ev('assistant.message', 'a1', { messageId: 'm1', content: 'done' }, end));
+    const entry = session.transcript.find((e) => e.kind === 'assistant');
+    // 34.5s of round trip from the moment the user asked, not 4.5s of tokens.
+    expect(entry?.kind === 'assistant' && entry.durationMs).toBe(34_500);
+  });
+
+  it('reports the turn start time with the busy status and clears it when idle', () => {
+    const { session, messages } = makeSession();
+    const ask = '2024-05-01T10:20:00.000Z';
+    handleSdkEvent(session, ev('user.message', 'u1', { content: 'hi' }, ask));
+    handleSdkEvent(session, ev('assistant.turn_start', 'a0', {}, ask));
+    expect(messages).toContainEqual({ type: 'status', status: 'busy', turnStartedAt: Date.parse(ask) });
+
+    handleSdkEvent(session, ev('session.idle', 'i0', {}, ask));
+    expect(messages).toContainEqual({ type: 'status', status: 'idle', turnStartedAt: null });
+    expect(session.turnStartTs).toBeNull();
   });
 
   it('derives tool duration from execution_start to execution_complete', () => {
@@ -495,7 +674,7 @@ describe('busy watchdog', () => {
     await checkBusyLiveness(session);
 
     expect(session.status).toBe('idle');
-    expect(messages).toContainEqual({ type: 'status', status: 'idle' });
+    expect(messages).toContainEqual({ type: 'status', status: 'idle', turnStartedAt: null });
     expect(session.transcript.some((e) => e.kind === 'notice')).toBe(true);
   });
 
@@ -557,5 +736,145 @@ describe('session cwd matching', () => {
 
   it('ignores sessions with no recorded working directory', () => {
     expect(cwdMatches(undefined, root)).toBe(false);
+  });
+});
+
+describe('buildToolsForKind', () => {
+  // Regression coverage for a bug where resuming a session after a server
+  // restart lost its tools: the SDK negotiates tool availability per
+  // connection, and `resumeAgentSession` was hardcoding kind 'agent' and
+  // never passing `tools` to `client.resumeSession`. Any session that needed
+  // a tool call (worktree/merge/project-lead/chief-of-staff sessions) would
+  // then silently stall or error on the next turn — the "dead after restart"
+  // symptom. `createAgentSession` and `resumeAgentSession` both now derive
+  // their tool set from this single helper so they can never drift apart.
+  it('gives chief_of_staff sessions the chief-of-staff tool set regardless of scope', () => {
+    const tools = buildToolsForKind('chief_of_staff', null, null);
+    expect(tools).toBeDefined();
+    expect(tools!.length).toBeGreaterThan(0);
+  });
+
+  it('gives project_lead sessions the project-lead tool set when a projectId is present', () => {
+    const tools = buildToolsForKind('project_lead', 'proj-1', null);
+    expect(tools).toBeDefined();
+    expect(tools!.length).toBeGreaterThan(0);
+  });
+
+  it('gives project_lead sessions the ask_user tool even when projectId is missing', () => {
+    const tools = buildToolsForKind('project_lead', null, null);
+    expect(tools?.map((t) => t.name)).toEqual(['ask_user']);
+  });
+
+  it('gives plain agent sessions worktree + merge tools when scoped to a worktree', () => {
+    const tools = buildToolsForKind('agent', null, 'wt-1');
+    expect(tools).toBeDefined();
+    expect(tools!.length).toBeGreaterThan(0);
+    expect(tools!.map((t) => t.name)).toContain('request_merge');
+  });
+
+  // A spin_off_review reviewer is report-only: it keeps update_digest to report
+  // its verdict but must not be able to initiate a merge, which is the main
+  // Project Lead's decision. isReview strips the merge tools structurally.
+  it('strips the merge tools from review (isReview) worktree sessions', () => {
+    const names = buildToolsForKind('agent', null, 'wt-1', undefined, undefined, true)?.map((t) => t.name);
+    expect(names).toContain('update_digest');
+    expect(names).toContain('ask_user');
+    expect(names).not.toContain('request_merge');
+    expect(names).not.toContain('check_merge_status');
+  });
+
+  // Asking the user a question with buttons is useful whatever the agent is
+  // doing, so ask_user is the one tool every session gets.
+  it('gives plain agent sessions with no worktree only ask_user', () => {
+    expect(buildToolsForKind('agent', null, null)?.map((t) => t.name)).toEqual(['ask_user']);
+  });
+
+  it('adds ask_user to every other tool set', () => {
+    for (const tools of [
+      buildToolsForKind('chief_of_staff', null, null),
+      buildToolsForKind('project_lead', 'proj-1', null),
+      buildToolsForKind('agent', null, 'wt-1'),
+    ]) {
+      expect(tools!.map((t) => t.name)).toContain('ask_user');
+      expect(tools!.length).toBeGreaterThan(1);
+    }
+  });
+});
+
+describe('transcript replay windowing', () => {
+  const makeTranscript = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      kind: 'assistant',
+      id: `e${i}`,
+      ts: i,
+      text: `m${i}`,
+    })) as unknown as Parameters<typeof sliceReplayTail>[0];
+
+  it('sends the whole transcript when it fits the window', () => {
+    const { events, hasMore } = sliceReplayTail(makeTranscript(5), 10);
+    expect(events).toHaveLength(5);
+    expect(hasMore).toBe(false);
+  });
+
+  it('sends only the tail and flags that older events remain', () => {
+    const { events, hasMore } = sliceReplayTail(makeTranscript(50), 10);
+    expect(events).toHaveLength(10);
+    expect((events[0] as unknown as { id: string }).id).toBe('e40');
+    expect((events[9] as unknown as { id: string }).id).toBe('e49');
+    expect(hasMore).toBe(true);
+  });
+
+  it('returns the slice preceding an anchor id', () => {
+    const { events, hasMore } = sliceReplayBefore(makeTranscript(50), 'e40', 10);
+    expect((events[0] as unknown as { id: string }).id).toBe('e30');
+    expect((events[9] as unknown as { id: string }).id).toBe('e39');
+    expect(hasMore).toBe(true);
+  });
+
+  it('reports no more once the start of the transcript is reached', () => {
+    const { events, hasMore } = sliceReplayBefore(makeTranscript(50), 'e5', 10);
+    expect(events).toHaveLength(5);
+    expect((events[0] as unknown as { id: string }).id).toBe('e0');
+    expect(hasMore).toBe(false);
+  });
+
+  it('treats a trimmed-away anchor as nothing earlier to send', () => {
+    const { events, hasMore } = sliceReplayBefore(makeTranscript(50), 'gone', 10);
+    expect(events).toEqual([]);
+    expect(hasMore).toBe(false);
+  });
+});
+
+describe('transcript byte budget', () => {
+  it('leaves a small transcript untouched', () => {
+    const { session } = makeSession();
+    session.transcript = [
+      { kind: 'assistant', id: 'a', ts: 1, text: 'hello' },
+    ] as unknown as typeof session.transcript;
+    const json = serializeTranscriptWithinBudget(session);
+    expect(session.transcript).toHaveLength(1);
+    expect(JSON.parse(json)).toHaveLength(1);
+  });
+
+  it('drops the oldest events once the serialized transcript is over budget', () => {
+    const { session } = makeSession();
+    const chunk = 'x'.repeat(100_000);
+    session.transcript = Array.from({ length: 120 }, (_, i) => ({
+      kind: 'assistant',
+      id: `e${i}`,
+      ts: i,
+      text: chunk,
+    })) as unknown as typeof session.transcript;
+
+    const json = serializeTranscriptWithinBudget(session);
+
+    expect(json.length).toBeLessThanOrEqual(8 * 1024 * 1024);
+    expect(session.transcript.length).toBeLessThan(120);
+    // The newest events survive; the oldest are the ones dropped.
+    const ids = session.transcript.map((e) => (e as unknown as { id: string }).id);
+    expect(ids[ids.length - 1]).toBe('e119');
+    expect(ids).not.toContain('e0');
+    // The returned JSON reflects the trimmed transcript, not the original.
+    expect(JSON.parse(json)).toHaveLength(session.transcript.length);
   });
 });

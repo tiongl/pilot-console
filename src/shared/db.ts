@@ -98,6 +98,15 @@ function initSchema(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_project_github_projects_project_id ON project_github_projects(project_id);
 
+    CREATE TABLE IF NOT EXISTS project_view_names (
+      project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      gh_project_id TEXT NOT NULL,
+      view_number   INTEGER NOT NULL,
+      name          TEXT NOT NULL,
+      updated_at    TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (project_id, gh_project_id, view_number)
+    );
+
     CREATE TABLE IF NOT EXISTS worktrees (
       id            TEXT PRIMARY KEY,
       project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -110,6 +119,125 @@ function initSchema(db: Database.Database) {
     );
 
     CREATE INDEX IF NOT EXISTS idx_worktrees_project_id ON worktrees(project_id);
+
+    CREATE TABLE IF NOT EXISTS agent_digests (
+      worktree_id   TEXT PRIMARY KEY REFERENCES worktrees(id) ON DELETE CASCADE,
+      project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      headline      TEXT,
+      status        TEXT,
+      detail        TEXT,
+      scope         TEXT,
+      touched_files TEXT,
+      risk_notes    TEXT,
+      stuck_since   TEXT,
+      updated_at    TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_digests_project_id ON agent_digests(project_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_digests_status ON agent_digests(status);
+
+    CREATE TABLE IF NOT EXISTS project_audit_log (
+      id          TEXT PRIMARY KEY,
+      project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      actor       TEXT NOT NULL,
+      action      TEXT NOT NULL,
+      reasoning   TEXT,
+      risk_level  TEXT,
+      created_at  TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_project_audit_log_project_id ON project_audit_log(project_id);
+
+    CREATE TABLE IF NOT EXISTS decision_threads (
+      id                      TEXT PRIMARY KEY,
+      project_id              TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      title                   TEXT,
+      question                TEXT NOT NULL,
+      status                  TEXT NOT NULL DEFAULT 'open',
+      session_id              TEXT,
+      decision                TEXT,
+      rationale               TEXT,
+      alternatives_considered TEXT,
+      user_verdict            TEXT,
+      follow_up_actions       TEXT,
+      created_at              TEXT DEFAULT (datetime('now')),
+      updated_at              TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_decision_threads_project_id ON decision_threads(project_id);
+
+    CREATE TABLE IF NOT EXISTS project_autonomy_settings (
+      project_id        TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      merge_mode        TEXT NOT NULL DEFAULT 'advisory',
+      intervention_mode TEXT NOT NULL DEFAULT 'flag_only',
+      skill_install_mode TEXT NOT NULL DEFAULT 'suggest_only',
+      github_task_mode  TEXT NOT NULL DEFAULT 'off',
+      dnd               INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS merge_locks (
+      project_id         TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      held_by_worktree_id TEXT REFERENCES worktrees(id) ON DELETE SET NULL,
+      held_since         TEXT,
+      expires_at         TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS merge_requests (
+      id            TEXT PRIMARY KEY,
+      project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      worktree_id   TEXT NOT NULL UNIQUE REFERENCES worktrees(id) ON DELETE CASCADE,
+      branch        TEXT NOT NULL,
+      status        TEXT NOT NULL DEFAULT 'pending',
+      priority      TEXT NOT NULL DEFAULT 'normal',
+      requested_at  TEXT DEFAULT (datetime('now')),
+      resolved_at   TEXT,
+      summary       TEXT,
+      lead_note     TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_merge_requests_project_id ON merge_requests(project_id);
+    CREATE INDEX IF NOT EXISTS idx_merge_requests_status ON merge_requests(status);
+
+    CREATE TABLE IF NOT EXISTS project_memory (
+      project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      summary    TEXT NOT NULL,
+      source     TEXT,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS cos_briefings (
+      id         TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      summary    TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cos_briefings_project_id ON cos_briefings(project_id);
+
+    -- Work the Project Lead handed to a background worker: one row per
+    -- lead-started worktree agent, used to drive the lead's worker tabs and
+    -- the sidebar subnodes.
+    CREATE TABLE IF NOT EXISTS delegations (
+      id          TEXT PRIMARY KEY,
+      project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      worktree_id TEXT NOT NULL REFERENCES worktrees(id) ON DELETE CASCADE,
+      session_id  TEXT,
+      title       TEXT NOT NULL,
+      task        TEXT NOT NULL,
+      -- planning | awaiting_plan_review | working | blocked | done | cancelled | closed
+      status      TEXT NOT NULL DEFAULT 'planning',
+      note        TEXT,
+      unread      INTEGER NOT NULL DEFAULT 0,
+      -- 1 when this delegation is a spin_off_review reviewer, not a builder worker.
+      is_review   INTEGER NOT NULL DEFAULT 0,
+      -- 1 when the reviewer's condensed reasoning should be folded back to the lead.
+      deep_merge  INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT DEFAULT (datetime('now')),
+      updated_at  TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_delegations_project_id ON delegations(project_id);
+    CREATE INDEX IF NOT EXISTS idx_delegations_worktree_id ON delegations(worktree_id);
 
     CREATE TABLE IF NOT EXISTS report_schedules (
       id                TEXT PRIMARY KEY,
@@ -146,6 +274,44 @@ function initSchema(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_report_runs_schedule_id ON report_runs(schedule_id);
     CREATE INDEX IF NOT EXISTS idx_report_runs_status ON report_runs(status);
+
+    -- Project Lead-managed servers: dev servers, API servers, etc.
+    CREATE TABLE IF NOT EXISTS project_servers (
+      id              TEXT PRIMARY KEY,
+      project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      session_id      TEXT UNIQUE REFERENCES cli_sessions(id) ON DELETE SET NULL,
+      name            TEXT NOT NULL,
+      command         TEXT NOT NULL,
+      cwd             TEXT,
+      env             TEXT,
+      status          TEXT NOT NULL DEFAULT 'pending',
+      started_at      TEXT,
+      stopped_at      TEXT,
+      exit_code       INTEGER,
+      created_at      TEXT DEFAULT (datetime('now')),
+      updated_at      TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_project_servers_project_id ON project_servers(project_id);
+    CREATE INDEX IF NOT EXISTS idx_project_servers_status ON project_servers(status);
+
+    CREATE TABLE IF NOT EXISTS lavish_artifacts (
+      id              TEXT PRIMARY KEY,
+      project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      name            TEXT NOT NULL,
+      html_path       TEXT NOT NULL,
+      session_key     TEXT,
+      host            TEXT,
+      port            INTEGER,
+      session_url     TEXT,
+      status          TEXT NOT NULL DEFAULT 'starting',
+      exit_code       INTEGER,
+      created_at      TEXT DEFAULT (datetime('now')),
+      updated_at      TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_lavish_artifacts_project_id ON lavish_artifacts(project_id);
+    CREATE INDEX IF NOT EXISTS idx_lavish_artifacts_status ON lavish_artifacts(status);
   `);
 
   // Migrations: add columns that may not exist in older DBs
@@ -199,6 +365,36 @@ function initSchema(db: Database.Database) {
     db.exec("ALTER TABLE worktrees ADD COLUMN type TEXT NOT NULL DEFAULT 'worktree'");
   }
 
+  // Migration: link a worktree to the GitHub issue it was created for, plus a
+  // one-shot seed prompt that auto-starts the Copilot CLI session for that issue.
+  if (!worktreeColNames.has('issue_number')) {
+    db.exec('ALTER TABLE worktrees ADD COLUMN issue_number INTEGER');
+  }
+  if (!worktreeColNames.has('seed_prompt')) {
+    db.exec('ALTER TABLE worktrees ADD COLUMN seed_prompt TEXT');
+  }
+
+  // Migration: add skill_install_mode to project_autonomy_settings so the
+  // Project Lead can be gated between suggest-only and approve-and-install.
+  const autonomyCols = db.pragma('table_info(project_autonomy_settings)') as Array<{ name: string }>;
+  const autonomyColNames = new Set(autonomyCols.map((c) => c.name));
+  if (!autonomyColNames.has('skill_install_mode')) {
+    db.exec("ALTER TABLE project_autonomy_settings ADD COLUMN skill_install_mode TEXT NOT NULL DEFAULT 'suggest_only'");
+  }
+
+  // Migration: add github_task_mode to project_autonomy_settings so the Project
+  // Lead's GitHub task tools can be gated between off, read_only, and manage.
+  if (!autonomyColNames.has('github_task_mode')) {
+    db.exec("ALTER TABLE project_autonomy_settings ADD COLUMN github_task_mode TEXT NOT NULL DEFAULT 'off'");
+  }
+
+  // Migration: link an audit entry to the record it acted on (currently the
+  // decision thread) so "Recent actions" can navigate to its subject.
+  const auditCols = db.pragma('table_info(project_audit_log)') as Array<{ name: string }>;
+  if (!new Set(auditCols.map((c) => c.name)).has('subject_id')) {
+    db.exec('ALTER TABLE project_audit_log ADD COLUMN subject_id TEXT');
+  }
+
   // Migration: add daemon_session_id to report_runs
   const runCols = db.pragma('table_info(report_runs)') as Array<{ name: string }>;
   const runColNames = new Set(runCols.map((c) => c.name));
@@ -209,6 +405,19 @@ function initSchema(db: Database.Database) {
   // Migration: add read column to report_runs
   if (!runColNames.has('read')) {
     db.exec('ALTER TABLE report_runs ADD COLUMN read INTEGER NOT NULL DEFAULT 0');
+  }
+
+  // Migration: mark spin_off_review reviewer delegations distinctly from builder
+  // delegations so they draw on a separate concurrency cap and get review-aware
+  // report-back wording. deep_merge records whether the reviewer's condensed
+  // reasoning should be folded back to the lead on finish.
+  const delegationCols = db.pragma('table_info(delegations)') as Array<{ name: string }>;
+  const delegationColNames = new Set(delegationCols.map((c) => c.name));
+  if (!delegationColNames.has('is_review')) {
+    db.exec('ALTER TABLE delegations ADD COLUMN is_review INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!delegationColNames.has('deep_merge')) {
+    db.exec('ALTER TABLE delegations ADD COLUMN deep_merge INTEGER NOT NULL DEFAULT 0');
   }
 
   // Migration: automation_templates table for user-saved templates

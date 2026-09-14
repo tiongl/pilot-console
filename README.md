@@ -3,7 +3,27 @@
 A GitHub Copilot CLI session manager with a web dashboard.
 
 ## Features
+
 ![pilot-console features](screenshot.png "Features")
+
+Pilot Console gives you, in one browser tab:
+
+- **Managed Copilot sessions** — CLI, shell, PowerShell, and rich Copilot **Agent**
+  tabs, with permissions, dictation, slash commands, and session sharing. Sessions
+  are owned by a background daemon and survive server restarts.
+- **Projects & GitHub** — point at a local repo and get board, issues, pull
+  requests, and milestones views (powered by your GitHub CLI login), plus git
+  worktrees for issue-focused work.
+- **Project Lead & Chief of Staff** — coordinating agents that plan, delegate work
+  to background workers (plan-first, with your approval), run servers, open live
+  HTML review artifacts, keep a shared todo list, and manage a merge queue.
+- **Automation** — schedule recurring agent runs and review rendered reports.
+- **Skills & MCP** — install Copilot plugins and Model Context Protocol servers,
+  per project.
+- **Administration** — user/role management, session oversight, and daemon control.
+
+📖 **See the [User Guide](docs/user-guide/README.md)** for a full walkthrough with
+screenshots.
 
 ## Prerequisites
 

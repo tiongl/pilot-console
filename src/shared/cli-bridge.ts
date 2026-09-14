@@ -10,7 +10,7 @@ const MAX_SCROLLBACK = 100_000; // chars to buffer for reconnection replay
 // Emits 'git-activity' with { userId, projectId, worktreeId } after output settles.
 export const cliBridgeEvents = new EventEmitter();
 
-export type SessionMode = 'cli' | 'shell' | 'powershell';
+export type SessionMode = 'cli' | 'cli-classic' | 'shell' | 'powershell';
 
 export interface ManagedProcess {
   sessionId: string;
@@ -170,7 +170,7 @@ function wireDaemonListeners(managed: ManagedProcess) {
       }
     }
     managed.onOutput?.(data);
-    if (managed.mode === 'cli') {
+    if (managed.mode === 'cli' || managed.mode === 'cli-classic') {
       extractAndStoreSessionId(managed.sessionId, data);
     }
     stop();
@@ -267,6 +267,10 @@ export function createCliSession(userId: string, projectId?: string | null, mode
     cols: 120,
     rows: 30,
     meta: { userId, projectId: projectId ?? null, worktreeId: worktreeId ?? null, mode, source: 'interactive' },
+    // "Classic terminal" mode presents an accurate terminal identity to the
+    // child (matching xterm.js) instead of the blanked-out TERM the daemon
+    // normally uses on Windows to dodge ink/ConPTY rendering bugs.
+    ptyName: mode === 'cli-classic' ? 'xterm-256color' : undefined,
   }).then(() => {
     // Attach to receive output
     return client.attachSession(sessionId);

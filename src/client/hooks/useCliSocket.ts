@@ -10,7 +10,7 @@ interface UseCliSocketOptions {
   worktreeId?: string;
   sessionId?: string;
   forceNew?: boolean;
-  mode?: 'cli' | 'shell' | 'powershell';
+  mode?: 'cli' | 'cli-classic' | 'shell' | 'powershell';
   onOutput?: (data: string) => void;
   onError?: (data: string) => void;
   onExit?: (code: number) => void;

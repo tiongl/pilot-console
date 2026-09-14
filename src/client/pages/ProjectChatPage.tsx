@@ -1,11 +1,11 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useParams } from 'react-router';
 import { useCliSocket } from '../hooks/useCliSocket';
 import TerminalPane, { type TerminalPaneAPI, TERMINAL_FONTS } from '../components/terminal/TerminalPane';
 import NewTabMenu from '../components/terminal/NewTabMenu';
 import AgentPane from '../components/terminal/AgentPane';
 import { Button } from '../components/ui/button';
-import { Square, Minus, Plus, Palette, Type, X as XIcon, Terminal, Bot, GitCommitHorizontal, GitBranch, FolderOpen, RotateCcw, Sparkles } from 'lucide-react';
+import { Square, Minus, Plus, Palette, Type, X as XIcon, Terminal, SquareTerminal, Bot, GitCommitHorizontal, GitBranch, FolderOpen, RotateCcw, Sparkles, ExternalLink } from 'lucide-react';
 import { THEMES } from '../lib/terminal-themes';
 import GitLogTab from '../components/project/GitLogTab';
 import GitPanel from '../components/project/GitPanel';
@@ -16,11 +16,23 @@ import { useProjectSplit, splitGroupCount } from '../lib/project-split-context';
 interface TabMeta {
   id: string;
   label: string;
-  mode: 'cli' | 'shell' | 'powershell' | 'agent' | 'git' | 'git-status' | 'files';
+  mode: 'cli' | 'cli-classic' | 'shell' | 'powershell' | 'agent' | 'git' | 'git-status' | 'files';
   themeName: string;
   fontFamily: string;
   sessionId?: string;
   group: number;
+  /**
+   * The delegated worker's own conversation. Always first, never closable, and
+   * never persisted — it is rebuilt from the delegation on every mount so it
+   * cannot go stale when a worktree is re-delegated to a new worker.
+   */
+  pinned?: boolean;
+}
+
+interface DetachedTabConfig {
+  mode: TabMeta['mode'];
+  sessionId?: string;
+  label?: string;
 }
 
 let tabCounter = 0;
@@ -77,6 +89,38 @@ function rehydrateTabs(tabs: TabMeta[]): TabMeta[] {
   });
 }
 
+function defaultTabLabel(mode: TabMeta['mode'], n: number): string {
+  if (mode === 'shell') return `Shell ${n}`;
+  if (mode === 'powershell') return `PS ${n}`;
+  if (mode === 'agent') return `Agent ${n}`;
+  if (mode === 'git') return `Git Log ${n}`;
+  if (mode === 'git-status') return `Git Status ${n}`;
+  if (mode === 'files') return `Files ${n}`;
+  if (mode === 'cli-classic') return `Copilot (classic) ${n}`;
+  return `Copilot ${n}`;
+}
+
+function parseDetachedTabConfig(search: string): DetachedTabConfig | null {
+  const params = new URLSearchParams(search);
+  if (params.get('detachedTab') !== '1') return null;
+  const mode = params.get('mode');
+  if (
+    mode !== 'cli' &&
+    mode !== 'cli-classic' &&
+    mode !== 'shell' &&
+    mode !== 'powershell' &&
+    mode !== 'agent' &&
+    mode !== 'git' &&
+    mode !== 'git-status' &&
+    mode !== 'files'
+  ) {
+    return null;
+  }
+  const sessionId = params.get('sessionId')?.trim() || undefined;
+  const label = params.get('label')?.trim() || undefined;
+  return { mode, sessionId, label };
+}
+
 const MAX_HIDDEN_BUFFER = 100_000; // chars to retain for hidden terminals
 
 /**
@@ -102,7 +146,7 @@ function findSafeSlicePoint(str: string, pos: number): number {
  * Output is written directly to xterm (no React state accumulation).
  */
 const TerminalTab = React.memo(function TerminalTab({
-  projectId, worktreeId, fontSize, fontFamily, themeName, active, forceNew, mode, sessionId: initialSessionId, onStatusChange, onKill, onSessionId, onTermApi, visible = true,
+  projectId, worktreeId, fontSize, fontFamily, themeName, active, forceNew, mode, sessionId: initialSessionId, onStatusChange, onKill, onSessionId, onTermApi, visible = true, seedInput,
 }: {
   projectId?: string;
   worktreeId?: string;
@@ -111,7 +155,7 @@ const TerminalTab = React.memo(function TerminalTab({
   themeName: string;
   active: boolean;
   forceNew: boolean;
-  mode: 'cli' | 'shell' | 'powershell';
+  mode: 'cli' | 'cli-classic' | 'shell' | 'powershell';
   sessionId?: string;
   onStatusChange: (status: string) => void;
   onKill: (sessionId: string | null) => void;
@@ -119,10 +163,14 @@ const TerminalTab = React.memo(function TerminalTab({
   onTermApi?: (api: TerminalPaneAPI) => void;
   /** Whether this terminal's project is currently visible on screen */
   visible?: boolean;
+  /** One-shot text to type into the CLI once it's ready (auto-run an issue prompt). */
+  seedInput?: string;
 }) {
   const sessionIdRef = useRef<string | null>(initialSessionId ?? null);
   const termApiRef = useRef<TerminalPaneAPI | null>(null);
   const pendingOutput = useRef<string[]>([]);
+  const seededRef = useRef(false);
+  const [seedReady, setSeedReady] = useState(false);
 
   const visibleAndActiveRef = useRef(visible && active);
   visibleAndActiveRef.current = visible && active;
@@ -207,8 +255,20 @@ const TerminalTab = React.memo(function TerminalTab({
       sessionIdRef.current = sid;
       onSessionId?.(sid);
       if (termApiRef.current) termApiRef.current.fit();
+      setSeedReady(true);
     },
   });
+
+  // One-shot seed: once the CLI session is ready, wait for the TUI to boot then
+  // type the seeded issue prompt and submit it (fully hands-off issue start).
+  useEffect(() => {
+    if (!seedInput || seededRef.current || !seedReady) return;
+    seededRef.current = true;
+    const timer = setTimeout(() => {
+      send({ type: 'input', data: `${seedInput}\r` });
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [seedInput, seedReady, send]);
 
   const handleTermReady = useCallback((api: TerminalPaneAPI) => {
     console.log(`[TerminalTab] handleTermReady called, pending=${pendingOutput.current.length}`);
@@ -267,7 +327,10 @@ const TerminalTab = React.memo(function TerminalTab({
 
 export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, cwd, visible = true }: { worktreeId?: string; projectId?: string; cwd?: string; visible?: boolean }) {
   const { id: routeProjectId } = useParams<{ id: string }>();
+  const location = useLocation();
   const projectId = projectIdProp || routeProjectId;
+  const detachedTabConfig = useMemo(() => parseDetachedTabConfig(location.search), [location.search]);
+  const isDetachedTabView = Boolean(detachedTabConfig);
 
   // Use cwd as the tab state key for clean directory-based separation;
   // falls back to projectId if cwd is not available
@@ -278,6 +341,18 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
 
   // Restore persisted tab state for this context, or create fresh
   const [tabs, setTabs] = useState<TabMeta[]>(() => {
+    if (detachedTabConfig) {
+      tabCounter++;
+      return [{
+        id: `tab-${tabCounter}`,
+        label: detachedTabConfig.label || defaultTabLabel(detachedTabConfig.mode, tabCounter),
+        mode: detachedTabConfig.mode,
+        themeName: defaultTheme,
+        fontFamily: defaultFont,
+        sessionId: detachedTabConfig.sessionId,
+        group: 1,
+      }];
+    }
     // 1. In-memory cache (fastest — survives route changes)
     const mem = tabStateKey ? projectTabStates.get(tabStateKey) : null;
     if (mem && mem.tabs.length > 0) return mem.tabs;
@@ -332,6 +407,10 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   // Active tab per group: Record<groupNumber, tabId>
   const [activeTabIds, setActiveTabIds] = useState<Record<number, string>>(() => {
     const result: Record<number, string> = {};
+    if (detachedTabConfig) {
+      result[1] = tabs[0]?.id ?? '';
+      return result;
+    }
     // Try to restore active tab from persistence for group 1
     const mem = tabStateKey ? projectTabStates.get(tabStateKey) : null;
     if (mem?.activeTabId) {
@@ -358,14 +437,40 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   const statusCallbacksRef = useRef<Record<string, (status: string) => void>>({});
   const sessionIdCallbacksRef = useRef<Record<string, (sid: string) => void>>({});
 
+  // One-shot issue seed: when this is a worktree created from an issue, the
+  // server holds a prompt to auto-run in the first CLI tab. Consume it once.
+  const [seed, setSeed] = useState<string | null>(null);
+  useEffect(() => {
+    if (!worktreeId || !projectId) return;
+    let cancelled = false;
+    fetch(`/api/projects/${projectId}/worktrees/${worktreeId}/seed`)
+      .then((r) => (r.ok ? r.json() : { seed: null }))
+      .then((d: { seed: string | null }) => {
+        if (!cancelled && d.seed) setSeed(d.seed);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [worktreeId, projectId]);
+
   // Persist tab state whenever it changes (in-memory + localStorage)
   useEffect(() => {
+    if (isDetachedTabView) return;
     if (tabStateKey) {
-      const state = { tabs, activeTabId: activeTabIds[1] || '', fontSize, themeName: projectThemeName, fontFamily: projectFontFamily };
+      const state = {
+        // The worker tab is derived from the delegation, so persisting it would
+        // resurrect a stale session id after the worktree is re-delegated.
+        tabs: tabs.filter((t) => !t.pinned),
+        activeTabId: activeTabIds[1] || '',
+        fontSize,
+        themeName: projectThemeName,
+        fontFamily: projectFontFamily,
+      };
       projectTabStates.set(tabStateKey, state);
       saveTabState(tabStateKey, state);
     }
-  }, [tabStateKey, tabs, activeTabIds, fontSize, projectThemeName, projectFontFamily]);
+  }, [isDetachedTabView, tabStateKey, tabs, activeTabIds, fontSize, projectThemeName, projectFontFamily]);
 
   // Also persist global font size for migration/fallback
   useEffect(() => {
@@ -409,6 +514,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   // against the server. When no tabs exist, create tabs from active sessions.
   const resumeCheckedRef = useRef(false);
   useEffect(() => {
+    if (isDetachedTabView) return;
     if (resumeCheckedRef.current) return;
     if (!projectId) return;
     // Skip if tabs came from in-memory cache (sessions are already live)
@@ -446,7 +552,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
               }
               // No sessionId — try to match by mode
               const match = matching.find(s => {
-                const sMode = (s.mode === 'shell' || s.mode === 'powershell') ? s.mode : 'cli';
+                const sMode = (s.mode === 'shell' || s.mode === 'powershell' || s.mode === 'cli-classic') ? s.mode : 'cli';
                 return sMode === tab.mode && !usedSessionIds.has(s.sessionId);
               });
               if (match) {
@@ -461,8 +567,8 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
           if (matching.length === 0) return prev;
           const newTabs: TabMeta[] = matching.map(s => {
             tabCounter++;
-            const mode = (s.mode === 'shell' || s.mode === 'powershell') ? s.mode : 'cli';
-            const label = mode === 'shell' ? `Shell ${tabCounter}` : mode === 'powershell' ? `PS ${tabCounter}` : `Copilot ${tabCounter}`;
+            const mode = (s.mode === 'shell' || s.mode === 'powershell' || s.mode === 'cli-classic') ? s.mode : 'cli';
+            const label = defaultTabLabel(mode, tabCounter);
             return { id: `tab-${tabCounter}`, label, mode, themeName: defaultTheme, fontFamily: defaultFont, sessionId: s.sessionId, group: 1 as const };
           });
           return newTabs;
@@ -473,15 +579,110 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
         });
       })
       .catch(() => {});
-  }, [projectId, worktreeId, tabStateKey, defaultTheme, defaultFont]);
+  }, [isDetachedTabView, projectId, worktreeId, tabStateKey, defaultTheme, defaultFont]);
 
-  const addTab = useCallback((mode: 'cli' | 'shell' | 'powershell' | 'agent' | 'git' | 'git-status' | 'files' = 'cli', targetGroup: number = 1) => {
+  // A delegated worktree already has a worker conversation, and that is the
+  // thing you want to see when you open the worktree — not a blank CLI tab. It
+  // is pinned first and cannot be closed, because closing it would only hide a
+  // worker that is still running.
+  const pinnedTabIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (isDetachedTabView || !worktreeId || !projectId) return;
+    let cancelled = false;
+
+    const sync = async () => {
+      let worker: { sessionId: string; title: string } | null = null;
+      try {
+        const response = await fetch(`/api/projects/${projectId}/delegations`);
+        if (!response.ok) return;
+        const data = (await response.json()) as {
+          delegations?: Array<{
+            worktreeId: string;
+            sessionId: string | null;
+            title: string;
+            status: string;
+          }>;
+        };
+        // Newest delegation wins: a re-delegated worktree keeps the old rows.
+        // Pick it first and only then check `closed`, so a retired worktree is
+        // not reopened by an older delegation that never got closed out.
+        const found = [...(data.delegations ?? [])]
+          .reverse()
+          .find((d) => d.worktreeId === worktreeId && d.sessionId);
+        if (found?.sessionId && found.status !== 'closed') {
+          worker = { sessionId: found.sessionId, title: found.title };
+        }
+      } catch {
+        return;
+      }
+      if (cancelled) return;
+
+      if (!worker) {
+        if (!pinnedTabIdRef.current) return;
+        pinnedTabIdRef.current = null;
+        setTabs((prev) => prev.filter((t) => !t.pinned));
+        return;
+      }
+
+      const existingId = pinnedTabIdRef.current;
+      const label = worker.title?.trim() || 'Worker';
+      const id = existingId ?? `tab-${++tabCounter}`;
+      pinnedTabIdRef.current = id;
+
+      setTabs((prev) => {
+        const current = prev.find((t) => t.pinned);
+        const unchanged =
+          current &&
+          current.sessionId === worker.sessionId &&
+          current.label === label &&
+          prev[0]?.id === current.id;
+        if (unchanged) return prev;
+        const tab: TabMeta = {
+          id,
+          label,
+          mode: 'agent',
+          themeName: defaultTheme,
+          fontFamily: defaultFont,
+          sessionId: worker.sessionId,
+          group: 1,
+          pinned: true,
+        };
+        return [tab, ...prev.filter((t) => !t.pinned)];
+      });
+
+      // Land on the worker the first time it appears, but never yank the tab
+      // out from under someone who has since switched away from it.
+      if (!existingId) setActiveTabIds((prev) => ({ ...prev, 1: id }));
+    };
+
+    void sync();
+    const timer = setInterval(() => void sync(), 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [isDetachedTabView, projectId, worktreeId, defaultTheme, defaultFont]);
+
+  const addTab = useCallback((mode: TabMeta['mode'] = 'cli', targetGroup: number = 1) => {
     tabCounter++;
-    const label = mode === 'shell' ? `Shell ${tabCounter}` : mode === 'powershell' ? `PS ${tabCounter}` : mode === 'agent' ? `Agent ${tabCounter}` : mode === 'git' ? `Git Log ${tabCounter}` : mode === 'git-status' ? `Git Status ${tabCounter}` : mode === 'files' ? `Files ${tabCounter}` : `Copilot ${tabCounter}`;
+    const label = defaultTabLabel(mode, tabCounter);
     const newTab: TabMeta = { id: `tab-${tabCounter}`, label, mode, themeName: defaultTheme, fontFamily: defaultFont, group: targetGroup };
     setTabs(prev => [...prev, newTab]);
     setActiveTabIds(prev => ({ ...prev, [targetGroup]: newTab.id }));
   }, [defaultTheme, defaultFont]);
+
+  const openTabInBrowserTab = useCallback((tab: TabMeta) => {
+    if (!projectId) return;
+    const basePath = worktreeId
+      ? `/projects/${projectId}/worktrees/${worktreeId}/chat`
+      : `/projects/${projectId}/chat`;
+    const params = new URLSearchParams();
+    params.set('detachedTab', '1');
+    params.set('mode', tab.mode);
+    if (tab.sessionId) params.set('sessionId', tab.sessionId);
+    if (tab.label) params.set('label', tab.label);
+    window.open(`${basePath}?${params.toString()}`, '_blank', 'noopener,noreferrer');
+  }, [projectId, worktreeId]);
 
   const moveTab = useCallback((sourceId: string, targetId: string) => {
     if (sourceId === targetId) return;
@@ -489,11 +690,14 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
       const sourceIndex = prev.findIndex(t => t.id === sourceId);
       const targetIndex = prev.findIndex(t => t.id === targetId);
       if (sourceIndex < 0 || targetIndex < 0) return prev;
+      if (prev[sourceIndex].pinned) return prev;
       const next = [...prev];
       const [moved] = next.splice(sourceIndex, 1);
       // Inherit the target tab's group
       moved.group = prev[targetIndex].group;
-      next.splice(targetIndex, 0, moved);
+      // Dropping onto the worker tab lands after it — it stays first.
+      const insertAt = prev[targetIndex].pinned ? targetIndex + 1 : targetIndex;
+      next.splice(insertAt, 0, moved);
       return next;
     });
   }, []);
@@ -502,6 +706,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
     setTabs(prev => {
       const tab = prev.find(t => t.id === tabId);
       if (!tab || tab.group === targetGroup) return prev;
+      if (tab.pinned) return prev;
       const sourceGroup = tab.group;
       const updated = prev.map(t => t.id === tabId ? { ...t, group: targetGroup } : t);
       // Update active tabs for both groups
@@ -521,6 +726,9 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
   }, []);
 
   const closeTab = useCallback((tabId: string) => {
+    // The worker tab is not the user's to close — it belongs to a running
+    // delegation, and the next reconcile would bring it straight back.
+    if (tabs.find(t => t.id === tabId)?.pinned) return;
     const killCb = killCallbacksRef.current[tabId];
     if (killCb && projectId) {
       const getSessionId = (killCb as unknown as { _getSessionId?: () => string | null })._getSessionId;
@@ -619,6 +827,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
             const tabIcon = tab.mode === 'powershell'
               ? <span className="h-3 w-3 text-[9px] font-bold leading-3 text-center shrink-0">PS</span>
               : tab.mode === 'shell' ? <Terminal className="h-3 w-3 shrink-0" />
+              : tab.mode === 'cli-classic' ? <SquareTerminal className="h-3 w-3 shrink-0" />
               : tab.mode === 'git' ? <GitCommitHorizontal className="h-3 w-3 shrink-0" />
               : tab.mode === 'git-status' ? <GitBranch className="h-3 w-3 shrink-0" />
               : tab.mode === 'files' ? <FolderOpen className="h-3 w-3 shrink-0" />
@@ -627,7 +836,8 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
             return (
               <div
                 key={tab.id}
-                draggable
+                draggable={!tab.pinned}
+                data-testid={tab.pinned ? 'worker-tab' : undefined}
                 className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs cursor-pointer border-r shrink-0 transition-opacity ${
                   tab.id === groupActiveTabId
                     ? 'bg-accent text-foreground font-semibold border-b-2 border-b-primary'
@@ -670,17 +880,29 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
                   setDraggingTabId(null);
                   setDragOverTabId(null);
                 }}
-                title="Drag to rearrange or move to other pane"
+                title={tab.pinned ? 'The worker the Project Lead delegated to this worktree' : 'Drag to rearrange or move to other pane'}
               >
                 {!isUtilTab && <div className={`h-1.5 w-1.5 rounded-full ${stColor}`} />}
                 {tabIcon}
                 <span className="truncate max-w-[100px]">{tab.label}</span>
                 <button
-                  onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
-                  className={`h-4 w-4 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-muted`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openTabInBrowserTab(tab);
+                  }}
+                  className="h-4 w-4 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-muted"
+                  title="Open this tab in a new browser tab"
                 >
-                  <XIcon className="h-3 w-3" />
+                  <ExternalLink className="h-3 w-3" />
                 </button>
+                {!tab.pinned && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
+                    className={`h-4 w-4 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-muted`}
+                  >
+                    <XIcon className="h-3 w-3" />
+                  </button>
+                )}
               </div>
             );
           })}
@@ -854,6 +1076,7 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
               mode={tab.mode || 'cli'}
               sessionId={tab.sessionId}
               visible={visible}
+              seedInput={tab.mode === 'cli' && tab.id === firstTabId.current ? seed ?? undefined : undefined}
               onStatusChange={statusCallbacksRef.current[tab.id]}
               onKill={killCallbacksRef.current[tab.id]}
               onSessionId={sessionIdCallbacksRef.current[tab.id]}
@@ -885,6 +1108,17 @@ export default function ProjectChatPage({ worktreeId, projectId: projectIdProp, 
             <div>
               <div className="text-sm font-medium">Copilot CLI</div>
               <div className="text-[10px] text-muted-foreground">AI-powered terminal</div>
+            </div>
+          </button>
+          <button
+            onClick={() => addTab('cli-classic')}
+            className="flex flex-col items-center gap-2 rounded-lg border p-4 hover:bg-accent hover:text-accent-foreground transition-colors"
+            title="Same Copilot CLI, but reports an accurate terminal identity (TERM=xterm-256color) — fixes scrollback glitches at the cost of re-exposing any TUI rendering bugs the default was working around."
+          >
+            <SquareTerminal className="h-6 w-6" />
+            <div>
+              <div className="text-sm font-medium">Copilot CLI (classic)</div>
+              <div className="text-[10px] text-muted-foreground">True TTY identity</div>
             </div>
           </button>
           <button

@@ -12,6 +12,7 @@ describe('project store', () => {
   let listSkills: typeof import('../shared/project-store').listSkills;
   let updateSkill: typeof import('../shared/project-store').updateSkill;
   let deleteSkill: typeof import('../shared/project-store').deleteSkill;
+  let getWorktreeByIssueNumber: typeof import('../shared/project-store').getWorktreeByIssueNumber;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -37,6 +38,19 @@ describe('project store', () => {
         config TEXT NOT NULL DEFAULT '{}',
         enabled INTEGER NOT NULL DEFAULT 1,
         created_at TEXT DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE worktrees (
+        id            TEXT PRIMARY KEY,
+        project_id    TEXT NOT NULL,
+        name          TEXT NOT NULL,
+        branch        TEXT NOT NULL,
+        worktree_path TEXT NOT NULL UNIQUE,
+        is_managed    INTEGER NOT NULL DEFAULT 1,
+        type          TEXT NOT NULL DEFAULT 'worktree',
+        issue_number  INTEGER,
+        seed_prompt   TEXT,
+        created_at    TEXT DEFAULT (datetime('now'))
       );
     `);
 
@@ -78,6 +92,7 @@ describe('project store', () => {
     listSkills = mod.listSkills;
     updateSkill = mod.updateSkill;
     deleteSkill = mod.deleteSkill;
+    getWorktreeByIssueNumber = mod.getWorktreeByIssueNumber;
   });
 
   afterEach(() => {
@@ -177,5 +192,23 @@ describe('project store', () => {
     deleteSkill(skill.id);
 
     expect(listSkills(project.id)).toHaveLength(0);
+  });
+
+  it('finds the earliest worktree for a given issue number, scoped to the project', () => {
+    const project = createProject('Pilot Console', 'C:\\repos\\pilot-console', 'Main repo');
+    db.prepare(
+      'INSERT INTO worktrees (id, project_id, name, branch, worktree_path, issue_number, created_at) VALUES (?,?,?,?,?,?,?)',
+    ).run('wt-9a', project.id, 'issue-9', 'issue-9', 'C:\\wt\\9a', 9, '2026-01-01T00:00:00Z');
+    db.prepare(
+      'INSERT INTO worktrees (id, project_id, name, branch, worktree_path, issue_number, created_at) VALUES (?,?,?,?,?,?,?)',
+    ).run('wt-9b', project.id, 'issue-9-again', 'issue-9-again', 'C:\\wt\\9b', 9, '2026-02-01T00:00:00Z');
+    db.prepare(
+      'INSERT INTO worktrees (id, project_id, name, branch, worktree_path, issue_number, created_at) VALUES (?,?,?,?,?,?,?)',
+    ).run('wt-7', project.id, 'issue-7', 'issue-7', 'C:\\wt\\7', 7, '2026-01-01T00:00:00Z');
+
+    expect(getWorktreeByIssueNumber(project.id, 9)).toMatchObject({ id: 'wt-9a', issueNumber: 9 });
+    expect(getWorktreeByIssueNumber(project.id, 7)).toMatchObject({ id: 'wt-7', issueNumber: 7 });
+    expect(getWorktreeByIssueNumber(project.id, 999)).toBeNull();
+    expect(getWorktreeByIssueNumber('other-project', 9)).toBeNull();
   });
 });

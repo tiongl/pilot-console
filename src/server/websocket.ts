@@ -5,6 +5,7 @@ import { createCliSession, writeToSession, endCliSession, findActiveSession, det
 import { getDaemonClient } from '../daemon/client';
 import type { WsClientMessage, WsServerMessage } from '../shared/types';
 import { getOrCreateSessionPerf, recordPerfPong, markPerfPingSent, recordOutputBatch, recordFlush, removeSessionPerf, traceStart } from './perf-monitor';
+import { worktreeEvents, type WorktreesChangedPayload } from '../shared/worktree-events';
 
 interface AuthedSocket extends WebSocket {
   userId?: string;
@@ -83,6 +84,21 @@ export function setupWebSocketServer(): WebSocketServer {
     });
   });
 
+  // Subscribe to worktree/delegation changes from the store layer and broadcast a
+  // sidebar refresh. These Lead-driven mutations carry no userId (projects have no
+  // owner column), so we notify every authed client; the client scopes by whether
+  // it actually has the project.
+  worktreeEvents.on('worktrees-changed', (payload: WorktreesChangedPayload) => {
+    if (!_wss) return;
+    const msg = JSON.stringify({ type: 'worktrees-changed', projectId: payload.projectId });
+    _wss.clients.forEach((ws) => {
+      const socket = ws as AuthedSocket;
+      if (socket.readyState === WebSocket.OPEN && socket.userId) {
+        socket.send(msg);
+      }
+    });
+  });
+
   wss.on('connection', async (ws: AuthedSocket, req: IncomingMessage) => {
     ws.isAlive = true;
     ws.wsId = ++wsIdCounter;
@@ -120,7 +136,7 @@ export function setupWebSocketServer(): WebSocketServer {
     const forceNew = url.searchParams.get('new') === 'true';
     const notifyOnly = url.searchParams.get('notify') === 'true';
     const modeParam = url.searchParams.get('mode');
-    const mode = (['shell', 'powershell'].includes(modeParam!) ? modeParam : 'cli') as SessionMode;
+    const mode = (['cli-classic', 'shell', 'powershell'].includes(modeParam!) ? modeParam : 'cli') as SessionMode;
 
     // Notify-only connections just receive broadcasts (e.g. report-ready) — no CLI session
     if (notifyOnly) {

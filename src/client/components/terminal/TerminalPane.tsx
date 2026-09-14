@@ -219,12 +219,49 @@ export default function TerminalPane({ onInput, onResize, fontSize = 14, fontFam
       });
     });
 
+    // Right-click copies the current selection to the clipboard instead of
+    // opening the browser's context menu (standard terminal-emulator UX).
+    const handleContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+      const selection = term.getSelection();
+      if (selection) {
+        navigator.clipboard.writeText(selection).catch(() => {});
+        term.clearSelection();
+      }
+    };
+
+    // Middle-click pastes clipboard contents (xterm/Linux-style paste).
+    // Suppress on mousedown to stop the browser's native middle-click
+    // autoscroll cursor from appearing; do the actual paste on 'auxclick'
+    // (the standard event for middle-button clicks) to avoid double-pasting.
+    const handleMiddleMouseDown = (e: MouseEvent) => {
+      if (e.button === 1) e.preventDefault();
+    };
+    const handleAuxClick = (e: MouseEvent) => {
+      if (e.button !== 1) return;
+      e.preventDefault();
+      navigator.clipboard
+        .readText()
+        .then((text) => {
+          if (text) onInputRef.current(text);
+        })
+        .catch(() => {});
+    };
+
+    const el = containerRef.current;
+    el.addEventListener('contextmenu', handleContextMenu);
+    el.addEventListener('mousedown', handleMiddleMouseDown);
+    el.addEventListener('auxclick', handleAuxClick);
+
     return () => {
       if (scrollRaf) cancelAnimationFrame(scrollRaf);
       onScroll.dispose();
       if (resizeTimeout) clearTimeout(resizeTimeout);
       clearTimeout(safetyRefit);
       resizeObserver.disconnect();
+      el.removeEventListener('contextmenu', handleContextMenu);
+      el.removeEventListener('mousedown', handleMiddleMouseDown);
+      el.removeEventListener('auxclick', handleAuxClick);
       term.dispose();
       termRef.current = null;
       fitRef.current = null;

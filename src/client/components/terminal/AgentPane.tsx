@@ -1,10 +1,12 @@
 'use client';
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import RichMarkdown from '@/components/markdown/RichMarkdown';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { useSpeechInput } from '@/hooks/useSpeechInput';
+import ServerTab, { type ServerStatus } from './ServerTab';
+import ArtifactTab, { type ArtifactStatus } from './ArtifactTab';
 import {
   Dialog,
   DialogContent,
@@ -12,6 +14,19 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from '@/components/ui/dropdown-menu';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {
   Send,
   Square,
@@ -26,7 +41,6 @@ import {
   Rocket,
   SlidersHorizontal,
   Brain,
-  Cog,
   Share2,
   Copy,
   ExternalLink,
@@ -35,6 +49,9 @@ import {
   ChevronUp,
   Coins,
   ListTree,
+  Mic,
+  MicOff,
+  MessageCircleQuestion,
 } from 'lucide-react';
 import { useAgentSocket } from '@/hooks/useAgentSocket';
 import { getThemeByName } from '@/lib/terminal-themes';
@@ -52,7 +69,7 @@ import type {
 } from '@/types';
 
 interface Props {
-  projectId: string;
+  projectId?: string;
   worktreeId?: string;
   sessionId?: string;
   active: boolean;
@@ -61,6 +78,19 @@ interface Props {
   fontSize?: number;
   onSessionId?: (sessionId: string) => void;
   onStatusChange?: (status: string) => void;
+  sessionKind?: 'agent' | 'project_lead' | 'chief_of_staff' | 'server' | 'artifact';
+  /** Server-tab metadata (only used when sessionKind === 'server'). */
+  serverId?: string;
+  serverName?: string;
+  serverCommand?: string;
+  serverStatus?: ServerStatus;
+  onServerDeleted?: () => void;
+  /** Artifact-tab metadata (only used when sessionKind === 'artifact'). */
+  artifactId?: string;
+  artifactName?: string;
+  artifactSessionKey?: string | null;
+  artifactStatus?: ArtifactStatus;
+  onArtifactDeleted?: () => void;
 }
 
 interface PermissionPrompt {
@@ -76,9 +106,93 @@ interface ExitPlanPrompt {
   planContent?: string;
   actions: string[];
   recommended: string;
+  reviewNote?: string;
+}
+
+interface AskUserPrompt {
+  requestId: string;
+  question: string;
+  detail?: string;
+  options: string[];
+  allowText: boolean;
 }
 
 const MODE_ORDER: AgentMode[] = ['interactive', 'plan', 'autopilot'];
+
+/**
+ * An agent question answered by clicking. Kept as its own component so the
+ * optional free-text box can hold its draft without re-rendering the transcript
+ * on every keystroke.
+ */
+function AskUserCard({
+  prompt,
+  onAnswer,
+  surface,
+}: {
+  prompt: AskUserPrompt;
+  onAnswer: (requestId: string, answer: string) => void;
+  surface: string;
+}) {
+  const [text, setText] = useState('');
+  return (
+    <div
+      data-testid="ask-user-prompt"
+      className="rounded-lg border border-violet-500/40 bg-violet-500/5 p-3 space-y-2"
+    >
+      <div className="flex items-center gap-1.5 text-sm font-medium">
+        <MessageCircleQuestion className="h-4 w-4 text-violet-500" />
+        <span className="whitespace-pre-wrap break-words">{prompt.question}</span>
+      </div>
+      {prompt.detail && (
+        <div
+          className="text-xs whitespace-pre-wrap break-words rounded p-2"
+          style={{ backgroundColor: surface }}
+        >
+          {prompt.detail}
+        </div>
+      )}
+      <div className="flex flex-wrap gap-2">
+        {prompt.options.map((option, index) => (
+          <Button
+            key={`${option}:${index}`}
+            size="sm"
+            className="h-7"
+            variant={index === 0 ? 'default' : 'secondary'}
+            onClick={() => onAnswer(prompt.requestId, option)}
+          >
+            {option}
+          </Button>
+        ))}
+      </div>
+      {prompt.allowText && (
+        <div className="flex gap-2">
+          <input
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                onAnswer(prompt.requestId, text);
+              }
+            }}
+            placeholder="Or type an answer…"
+            aria-label="Type an answer instead"
+            className="flex-1 h-7 rounded border bg-transparent px-2 text-xs outline-none focus:ring-1 focus:ring-ring"
+          />
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7"
+            disabled={!text.trim()}
+            onClick={() => onAnswer(prompt.requestId, text)}
+          >
+            Send
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 const MODE_META: Record<AgentMode, { label: string; icon: typeof MessageSquare; color: string }> = {
   interactive: { label: 'Interactive', icon: MessageSquare, color: '#3fb950' },
@@ -119,8 +233,20 @@ const MAX_TOOL_OUTPUT_CHARS = 50_000;
 // of DOM nodes at once.
 const RENDER_WINDOW = 400;
 
-/** Whether a command should prompt for an argument before running. */
-const commandTakesArg = (c: AgentSlashCommand): boolean =>
+/**
+ * How close to the bottom still counts as "at the bottom" for auto-follow.
+ * Generous on purpose: a line or two of slack keeps following after a nudge of
+ * the wheel or a trackpad's inertia, which is what the eye expects.
+ */
+const NEAR_BOTTOM_PX = 120;
+
+/** Bound live-streamed tool output kept in browser memory (matches the server). */
+const clampToolOutput = (text: string): string =>
+  text.length > MAX_TOOL_OUTPUT_CHARS
+    ? text.slice(0, MAX_TOOL_OUTPUT_CHARS) + `\n… [truncated ${text.length - MAX_TOOL_OUTPUT_CHARS} chars]`
+    : text;
+
+/** Whether a command should prompt for an argument before running. */const commandTakesArg = (c: AgentSlashCommand): boolean =>
   c.argRequired === true || !!c.argHint || !!(c.argChoices && c.argChoices.length);
 
 const KIND_LABEL: Record<AgentSlashCommand['kind'], string> = {
@@ -132,14 +258,13 @@ const KIND_LABEL: Record<AgentSlashCommand['kind'], string> = {
 /**
  * Transcript entry kinds the user can show/hide from the Agent tab. `user`,
  * `assistant` and `error` are core conversation and always shown; the rest are
- * "extra" output types (tool calls, model reasoning, system notices).
+ * "extra" output types (tool calls, model reasoning, notices).
  */
-type FilterableKind = 'tool' | 'reasoning' | 'system' | 'notice';
+type FilterableKind = 'tool' | 'reasoning' | 'notice';
 
 const FILTERABLE_KINDS: { kind: FilterableKind; label: string }[] = [
   { kind: 'tool', label: 'Tool calls' },
   { kind: 'reasoning', label: 'Reasoning' },
-  { kind: 'system', label: 'System messages' },
   { kind: 'notice', label: 'Notices' },
 ];
 
@@ -161,7 +286,6 @@ const ESCAPE_CONFIRM_MS = 3_000;
 const DEFAULT_VISIBILITY: Visibility = {
   tool: true,
   reasoning: true,
-  system: true,
   notice: true,
   toolOutput: true,
 };
@@ -287,6 +411,18 @@ function formatAiu(nanoAiu: number): string {
   return aiu.toFixed(aiu < 1 ? 4 : 2);
 }
 
+function isDarkHexColor(color: string): boolean {
+  const match = color.trim().match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (!match) return true;
+  const hex = match[1].length === 3
+    ? match[1].split('').map((c) => c + c).join('')
+    : match[1];
+  const r = Number.parseInt(hex.slice(0, 2), 16);
+  const g = Number.parseInt(hex.slice(2, 4), 16);
+  const b = Number.parseInt(hex.slice(4, 6), 16);
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) < 140;
+}
+
 function loadVisibility(): Visibility {
   try {
     const raw = localStorage.getItem(VISIBILITY_LS_KEY);
@@ -295,7 +431,6 @@ function loadVisibility(): Visibility {
     return {
       tool: parsed.tool ?? true,
       reasoning: parsed.reasoning ?? true,
-      system: parsed.system ?? true,
       notice: parsed.notice ?? true,
       toolOutput: parsed.toolOutput ?? true,
     };
@@ -314,16 +449,94 @@ export default function AgentPane({
   fontSize = 13,
   onSessionId,
   onStatusChange,
+  sessionKind = 'agent',
+  serverId,
+  serverName,
+  serverCommand,
+  serverStatus,
+  onServerDeleted,
+  artifactId,
+  artifactName,
+  artifactSessionKey,
+  artifactStatus,
+  onArtifactDeleted,
 }: Props) {
+  // Server tabs render a live console instead of the agent transcript. This
+  // early return runs before any hook, so a given instance (fixed sessionKind)
+  // consistently takes the same branch — keeping the rules of hooks intact.
+  if (sessionKind === 'server' && serverId) {
+    return (
+      <ServerTab
+        serverId={serverId}
+        name={serverName ?? 'Server'}
+        command={serverCommand ?? ''}
+        initialStatus={serverStatus}
+        active={active}
+        fontFamily={fontFamily}
+        fontSize={fontSize}
+        themeName={themeName}
+        onDeleted={onServerDeleted}
+      />
+    );
+  }
+
+  // Artifact tabs embed a live Lavish session iframe. Same rules-of-hooks note
+  // as the server branch above.
+  if (sessionKind === 'artifact' && artifactId) {
+    return (
+      <ArtifactTab
+        artifactId={artifactId}
+        name={artifactName ?? 'Artifact'}
+        sessionKey={artifactSessionKey}
+        initialStatus={artifactStatus}
+        active={active}
+        onDeleted={onArtifactDeleted}
+      />
+    );
+  }
+
   const [events, setEvents] = useState<AgentTranscriptEvent[]>([]);
+  // Older events stay on the server until the user asks for them, so a long
+  // conversation does not ship its whole history on connect.
+  const [hasEarlier, setHasEarlier] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  // Only render the most recent `renderLimit` items to bound DOM size; older
+  // items stay in state (and scroll history) but are revealed on demand.
+  const [renderLimit, setRenderLimit] = useState(RENDER_WINDOW);
   const [status, setStatus] = useState<AgentStatus>('idle');
+  /** Follow-ups typed mid-turn, held server-side until the current turn ends. */
+  const [queued, setQueued] = useState<string[]>([]);
+  /**
+   * Wall-clock start of the in-flight turn. Set optimistically the moment the
+   * user submits so the progress timer covers the full request → completion
+   * round trip, then reconciled from the server's authoritative value.
+   */
+  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const [model, setModel] = useState('auto');
   const [mode, setMode] = useState<AgentMode>('interactive');
   const [permissions, setPermissions] = useState<PermissionPrompt[]>([]);
   const [exitPlans, setExitPlans] = useState<ExitPlanPrompt[]>([]);
+  /** Click-to-answer questions raised by the agent's `ask_user` tool. */
+  const [questions, setQuestions] = useState<AskUserPrompt[]>([]);
   const [models, setModels] = useState<AgentModelOption[]>([{ id: 'auto', name: 'Auto' }]);
   const [connError, setConnError] = useState<string | null>(null);
   const [input, setInput] = useState('');
+  /**
+   * Text already in the composer when dictation started. Speech is appended to
+   * it so starting the mic never wipes a partially typed message.
+   */
+  const dictationBaseRef = useRef('');
+  const speech = useSpeechInput({
+    onTranscript: useCallback((text: string) => {
+      const base = dictationBaseRef.current;
+      const separator = base && !/\s$/.test(base) ? ' ' : '';
+      setInput(text ? base + separator + text : base);
+    }, []),
+  });
+  const toggleDictation = useCallback(() => {
+    if (!speech.listening) dictationBaseRef.current = input;
+    speech.toggle();
+  }, [speech, input]);
   // Dynamic slash-command catalog for this session (plugin/skill-aware).
   const [serverCommands, setServerCommands] = useState<AgentSlashCommand[]>([]);
   // Pending subcommand picker, when a command needs a further selection.
@@ -388,14 +601,7 @@ export default function AgentPane({
       if (entry.kind === 'assistant' && kind === 'assistant') {
         next[idx] = { ...entry, content: entry.content + delta };
       } else if (entry.kind === 'tool' && kind === 'tool') {
-        const combined = (entry.output ?? '') + delta;
-        // Bound live-streamed tool output so a chatty tool can't grow the
-        // browser's transcript memory without limit (matches the server cap).
-        const output =
-          combined.length > MAX_TOOL_OUTPUT_CHARS
-            ? combined.slice(0, MAX_TOOL_OUTPUT_CHARS) + `\n… [truncated ${combined.length - MAX_TOOL_OUTPUT_CHARS} chars]`
-            : combined;
-        next[idx] = { ...entry, output };
+        next[idx] = { ...entry, output: clampToolOutput((entry.output ?? '') + delta) };
       }
       return next;
     });
@@ -408,17 +614,32 @@ export default function AgentPane({
           setModel(msg.model);
           setMode(msg.mode);
           setStatus(msg.status);
+          setTurnStartedAt(msg.status === 'busy' ? (msg.turnStartedAt ?? Date.now()) : null);
           setConnError(null);
           break;
         case 'replay':
-          setEvents(msg.events);
+          setEvents(msg.events.filter((e) => e.kind !== 'system'));
+          setHasEarlier(msg.hasMore ?? false);
+          setLoadingEarlier(false);
+          setRenderLimit(RENDER_WINDOW);
           // A replay is a fresh render of the whole conversation (first
           // connect, reconnect, or a manual refresh) — always land at the end.
           atBottomRef.current = true;
           setAtBottom(true);
           break;
+        case 'earlier': {
+          const older = msg.events.filter((e) => e.kind !== 'system');
+          setHasEarlier(msg.hasMore);
+          setLoadingEarlier(false);
+          if (older.length === 0) break;
+          setEvents((prev) => [...older, ...prev]);
+          // Reveal what was just fetched instead of hiding it behind another
+          // click, and stay where the user was reading rather than jumping.
+          setRenderLimit((n) => n + older.length);
+          break;
+        }
         case 'event':
-          upsert(msg.event);
+          if (msg.event.kind !== 'system') upsert(msg.event);
           break;
         case 'assistant_delta':
           applyDelta(msg.id, msg.delta, 'assistant');
@@ -426,11 +647,30 @@ export default function AgentPane({
         case 'tool_delta':
           applyDelta(msg.id, msg.delta, 'tool');
           break;
+        case 'tool_output':
+          setEvents((prev) => {
+            const idx = prev.findIndex((e) => e.id === msg.id);
+            if (idx < 0) return prev;
+            const entry = prev[idx];
+            if (entry.kind !== 'tool') return prev;
+            const next = prev.slice();
+            next[idx] = { ...entry, output: clampToolOutput(msg.output) };
+            return next;
+          });
+          break;
         case 'status':
           setStatus(msg.status);
+          // Keep an optimistic local start time if the server has not sent one
+          // yet — never restart the clock mid-turn.
+          setTurnStartedAt((prev) =>
+            msg.status === 'busy' ? (msg.turnStartedAt ?? prev ?? Date.now()) : null,
+          );
           break;
         case 'model':
           setModel(msg.model);
+          break;
+        case 'queued':
+          setQueued(msg.prompts);
           break;
         case 'mode':
           setMode(msg.mode);
@@ -493,6 +733,25 @@ export default function AgentPane({
         case 'exit_plan_resolved':
           setExitPlans((prev) => prev.filter((p) => p.requestId !== msg.requestId));
           break;
+        case 'ask_user_request':
+          setQuestions((prev) => {
+            const prompt = {
+              requestId: msg.requestId,
+              question: msg.question,
+              detail: msg.detail,
+              options: msg.options,
+              allowText: msg.allowText,
+            };
+            const idx = prev.findIndex((item) => item.requestId === msg.requestId);
+            if (idx < 0) return [...prev, prompt];
+            const next = prev.slice();
+            next[idx] = prompt;
+            return next;
+          });
+          break;
+        case 'ask_user_resolved':
+          setQuestions((prev) => prev.filter((p) => p.requestId !== msg.requestId));
+          break;
         case 'error':
           setConnError(msg.message);
           break;
@@ -505,8 +764,9 @@ export default function AgentPane({
     projectId,
     worktreeId,
     sessionId,
-    forceNew: !sessionId,
+    forceNew: !sessionId && sessionKind === 'agent',
     model,
+    kind: sessionKind,
     onMessage: handleMessage,
     onReady: onSessionId,
   });
@@ -555,7 +815,40 @@ export default function AgentPane({
     if (atBottomRef.current && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [events, visibility, permissions, exitPlans]);
+  }, [events, visibility, permissions, exitPlans, questions]);
+
+  /**
+   * Keep following the bottom as the content settles.
+   *
+   * The effect above only runs on commit, but plenty of height arrives later:
+   * markdown re-layout, diagrams, images, wrapped code. That late growth fires
+   * no scroll event, so the transcript drifted above the bottom while we still
+   * believed we were sitting on it — no auto-scroll, and no affordance either,
+   * because nothing told us we had fallen behind. Watching the subtree catches
+   * every one of those, and the frame coalesces a burst of streamed deltas into
+   * a single scroll.
+   */
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    let frame = 0;
+    const pin = () => {
+      if (!atBottomRef.current) return;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (atBottomRef.current) el.scrollTop = el.scrollHeight;
+      });
+    };
+    const mo = new MutationObserver(pin);
+    mo.observe(el, { childList: true, subtree: true, characterData: true });
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(pin);
+    ro?.observe(el);
+    return () => {
+      cancelAnimationFrame(frame);
+      mo.disconnect();
+      ro?.disconnect();
+    };
+  }, []);
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
@@ -567,7 +860,7 @@ export default function AgentPane({
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
     atBottomRef.current = bottom;
     setAtBottom((prev) => (prev === bottom ? prev : bottom));
   };
@@ -598,11 +891,39 @@ export default function AgentPane({
   // so a long-running tool never looks like the agent has hung.
   const renderItems = useMemo(() => {
     const items: RenderItem[] = [];
-    for (const e of events) {
+    const renderedReasoningIds = new Set<string>();
+
+    for (let i = 0; i < events.length; i++) {
+      const e = events[i];
+
       if (e.kind === 'assistant') {
+        // Reason appears before the message it explains (thinking happens first).
+        // If there's reasoning immediately before this assistant message that hasn't
+        // been rendered yet, render it first.
+        if (i > 0 && events[i - 1].kind === 'reasoning' && !renderedReasoningIds.has(events[i - 1].id)) {
+          const reasoning = events[i - 1];
+          items.push({ type: 'event', key: reasoning.id, event: reasoning });
+          renderedReasoningIds.add(reasoning.id);
+        }
+
         if (e.content.trim().length > 0) items.push({ type: 'event', key: e.id, event: e });
         continue;
       }
+
+      // Skip reasoning events that come right before an assistant (handled above)
+      if (e.kind === 'reasoning') {
+        if (i + 1 < events.length && events[i + 1].kind === 'assistant' && !renderedReasoningIds.has(e.id)) {
+          // This will be handled by the assistant case above, so skip it here
+          continue;
+        }
+        // Reasoning that doesn't immediately precede an assistant still renders normally
+        if (!renderedReasoningIds.has(e.id)) {
+          items.push({ type: 'event', key: e.id, event: e });
+          renderedReasoningIds.add(e.id);
+        }
+        continue;
+      }
+
       // The final "task complete" summary is the agent's closing statement, not
       // incidental tool chatter — it always renders in full, whatever the tool
       // filters say.
@@ -618,7 +939,7 @@ export default function AgentPane({
       }
       // Reasoning is never dropped: unchecking it collapses the entry to a
       // brain badge (handled by ReasoningItem) rather than hiding it.
-      if ((e.kind === 'tool' || e.kind === 'system' || e.kind === 'notice') && !visibility[e.kind]) {
+      if ((e.kind === 'tool' || e.kind === 'notice') && !visibility[e.kind]) {
         continue;
       }
       items.push({ type: 'event', key: e.id, event: e });
@@ -628,7 +949,6 @@ export default function AgentPane({
 
   // Only render the most recent `renderLimit` items to bound DOM size; older
   // items stay in state (and scroll history) but are revealed on demand.
-  const [renderLimit, setRenderLimit] = useState(RENDER_WINDOW);
   const windowedItems =
     renderItems.length > renderLimit ? renderItems.slice(-renderLimit) : renderItems;
   const earlierCount = renderItems.length - windowedItems.length;
@@ -707,7 +1027,7 @@ export default function AgentPane({
     () =>
       events.filter((e) => {
         if (e.kind === 'tool') return !visibility.tool || (!visibility.toolOutput && Boolean(e.output));
-        return e.kind === 'reasoning' || e.kind === 'system' || e.kind === 'notice' ? !visibility[e.kind] : false;
+        return e.kind === 'reasoning' || e.kind === 'notice' ? !visibility[e.kind] : false;
       }).length,
     [events, visibility],
   );
@@ -734,9 +1054,17 @@ export default function AgentPane({
     send({ type: 'set_allow_all', enabled });
   };
 
-  const changeModel = (m: string) => {    setModel(m);
+  const changeModel = (m: string) => {
+    setModel(m);
     send({ type: 'set_model', model: m });
   };
+
+  // Maps model ids to display names so the trigger shows "GPT-5.6 Sol"
+  // rather than the raw id the session actually runs on.
+  const modelItems = useMemo(
+    () => models.map((m) => ({ value: m.id, label: m.name })),
+    [models],
+  );
 
   const changeMode = useCallback(
     (m: AgentMode) => {
@@ -759,6 +1087,13 @@ export default function AgentPane({
     setExitPlans((prev) => prev.filter((p) => p.requestId !== requestId));
   };
 
+  const respondAskUser = (requestId: string, answer: string) => {
+    const trimmed = answer.trim();
+    if (!trimmed) return;
+    send({ type: 'ask_user_response', requestId, answer: trimmed });
+    setQuestions((prev) => prev.filter((p) => p.requestId !== requestId));
+  };
+
   // --- Slash commands ------------------------------------------------------
   const [slashSel, setSlashSel] = useState(0);
   const noticeSeq = useRef(0);
@@ -779,6 +1114,8 @@ export default function AgentPane({
 
   const clearSession = useCallback(() => {
     setEvents([]);
+    setHasEarlier(false);
+    setLoadingEarlier(false);
     setPermissions([]);
     setExitPlans([]);
     setSubcommandPrompt(null);
@@ -934,8 +1271,12 @@ export default function AgentPane({
     if (id === sessionId) return;
     // Clear the local view; the server replays the target session's transcript.
     setEvents([]);
+    setHasEarlier(false);
+    setLoadingEarlier(false);
     setPermissions([]);
     setExitPlans([]);
+    setQueued([]);
+    setQuestions([]);
     setConnError(null);
     onSessionId?.(id);
     switchTo(id);
@@ -944,13 +1285,29 @@ export default function AgentPane({
   const submit = () => {
     const trimmed = input.trim();
     if (!trimmed) return;
+    // Sending ends the utterance; leaving the mic hot would dictate the next
+    // message into an empty composer without the user asking.
+    if (speech.listening) speech.stop();
     if (trimmed.startsWith('/')) {
       executeSlash(trimmed);
       setInput('');
       setSlashSel(0);
       return;
     }
+    // A pending ask_user call is blocking the agent's turn, so a normal send
+    // would queue behind a turn that can never end. Route the typed text to the
+    // question instead: the buttons are a shortcut, never a gate on typing.
+    const awaiting = questions[0];
+    if (awaiting) {
+      respondAskUser(awaiting.requestId, trimmed);
+      setInput('');
+      atBottomRef.current = true;
+      return;
+    }
     send({ type: 'send', prompt: trimmed });
+    // Only anchor the clock when this prompt starts a turn; a follow-up typed
+    // mid-turn is queued server-side and must not restart the running timer.
+    if (status !== 'busy') setTurnStartedAt(Date.now());
     setInput('');
     atBottomRef.current = true;
   };
@@ -1021,6 +1378,13 @@ export default function AgentPane({
     return undefined;
   }, [events]);
   const busy = status === 'busy' || Boolean(activeTool) || permissions.length > 0 || exitPlans.length > 0;
+
+  // `busy` can also be driven by a running tool or a pending prompt with no
+  // status message of its own — anchor the turn clock in those cases too, and
+  // release it the moment the turn completes.
+  useEffect(() => {
+    setTurnStartedAt((prev) => (busy ? (prev ?? Date.now()) : null));
+  }, [busy]);
 
   // --- Escape-to-stop (terminal-style double press) ------------------------
   const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1212,7 +1576,7 @@ export default function AgentPane({
 
       {/* Header controls */}
       <div
-        className="flex items-center gap-2 px-3 py-1.5 border-b shrink-0"
+        className="flex flex-wrap items-center gap-2 px-3 py-1.5 border-b shrink-0"
         style={{ borderColor: appearance.border, backgroundColor: appearance.surface }}
       >
         <span className="text-xs font-semibold shrink-0">Copilot Agent</span>
@@ -1508,21 +1872,25 @@ export default function AgentPane({
             </>
           )}
         </div>
-        <div className="flex items-center gap-0.5 border rounded px-1" style={{ borderColor: appearance.border }}>
-          <span className="text-[10px]" style={{ color: appearance.muted }}>Model</span>
-          <select
-            value={model}
-            onChange={(e) => changeModel(e.target.value)}
-            className="h-6 text-xs bg-transparent border-none outline-none px-0.5 max-w-[140px]"
-            style={{ color: appearance.fg }}
+        <Select value={model} onValueChange={(value) => value && changeModel(value)} items={modelItems}>
+          <SelectTrigger
+            size="sm"
+            className="h-6 max-w-[180px] shrink-0 gap-1 rounded px-1.5 text-[10px]"
+            data-testid="agent-model-select"
+            aria-label={`${sessionKind === 'project_lead' ? 'Project Lead' : sessionKind === 'chief_of_staff' ? 'Chief of Staff' : 'Agent'} model`}
+            title="Select model"
           >
-            {models.map((m) => (
-              <option key={m.id} value={m.id} style={{ color: '#000' }}>
-                {m.name}
-              </option>
+            <span className="shrink-0" style={{ color: appearance.muted }}>Model</span>
+            <SelectValue className="min-w-0 truncate" />
+          </SelectTrigger>
+          <SelectContent align="end" className="min-w-56">
+            {models.map((item) => (
+              <SelectItem key={item.id} value={item.id} className="text-xs">
+                {item.name}
+              </SelectItem>
             ))}
-          </select>
-        </div>
+          </SelectContent>
+        </Select>
       </div>
 
       {connError && (
@@ -1642,7 +2010,7 @@ export default function AgentPane({
             All output is hidden by the current filters.
           </div>
         )}
-        {earlierCount > 0 && (
+        {earlierCount > 0 ? (
           <div className="text-center">
             <button
               type="button"
@@ -1653,7 +2021,23 @@ export default function AgentPane({
               Show {Math.min(RENDER_WINDOW, earlierCount)} earlier of {earlierCount} hidden
             </button>
           </div>
-        )}
+        ) : hasEarlier ? (
+          <div className="text-center">
+            <button
+              type="button"
+              disabled={loadingEarlier}
+              data-testid="agent-fetch-earlier"
+              onClick={() => {
+                setLoadingEarlier(true);
+                send({ type: 'fetch_earlier', beforeId: events[0]?.id });
+              }}
+              className="text-xs px-3 py-1 rounded-full border disabled:opacity-50"
+              style={{ borderColor: appearance.border, color: appearance.muted }}
+            >
+              {loadingEarlier ? 'Loading earlier…' : 'Load earlier messages'}
+            </button>
+          </div>
+        ) : null}
         {windowedItems.map((item) => {
           const isMatch = searchMatches.includes(item.key);
           return (
@@ -1677,6 +2061,9 @@ export default function AgentPane({
                   codeSize={codeSize}
                   showToolOutput={visibility.toolOutput}
                   showReasoning={visibility.reasoning}
+                  projectId={projectId}
+                  worktreeId={worktreeId}
+                  sessionKind={sessionKind === 'server' || sessionKind === 'artifact' ? undefined : sessionKind}
                 />
               ) : (
                 <ToolBadgeStrip tools={item.tools} appearance={appearance} codeSize={codeSize} />
@@ -1685,6 +2072,12 @@ export default function AgentPane({
           );
         })}
 
+          </>
+        )}
+
+        {/* Prompts that block the turn sit outside the transcript branch: the
+            Outline view would otherwise hide the very card the agent is
+            waiting on, and the session would look hung for no visible reason. */}
         {/* Pending permission prompts */}
         {permissions.map((p) => (
           <div key={p.requestId} className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 space-y-2">
@@ -1734,6 +2127,7 @@ export default function AgentPane({
             <div className="flex items-center gap-1.5 text-sm font-medium">
               <ClipboardList className="h-4 w-4 text-sky-500" /> Plan ready
             </div>
+            {p.reviewNote && <div className="text-xs text-amber-600">{p.reviewNote}</div>}
             {p.summary && <div className="text-xs whitespace-pre-wrap break-words">{p.summary}</div>}
             {p.planContent && (
               <pre
@@ -1761,8 +2155,16 @@ export default function AgentPane({
             </div>
           </div>
         ))}
-          </>
-        )}
+
+        {/* Click-to-answer questions from the agent's ask_user tool */}
+        {questions.map((p) => (
+          <AskUserCard
+            key={p.requestId}
+            prompt={p}
+            onAnswer={respondAskUser}
+            surface={appearance.surfaceStrong}
+          />
+        ))}
       </div>
 
         {!atBottom && !outline && (
@@ -1779,13 +2181,39 @@ export default function AgentPane({
             }}
           >
             <ArrowDown className="h-3.5 w-3.5" />
-            Jump to latest
+            {busy ? 'New messages' : 'Jump to latest'}
           </button>
+        )}
+
+        {/* Says why the view is moving on its own while the agent writes. */}
+        {atBottom && !outline && busy && (
+          <div
+            data-testid="agent-following"
+            title="Scroll up to stop following"
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1 h-6 px-2.5 rounded-full border text-[10px] font-medium pointer-events-none"
+            style={{
+              borderColor: appearance.border,
+              backgroundColor: appearance.surfaceStrong,
+              color: appearance.muted,
+            }}
+          >
+            <ArrowDown className="h-3 w-3" />
+            Following
+          </div>
         )}
       </div>
 
       {/* Composer */}
       <div className="border-t p-2 shrink-0" style={{ borderColor: appearance.border }}>
+        {busy && (
+          <TurnProgress
+            appearance={appearance}
+            label={statusLabel}
+            startedAt={turnStartedAt}
+            toolName={activeTool?.toolName}
+            toolProgress={activeTool?.progress}
+          />
+        )}
         {subcommandPrompt && (
           <div
             data-testid="subcommand-menu"
@@ -1864,26 +2292,81 @@ export default function AgentPane({
             ))}
           </div>
         )}
+        {queued.length > 0 && (
+          <div data-testid="agent-queued" className="mb-2 space-y-1">
+            <div className="text-[11px]" style={{ color: appearance.muted }}>
+              {queued.length} follow-up{queued.length === 1 ? '' : 's'} queued · sent when this turn ends
+            </div>
+            {queued.map((prompt, index) => (
+              <div
+                key={`${index}:${prompt}`}
+                className="flex items-start gap-2 rounded border px-2 py-1 text-xs"
+                style={{ borderColor: appearance.border }}
+              >
+                <span className="min-w-0 flex-1 truncate" title={prompt}>{prompt}</span>
+                <button
+                  type="button"
+                  className="shrink-0 underline"
+                  style={{ color: appearance.muted }}
+                  title="Remove this queued follow-up"
+                  onClick={() => send({ type: 'dequeue', index })}
+                >
+                  remove
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        {speech.error && (
+          <div className="px-1 pb-1 text-[11px] text-destructive" role="status">
+            {speech.error}
+          </div>
+        )}
         <div className="flex gap-2 items-end">
           <Textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Message Copilot… (/ for commands, Enter to send, Shift+Enter for newline)"
+            placeholder={speech.listening
+              ? 'Listening… speak now, then edit before sending'
+              : questions.length > 0
+              ? 'Click an option above, or type an answer / a new instruction'
+              : busy
+              ? 'Message Copilot… (queued and sent when the current turn ends)'
+              : 'Message Copilot… (/ for commands, Enter to send, Shift+Enter for newline)'}
             rows={2}
             className="resize-none flex-1"
             style={{ fontFamily, fontSize }}
             disabled={!active && state !== 'open'}
           />
-          {busy ? (
+          {busy && (
             <Button variant="destructive" size="icon" onClick={() => send({ type: 'cancel' })} title="Stop">
               <Square className="h-4 w-4" />
             </Button>
-          ) : (
-            <Button onClick={submit} disabled={!input.trim()} size="icon" title="Send">
-              <Send className="h-4 w-4" />
+          )}
+          {speech.supported && (
+            <Button
+              variant={speech.listening ? 'destructive' : 'secondary'}
+              size="icon"
+              data-testid="agent-dictate"
+              aria-pressed={speech.listening}
+              onClick={toggleDictation}
+              title={
+                speech.error ??
+                (speech.listening ? 'Stop dictating' : 'Dictate a message (speech to text)')
+              }
+            >
+              {speech.listening ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
             </Button>
           )}
+          <Button
+            onClick={submit}
+            disabled={!input.trim()}
+            size="icon"
+            title={busy ? 'Queue this message for when the turn ends' : 'Send'}
+          >
+            <Send className="h-4 w-4" />
+          </Button>
         </div>
       </div>
 
@@ -1975,12 +2458,18 @@ const TranscriptItem = memo(function TranscriptItem({
   codeSize,
   showToolOutput,
   showReasoning,
+  projectId,
+  worktreeId,
+  sessionKind,
 }: {
   event: AgentTranscriptEvent;
   appearance: Appearance;
   codeSize: number;
   showToolOutput: boolean;
   showReasoning: boolean;
+  projectId?: string;
+  worktreeId?: string;
+  sessionKind?: 'agent' | 'project_lead' | 'chief_of_staff';
 }) {
   if (event.kind === 'user') {
     return (
@@ -2003,46 +2492,14 @@ const TranscriptItem = memo(function TranscriptItem({
   }
 
   if (event.kind === 'assistant') {
-    return (
-      <div className="flex flex-col items-start gap-0.5">
-        <span
-          className="text-[10px] uppercase tracking-wide px-1 flex items-center gap-1"
-          style={{ color: MODE_META.interactive.color }}
-        >
-          <MessageSquare className="h-3 w-3" />
-          Copilot
-          <EntryTime ts={event.ts} durationMs={event.durationMs} />
-        </span>
-        <div
-          className="max-w-[85%] rounded-2xl rounded-bl-sm px-4 py-2 overflow-hidden prose prose-sm dark:prose-invert max-w-none"
-          style={{ backgroundColor: appearance.surface, color: appearance.fg }}
-        >
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{event.content || '…'}</ReactMarkdown>
-        </div>
-      </div>
-    );
+    return <AssistantItem event={event} appearance={appearance} projectId={projectId} worktreeId={worktreeId} sessionKind={sessionKind} />;
   }
 
   if (event.kind === 'reasoning') {
     return <ReasoningItem event={event} appearance={appearance} expanded={showReasoning} />;
   }
 
-  if (event.kind === 'system') {
-    return (
-      <details className="text-xs" style={{ color: appearance.muted }}>
-        <summary className="cursor-pointer select-none flex items-center gap-1">
-          <Cog className="h-3 w-3" />
-          System message
-        </summary>
-        <div
-          className="mt-1 whitespace-pre-wrap break-words pl-2 border-l font-mono"
-          style={{ borderColor: appearance.border, fontSize: codeSize }}
-        >
-          {event.content}
-        </div>
-      </details>
-    );
-  }
+  if (event.kind === 'system') return null;
 
   if (event.kind === 'tool') {
     if (isTaskComplete(event.toolName)) {
@@ -2067,6 +2524,103 @@ const TranscriptItem = memo(function TranscriptItem({
     </div>
   );
 });
+
+/**
+ * A single Copilot reply. Extracted from `TranscriptItem` so it can own a ref to
+ * the rendered markdown (for "copy as text") and the copy-menu state without
+ * tripping the rules of hooks in `TranscriptItem`'s branching render.
+ */
+const AssistantItem = memo(function AssistantItem({
+  event,
+  appearance,
+  projectId,
+  worktreeId,
+  sessionKind,
+}: {
+  event: Extract<AgentTranscriptEvent, { kind: 'assistant' }>;
+  appearance: Appearance;
+  projectId?: string;
+  worktreeId?: string;
+  sessionKind?: 'agent' | 'project_lead' | 'chief_of_staff';
+}) {
+  const contentRef = useRef<HTMLDivElement>(null);
+  return (
+    <div className="group flex flex-col items-start gap-0.5">
+      <span
+        className="text-[10px] uppercase tracking-wide px-1 flex items-center gap-1 w-full"
+        style={{ color: MODE_META.interactive.color }}
+      >
+        <MessageSquare className="h-3 w-3" />
+        Copilot
+        <EntryTime ts={event.ts} durationMs={event.durationMs} />
+        {event.content && (
+          <AssistantCopyMenu markdown={event.content} contentRef={contentRef} appearance={appearance} />
+        )}
+      </span>
+      <div
+        ref={contentRef}
+        className="max-w-[85%] rounded-2xl rounded-bl-sm px-4 py-2 overflow-hidden prose prose-sm dark:prose-invert max-w-none"
+        style={{ backgroundColor: appearance.surface, color: appearance.fg }}
+      >
+        <RichMarkdown
+          content={event.content || '…'}
+          darkMode={isDarkHexColor(appearance.bg)}
+          projectId={sessionKind === 'project_lead' ? projectId : undefined}
+          worktreeId={sessionKind === 'project_lead' ? worktreeId : undefined}
+        />
+      </div>
+    </div>
+  );
+});
+
+/**
+ * Copy control for a Copilot reply. "Markdown" copies the raw source verbatim;
+ * "text" copies the rendered `innerText` (what the user actually sees, with the
+ * markdown syntax stripped) and falls back to the source if the DOM node is
+ * unavailable.
+ */
+function AssistantCopyMenu({
+  markdown,
+  contentRef,
+  appearance,
+}: {
+  markdown: string;
+  contentRef: React.RefObject<HTMLDivElement | null>;
+  appearance: Appearance;
+}) {
+  const [copied, setCopied] = useState<'text' | 'markdown' | null>(null);
+
+  const copy = (kind: 'text' | 'markdown') => {
+    const value =
+      kind === 'markdown' ? markdown : (contentRef.current?.innerText?.trim() || markdown);
+    if (!navigator.clipboard) return;
+    void navigator.clipboard.writeText(value).then(() => {
+      setCopied(kind);
+      window.setTimeout(() => setCopied(null), 1_500);
+    });
+  };
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        data-testid="assistant-copy-button"
+        title="Copy response"
+        className="ml-auto flex items-center rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100 data-[popup-open]:opacity-100"
+        style={{ color: appearance.muted }}
+      >
+        {copied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-[10rem]">
+        <DropdownMenuItem data-testid="assistant-copy-text" onClick={() => copy('text')}>
+          Copy as text
+        </DropdownMenuItem>
+        <DropdownMenuItem data-testid="assistant-copy-markdown" onClick={() => copy('markdown')}>
+          Copy as Markdown
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
 
 /**
  * Reasoning trace.
@@ -2153,7 +2707,6 @@ const TaskCompleteItem = memo(function TaskCompleteItem({
     const fromArgs = typeof record?.summary === 'string' ? record.summary : undefined;
     return (fromArgs || event.output || '').trim();
   }, [event.args, event.output]);
-
   return (
     <div className="flex flex-col items-start gap-0.5">
       <span
@@ -2168,7 +2721,7 @@ const TaskCompleteItem = memo(function TaskCompleteItem({
         className="max-w-[85%] rounded-2xl rounded-bl-sm px-4 py-2 overflow-hidden border border-emerald-500/40 prose prose-sm dark:prose-invert"
         style={{ backgroundColor: appearance.surface, color: appearance.fg }}
       >
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{summary || 'Task complete.'}</ReactMarkdown>
+        <RichMarkdown content={summary || 'Task complete.'} darkMode={isDarkHexColor(appearance.bg)} />
       </div>
     </div>
   );
@@ -2542,10 +3095,84 @@ function ToolDetailDialog({
 
 
 function formatElapsed(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return `${minutes}m ${remainder}s`;
+  const safe = Math.max(0, Math.floor(seconds));
+  if (safe < 60) return `${safe}s`;
+  const minutes = Math.floor(safe / 60);
+  const remainder = safe % 60;
+  return `${minutes}m ${String(remainder).padStart(2, '0')}s`;
+}
+
+/**
+ * Live counter for the in-flight turn. Ticks once a second from `startedAt`,
+ * which is the moment the user submitted the request.
+ */
+function useElapsedSeconds(startedAt: number | null): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (startedAt === null) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [startedAt]);
+  if (startedAt === null) return 0;
+  return Math.max(0, Math.floor((now - startedAt) / 1_000));
+}
+
+/**
+ * Progress banner shown above the composer for as long as the agent is working.
+ * It reports what the agent is doing plus how long the user has been waiting,
+ * measured from their own request rather than from the model's first token.
+ */
+function TurnProgress({
+  appearance,
+  label,
+  startedAt,
+  toolName,
+  toolProgress,
+}: {
+  appearance: Appearance;
+  label: string;
+  startedAt: number | null;
+  toolName?: string;
+  toolProgress?: string;
+}) {
+  const seconds = useElapsedSeconds(startedAt);
+  const detail = toolProgress || (toolName ? `${toolName}…` : '');
+
+  return (
+    <div
+      data-testid="agent-turn-progress"
+      role="status"
+      aria-live="polite"
+      className="mb-1 rounded-md border overflow-hidden"
+      style={{ borderColor: appearance.border, backgroundColor: appearance.surface }}
+    >
+      <div className="flex items-center gap-1.5 px-2 py-1 text-[11px]">
+        <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0 text-amber-600" />
+        <span className="font-semibold shrink-0" style={{ color: appearance.fg }}>
+          {label}
+        </span>
+        {detail && (
+          <span className="truncate" style={{ color: appearance.muted }}>
+            {detail}
+          </span>
+        )}
+        <span
+          data-testid="agent-turn-elapsed"
+          className="ml-auto shrink-0 tabular-nums"
+          style={{ color: appearance.muted }}
+          title="Elapsed since you sent this request"
+        >
+          {formatElapsed(seconds)}
+        </span>
+      </div>
+      {/* Indeterminate bar — the runtime reports no percentage, so this conveys
+          liveness rather than a completion ratio. */}
+      <div className="h-0.5 w-full overflow-hidden" style={{ backgroundColor: appearance.surfaceStrong }}>
+        <div className="h-full w-1/3 animate-agent-progress" style={{ backgroundColor: appearance.accent }} />
+      </div>
+    </div>
+  );
 }
 
 /** Short wall-clock label for a transcript entry, e.g. `14:32`. */
@@ -2558,11 +3185,12 @@ function formatFullTime(ts: number): string {
   return new Date(ts).toLocaleString();
 }
 
+/**
+ * Durations are always reported in minutes/seconds so the agent chat reads the
+ * same way everywhere — sub-second work simply rounds to `0s`.
+ */
 function formatDurationMs(ms: number): string {
-  if (ms < 1_000) return `${Math.max(0, Math.round(ms))}ms`;
-  const seconds = ms / 1_000;
-  if (seconds < 10) return `${seconds.toFixed(1)}s`;
-  return formatElapsed(Math.round(seconds));
+  return formatElapsed(Math.round(Math.max(0, ms) / 1_000));
 }
 
 /**
@@ -2578,4 +3206,3 @@ function EntryTime({ ts, durationMs }: { ts: number; durationMs?: number }) {
     </span>
   );
 }
-

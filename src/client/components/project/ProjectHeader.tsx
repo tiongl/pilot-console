@@ -2,7 +2,18 @@
 
 import { useCallback, useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
-import { Wrench, ListTodo, History, Keyboard, Bookmark, Columns2, MessageSquare, KanbanSquare, Target, CircleDot, GitPullRequest } from 'lucide-react';
+import {
+  Wrench,
+  ListTodo,
+  History,
+  Keyboard,
+  Bookmark,
+  Columns2,
+  ExternalLink,
+  Compass,
+  LayoutDashboard,
+  GitPullRequest,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -12,6 +23,7 @@ import SessionHistory from './SessionHistory';
 import SnippetPanel from './SnippetPanel';
 import { useKeyboardShortcuts, ShortcutsHelpOverlay } from './KeyboardShortcuts';
 import { GitHubProjectPicker } from '../github/GitHubProjectPicker';
+import { CreatePullRequestDialog } from '../github/CreatePullRequestDialog';
 import { useProjectSplit, isValidSplitLayout } from '../../lib/project-split-context';
 
 interface Props {
@@ -21,10 +33,12 @@ interface Props {
   children: React.ReactNode;
   todoPanel: React.ReactNode;
   onSnippetInsert?: (text: string) => void;
+  /** When rendering a worktree, enables the "Create PR" action. */
+  worktree?: { id: string; branch: string; issueNumber: number | null };
 }
 
-export default function ProjectHeader({ projectId, projectName, repoPath, children, todoPanel, onSnippetInsert }: Props) {
-  const { pathname } = useLocation();
+export default function ProjectHeader({ projectId, projectName, repoPath, children, todoPanel, onSnippetInsert, worktree }: Props) {
+  const { pathname, search } = useLocation();
   const basePath = `/projects/${projectId}`;
   const isChat = pathname.endsWith('/chat') || pathname === basePath;
   const [activePanel, setActivePanel] = useState<'none' | 'notes' | 'history' | 'snippets'>('none');
@@ -46,6 +60,7 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
   });
 
   const [showSettings, setShowSettings] = useState(false);
+  const [showCreatePR, setShowCreatePR] = useState(false);
   const [settingsName, setSettingsName] = useState('');
   const [settingsRepoPath, setSettingsRepoPath] = useState('');
   const [settingsDesc, setSettingsDesc] = useState('');
@@ -91,6 +106,10 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
     await fetch(`/api/projects/${projectId}`, { method: 'DELETE' });
     navigate('/');
   };
+
+  const openInNewTab = useCallback(() => {
+    window.open(`${pathname}${search}`, '_blank', 'noopener,noreferrer');
+  }, [pathname, search]);
 
   return (
     <div className="flex flex-col h-full">
@@ -187,6 +206,17 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
               </Button>
             </>
           )}
+          <Link to={`${basePath}/lead`}>
+            <Button
+              variant={pathname.endsWith('/lead') ? 'secondary' : 'ghost'}
+              size="sm"
+              className="h-8 gap-1.5 px-2"
+              title="Chat with Project Lead"
+            >
+              <Compass className="h-4 w-4" />
+              <span className="hidden lg:inline">Project Lead</span>
+            </Button>
+          </Link>
           <Button
             variant="ghost"
             size="icon"
@@ -196,6 +226,22 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
           >
             <Keyboard className="h-4 w-4" />
           </Button>
+          {worktree && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setShowCreatePR(true)}
+              title="Create pull request"
+            >
+              <GitPullRequest className="h-4 w-4" />
+            </Button>
+          )}
+          <Link to={`/projects/${projectId}/view/board`} title="Project view (board, issues, PRs)">
+            <Button variant="ghost" size="icon" className="h-8 w-8">
+              <LayoutDashboard className="h-4 w-4" />
+            </Button>
+          </Link>
           <Button
             variant={showSettings ? 'secondary' : 'ghost'}
             size="icon"
@@ -205,11 +251,17 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
           >
             <Wrench className="h-4 w-4" />
           </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            onClick={openInNewTab}
+            title="Open in new browser tab"
+          >
+            <ExternalLink className="h-4 w-4" />
+          </Button>
         </div>
       </div>
-
-      {/* Sub-nav tabs */}
-      <ProjectNavTabs basePath={basePath} pathname={pathname} />
 
       {/* Content area */}
       <div className="flex-1 flex flex-col overflow-hidden">
@@ -259,41 +311,17 @@ export default function ProjectHeader({ projectId, projectName, repoPath, childr
           </form>
         </DialogContent>
       </Dialog>
-    </div>
-  );
-}
 
-const NAV_TABS = [
-  { seg: 'chat', label: 'Chat', icon: MessageSquare },
-  { seg: 'board', label: 'Board', icon: KanbanSquare },
-  { seg: 'milestones', label: 'Milestones', icon: Target },
-  { seg: 'issues', label: 'Issues', icon: CircleDot },
-  { seg: 'pulls', label: 'Pull Requests', icon: GitPullRequest },
-] as const;
-
-function ProjectNavTabs({ basePath, pathname }: { basePath: string; pathname: string }) {
-  return (
-    <div className="flex items-center gap-1 border-b px-2">
-      {NAV_TABS.map(({ seg, label, icon: Icon }) => {
-        const active =
-          seg === 'chat'
-            ? pathname === basePath || pathname.endsWith('/chat')
-            : pathname.endsWith(`/${seg}`);
-        return (
-          <Link
-            key={seg}
-            to={`${basePath}/${seg}`}
-            className={`flex items-center gap-1.5 border-b-2 px-2.5 py-1.5 text-xs transition-colors ${
-              active
-                ? 'border-primary text-foreground'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            <Icon className="h-3.5 w-3.5" />
-            {label}
-          </Link>
-        );
-      })}
+      {worktree && (
+        <CreatePullRequestDialog
+          open={showCreatePR}
+          onOpenChange={setShowCreatePR}
+          projectId={projectId}
+          worktreeId={worktree.id}
+          branch={worktree.branch}
+          issueNumber={worktree.issueNumber}
+        />
+      )}
     </div>
   );
 }

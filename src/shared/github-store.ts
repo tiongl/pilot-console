@@ -1,15 +1,19 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { getDb } from './db';
-import { getProjectById } from './project-store';
+import { getProjectById, getWorktreeById } from './project-store';
 import type {
   GitHubBoard,
   GitHubBoardColumn,
   GitHubBoardItem,
   GitHubIssue,
+  GitHubIssueDetail,
   GitHubLabel,
   GitHubMilestone,
   GitHubProjectLink,
+  GitHubProjectOverview,
+  GitHubProjectView,
+  GitHubProjectViewLayout,
   GitHubProjectV2Summary,
   GitHubPullRequest,
   GitHubRepoInfo,
@@ -92,10 +96,11 @@ export async function ghJson<T>(args: string[], cwd?: string): Promise<T> {
  * Run a GraphQL query via `gh api graphql`. Field args are passed as `-F`
  * (typed) so numbers/ids serialize correctly.
  */
-export async function ghGraphql<T>(query: string, variables: Record<string, string | number> = {}): Promise<T> {
+export async function ghGraphql<T>(query: string, variables: Record<string, string | number | boolean> = {}): Promise<T> {
   const args = ['api', 'graphql', '-f', `query=${query}`];
   for (const [k, v] of Object.entries(variables)) {
-    args.push(typeof v === 'number' ? '-F' : '-f', `${k}=${v}`);
+    // `-F` typed field parses numbers/booleans; `-f` keeps raw strings.
+    args.push(typeof v === 'number' || typeof v === 'boolean' ? '-F' : '-f', `${k}=${v}`);
   }
   const res = await ghJson<{ data?: T; errors?: Array<{ message: string; type?: string }> }>(args);
   if (res.errors && res.errors.length) {
@@ -250,6 +255,43 @@ export function getDefaultProjectLink(projectId: string): GitHubProjectLink | nu
   return links.find((l) => l.isDefault) ?? links[0] ?? null;
 }
 
+/**
+ * Local, per-console-project overrides for Projects V2 view names. GitHub's API
+ * exposes no view-rename mutation (view definitions are UI-only), so a renamed
+ * view name is persisted here and applied when serving overview/view responses.
+ */
+export function getViewNameOverrides(projectId: string, ghProjectId: string): Record<number, string> {
+  const rows = getDb()
+    .prepare('SELECT view_number, name FROM project_view_names WHERE project_id = ? AND gh_project_id = ?')
+    .all(projectId, ghProjectId) as Array<{ view_number: number; name: string }>;
+  const map: Record<number, string> = {};
+  for (const r of rows) map[r.view_number] = r.name;
+  return map;
+}
+
+/** Set (or, when name is blank/null, clear) a local view-name override. */
+export function setViewNameOverride(
+  projectId: string,
+  ghProjectId: string,
+  viewNumber: number,
+  name: string | null,
+): void {
+  const db = getDb();
+  const trimmed = name?.trim();
+  if (!trimmed) {
+    db.prepare(
+      'DELETE FROM project_view_names WHERE project_id = ? AND gh_project_id = ? AND view_number = ?',
+    ).run(projectId, ghProjectId, viewNumber);
+    return;
+  }
+  db.prepare(
+    `INSERT INTO project_view_names (project_id, gh_project_id, view_number, name)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(project_id, gh_project_id, view_number)
+     DO UPDATE SET name = excluded.name, updated_at = datetime('now')`,
+  ).run(projectId, ghProjectId, viewNumber, trimmed);
+}
+
 /** Replace the set of linked Projects V2 for a console project. */
 export function setProjectLinks(
   projectId: string,
@@ -269,6 +311,61 @@ export function setProjectLinks(
   });
   tx();
   return listProjectLinks(projectId);
+}
+
+const REPO_IDS_QUERY = `query($owner:String!,$repo:String!){
+  repository(owner:$owner,name:$repo){ id owner{ id } }
+}`;
+
+const CREATE_PROJECT_MUTATION = `mutation($owner:ID!,$title:String!){
+  createProjectV2(input:{ownerId:$owner,title:$title}){
+    projectV2{ id number title url }
+  }
+}`;
+
+const LINK_PROJECT_MUTATION = `mutation($project:ID!,$repo:ID!){
+  linkProjectV2ToRepository(input:{projectId:$project,repositoryId:$repo}){
+    repository{ id }
+  }
+}`;
+
+/**
+ * Create a brand-new Projects V2 board owned by the repo owner, link it to the
+ * repository, persist the association (as the new default), and return it.
+ * Requires the `project` scope.
+ */
+export async function createLinkedProjectV2(projectId: string, title: string): Promise<GitHubProjectLink> {
+  const { owner, repo, nameWithOwner, hasProjectScope: scope } = await resolveRepo(projectId);
+  if (!scope) throw new GitHubCliError('The `project` scope is required. Run `gh auth refresh -s project`.', 'missing-scope');
+  const cleanTitle = title.trim();
+  if (!cleanTitle) throw new GitHubCliError('Project title is required', 'failed');
+
+  const ids = await ghGraphql<{ repository: { id: string; owner: { id: string } } | null }>(REPO_IDS_QUERY, { owner, repo });
+  if (!ids.repository) throw new GitHubCliError('Repository not found', 'not-found');
+
+  const created = await ghGraphql<{ createProjectV2: { projectV2: { id: string; number: number; title: string; url: string } } }>(
+    CREATE_PROJECT_MUTATION,
+    { owner: ids.repository.owner.id, title: cleanTitle },
+  );
+  const proj = created.createProjectV2.projectV2;
+
+  await ghGraphql(LINK_PROJECT_MUTATION, { project: proj.id, repo: ids.repository.id });
+
+  const existing = listProjectLinks(projectId).map((l) => ({
+    ghProjectId: l.ghProjectId,
+    ghProjectNumber: l.ghProjectNumber,
+    title: l.title,
+    isDefault: false,
+  }));
+  const links = setProjectLinks(projectId, [
+    ...existing,
+    { ghProjectId: proj.id, ghProjectNumber: proj.number, title: proj.title, isDefault: true },
+  ]);
+
+  invalidateCache(`linked-projects:${nameWithOwner}`);
+  const newLink = links.find((l) => l.ghProjectId === proj.id);
+  if (!newLink) throw new GitHubCliError('Failed to persist project link', 'failed');
+  return newLink;
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +444,54 @@ export async function listIssues(projectId: string, force = false): Promise<GitH
   }, force);
 }
 
+/** Fetch a single issue with its full body (markdown) for the detail view. */
+export async function getIssueDetail(projectId: string, number: number, force = false): Promise<GitHubIssueDetail> {
+  const { nameWithOwner } = await resolveRepo(projectId);
+  return cached(`issue:${nameWithOwner}:${number}`, READ_TTL_MS, async () => {
+    interface Raw {
+      number: number; title: string; state: string; url: string; body: string | null;
+      author: RawAuthor | null; assignees: RawAuthor[]; labels: RawLabel[];
+      milestone: RawMilestone | null; comments: unknown; createdAt: string; updatedAt: string;
+    }
+    const i = await ghJson<Raw>([
+      'issue', 'view', String(number), '-R', nameWithOwner,
+      '--json', 'number,title,state,url,body,author,assignees,labels,milestone,comments,createdAt,updatedAt',
+    ]);
+    return {
+      number: i.number,
+      title: i.title,
+      state: normState(i.state),
+      url: i.url,
+      body: i.body ?? '',
+      author: userRef(i.author?.login),
+      assignees: normAssignees(i.assignees),
+      labels: normLabels(i.labels),
+      milestone: i.milestone?.title ?? null,
+      comments: Array.isArray(i.comments) ? i.comments.length : typeof i.comments === 'number' ? i.comments : 0,
+      createdAt: i.createdAt,
+      updatedAt: i.updatedAt,
+    };
+  }, force);
+}
+
+/** Update an issue's title and/or body via the REST API. Invalidates caches. */
+export async function updateIssue(
+  projectId: string,
+  number: number,
+  fields: { title?: string; body?: string },
+): Promise<void> {
+  const { owner, repo, nameWithOwner } = await resolveRepo(projectId);
+  if (typeof fields.title !== 'string' && typeof fields.body !== 'string') {
+    throw new GitHubCliError('No fields to update', 'failed');
+  }
+  const args = ['api', `repos/${owner}/${repo}/issues/${number}`, '-X', 'PATCH'];
+  if (typeof fields.title === 'string') args.push('-f', `title=${fields.title}`);
+  if (typeof fields.body === 'string') args.push('-f', `body=${fields.body}`);
+  await ghJson(args);
+  invalidateCache(`issue:${nameWithOwner}:${number}`);
+  invalidateCache(`issues:${nameWithOwner}`);
+}
+
 export async function listPullRequests(projectId: string, force = false): Promise<GitHubPullRequest[]> {
   const { nameWithOwner } = await resolveRepo(projectId);
   return cached(`pulls:${nameWithOwner}`, READ_TTL_MS, async () => {
@@ -390,7 +535,7 @@ function normPull(p: RawPull): GitHubPullRequest {
 const LINKED_PROJECTS_QUERY = `query($owner:String!,$repo:String!){
   repository(owner:$owner,name:$repo){
     projectsV2(first:20,orderBy:{field:TITLE,direction:ASC}){
-      nodes{ id number title url closed owner{ __typename ... on User{login} ... on Organization{login} } }
+      nodes{ id number title url closed public owner{ __typename ... on User{login} ... on Organization{login} } }
     }
   }
 }`;
@@ -401,7 +546,7 @@ export async function listLinkedProjectsV2(projectId: string, force = false): Pr
   return cached(`linked-projects:${nameWithOwner}`, READ_TTL_MS, async () => {
     interface Resp {
       repository: { projectsV2: { nodes: Array<{
-        id: string; number: number; title: string; url: string; closed: boolean;
+        id: string; number: number; title: string; url: string; closed: boolean; public: boolean;
         owner: { login?: string };
       }> } } | null;
     }
@@ -413,6 +558,7 @@ export async function listLinkedProjectsV2(projectId: string, force = false): Pr
       title: n.title,
       url: n.url,
       closed: n.closed,
+      public: Boolean(n.public),
       ownerLogin: n.owner?.login ?? '',
     }));
   }, force);
@@ -521,11 +667,311 @@ export async function getBoard(projectId: string, ghProjectId: string, force = f
         assignees: normAssignees(c?.assignees?.nodes),
         labels: normLabels(c?.labels?.nodes),
         linkedPullRequests,
+        fields: {},
+        startDate: null,
+        targetDate: null,
       };
     });
 
     return { projectId: ghProjectId, projectNumber: number, title, statusFieldId, columns, items };
   }, force);
+}
+
+// ---------------------------------------------------------------------------
+// Project overview + saved views (Projects V2 "views" honoring their layout)
+// ---------------------------------------------------------------------------
+
+function normLayout(raw: string | undefined): GitHubProjectViewLayout {
+  const v = (raw ?? '').toUpperCase();
+  if (v.startsWith('TABLE')) return 'table';
+  if (v.startsWith('ROADMAP')) return 'roadmap';
+  return 'board';
+}
+
+const PROJECT_OVERVIEW_QUERY = `query($id:ID!){
+  node(id:$id){ ... on ProjectV2 {
+    id number title shortDescription public url viewerCanUpdate
+    views(first:20){ nodes{
+      id number name layout
+      verticalGroupByFields(first:1){ nodes{ ... on ProjectV2FieldCommon { name } } }
+      groupByFields(first:1){ nodes{ ... on ProjectV2FieldCommon { name } } }
+    } }
+  } }
+}`;
+
+interface RawViewNode {
+  id: string; number: number; name: string; layout: string;
+  verticalGroupByFields?: { nodes: Array<{ name?: string }> };
+  groupByFields?: { nodes: Array<{ name?: string }> };
+}
+
+function viewGroupField(v: RawViewNode, layout: GitHubProjectViewLayout): string | null {
+  const vertical = v.verticalGroupByFields?.nodes?.[0]?.name;
+  const horizontal = v.groupByFields?.nodes?.[0]?.name;
+  // Board/roadmap group into columns/swimlanes vertically; table groups rows.
+  return (layout === 'table' ? horizontal ?? vertical : vertical ?? horizontal) ?? null;
+}
+
+/** Fetch a Projects V2 project's metadata + its saved views. */
+export async function getProjectOverview(projectId: string, ghProjectId: string, force = false): Promise<GitHubProjectOverview> {
+  const { hasProjectScope: scope } = await resolveRepo(projectId);
+  if (!scope) throw new GitHubCliError('The `project` scope is required. Run `gh auth refresh -s project`.', 'missing-scope');
+  return cached(`overview:${ghProjectId}`, READ_TTL_MS, async () => {
+    interface Resp {
+      node: {
+        id: string; number: number; title: string; shortDescription: string | null;
+        public: boolean; url: string; viewerCanUpdate: boolean;
+        views: { nodes: RawViewNode[] };
+      } | null;
+    }
+    const data = await ghGraphql<Resp>(PROJECT_OVERVIEW_QUERY, { id: ghProjectId });
+    if (!data.node) throw new GitHubCliError('Project not found', 'not-found');
+    const n = data.node;
+    return {
+      id: n.id,
+      number: n.number,
+      title: n.title,
+      shortDescription: n.shortDescription ?? null,
+      public: Boolean(n.public),
+      url: n.url,
+      viewerCanUpdate: Boolean(n.viewerCanUpdate),
+      views: n.views.nodes.map((v) => {
+        const layout = normLayout(v.layout);
+        return { id: v.id, number: v.number, name: v.name, layout, groupByField: viewGroupField(v, layout) };
+      }),
+    };
+  }, force);
+}
+
+const VIEW_FIELDS_QUERY = `query($id:ID!){
+  node(id:$id){ ... on ProjectV2 {
+    number title
+    fields(first:50){ nodes{ __typename ... on ProjectV2SingleSelectField { id name options{ id name } } } }
+    views(first:20){ nodes{
+      number name layout
+      verticalGroupByFields(first:1){ nodes{ ... on ProjectV2FieldCommon { name } } }
+      groupByFields(first:1){ nodes{ ... on ProjectV2FieldCommon { name } } }
+    } }
+  } }
+}`;
+
+const VIEW_ITEMS_QUERY = `query($id:ID!,$cursor:String){
+  node(id:$id){ ... on ProjectV2 {
+    items(first:50,after:$cursor){
+      pageInfo{ hasNextPage endCursor }
+      nodes{
+        id
+        fieldValues(first:30){ nodes{
+          __typename
+          ... on ProjectV2ItemFieldSingleSelectValue { name field{ ... on ProjectV2FieldCommon { name } } }
+          ... on ProjectV2ItemFieldTextValue { text field{ ... on ProjectV2FieldCommon { name } } }
+          ... on ProjectV2ItemFieldNumberValue { number field{ ... on ProjectV2FieldCommon { name } } }
+          ... on ProjectV2ItemFieldDateValue { date field{ ... on ProjectV2FieldCommon { name } } }
+          ... on ProjectV2ItemFieldIterationValue { title startDate duration field{ ... on ProjectV2FieldCommon { name } } }
+          ... on ProjectV2ItemFieldMilestoneValue { milestone{ title dueOn } field{ ... on ProjectV2FieldCommon { name } } }
+        } }
+        content{
+          __typename
+          ... on Issue { number title url state assignees(first:10){nodes{login}} labels(first:10){nodes{name color}} closedByPullRequestsReferences(first:10){ nodes{ number title url state isDraft author{login} createdAt updatedAt } } }
+          ... on PullRequest { number title url state isDraft author{login} assignees(first:10){nodes{login}} labels(first:10){nodes{name color}} createdAt updatedAt }
+          ... on DraftIssue { title }
+        }
+      }
+    }
+  } }
+}`;
+
+interface RawFieldValue {
+  __typename: string;
+  name?: string; text?: string; number?: number; date?: string;
+  title?: string; startDate?: string; duration?: number;
+  milestone?: { title?: string; dueOn?: string };
+  field?: { name?: string };
+}
+
+function addDays(iso: string, days: number): string {
+  const d = new Date(iso);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Reduce an item's raw field values into a display map + roadmap dates. */
+function collapseFieldValues(values: RawFieldValue[]): {
+  fields: Record<string, string>;
+  byField: Map<string, RawFieldValue>;
+  startDate: string | null;
+  targetDate: string | null;
+} {
+  const fields: Record<string, string> = {};
+  const byField = new Map<string, RawFieldValue>();
+  let startDate: string | null = null;
+  let targetDate: string | null = null;
+  for (const v of values) {
+    const fname = v.field?.name;
+    if (!fname) continue;
+    let display: string | null = null;
+    switch (v.__typename) {
+      case 'ProjectV2ItemFieldSingleSelectValue': display = v.name ?? null; break;
+      case 'ProjectV2ItemFieldTextValue': display = v.text ?? null; break;
+      case 'ProjectV2ItemFieldNumberValue': display = v.number != null ? String(v.number) : null; break;
+      case 'ProjectV2ItemFieldDateValue':
+        display = v.date ?? null;
+        if (v.date) {
+          if (/start/i.test(fname)) startDate = v.date;
+          else if (/target|due|end|ship/i.test(fname)) targetDate = v.date;
+          else if (!startDate) startDate = v.date;
+        }
+        break;
+      case 'ProjectV2ItemFieldIterationValue':
+        display = v.title ?? null;
+        if (v.startDate) { startDate = v.startDate; if (v.duration) targetDate = addDays(v.startDate, v.duration); }
+        break;
+      case 'ProjectV2ItemFieldMilestoneValue':
+        display = v.milestone?.title ?? null;
+        if (v.milestone?.dueOn && !targetDate) targetDate = v.milestone.dueOn.slice(0, 10);
+        break;
+    }
+    if (display != null) { fields[fname] = display; byField.set(fname, v); }
+  }
+  return { fields, byField, startDate, targetDate };
+}
+
+interface RawItemNode {
+  id: string;
+  fieldValues: { nodes: RawFieldValue[] };
+  content: BoardContent | null;
+}
+
+/**
+ * Resolve a single saved view of a Projects V2 project into columns + items,
+ * honoring the view's layout and its group-by field. Board/roadmap group by a
+ * single-select field (columns); table returns ungrouped rows. Items carry a
+ * generic field-value map plus roadmap start/target dates.
+ */
+export async function getProjectView(
+  projectId: string,
+  ghProjectId: string,
+  viewNumber: number,
+  force = false,
+): Promise<GitHubProjectView> {
+  const { hasProjectScope: scope } = await resolveRepo(projectId);
+  if (!scope) throw new GitHubCliError('The `project` scope is required. Run `gh auth refresh -s project`.', 'missing-scope');
+  return cached(`view:${ghProjectId}:${viewNumber}`, READ_TTL_MS, async () => {
+    interface MetaResp {
+      node: {
+        number: number; title: string;
+        fields: { nodes: BoardField[] };
+        views: { nodes: RawViewNode[] };
+      } | null;
+    }
+    const meta = await ghGraphql<MetaResp>(VIEW_FIELDS_QUERY, { id: ghProjectId });
+    if (!meta.node) throw new GitHubCliError('Project not found', 'not-found');
+    const view = meta.node.views.nodes.find((v) => v.number === viewNumber);
+    if (!view) throw new GitHubCliError('View not found', 'not-found');
+    const layout = normLayout(view.layout);
+
+    const singles = meta.node.fields.nodes.filter((f) => f.__typename === 'ProjectV2SingleSelectField');
+    const groupName = viewGroupField(view, layout) ?? 'Status';
+    const groupField =
+      singles.find((f) => (f.name ?? '').toLowerCase() === groupName.toLowerCase()) ??
+      singles.find((f) => (f.name ?? '').toLowerCase() === 'status') ??
+      undefined;
+    const groupFieldId = groupField?.id ?? null;
+    const groupFieldName = groupField?.name ?? null;
+    const columns: GitHubBoardColumn[] = (groupField?.options ?? []).map((o) => ({ id: o.id, name: o.name }));
+
+    // Paginate items.
+    const rawItems: RawItemNode[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 20; page++) {
+      const vars: Record<string, string> = { id: ghProjectId };
+      if (cursor) vars.cursor = cursor;
+      interface ItemsResp {
+        node: { items: { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: RawItemNode[] } } | null;
+      }
+      const data = await ghGraphql<ItemsResp>(VIEW_ITEMS_QUERY, vars);
+      if (!data.node) break;
+      rawItems.push(...data.node.items.nodes);
+      if (!data.node.items.pageInfo.hasNextPage) break;
+      cursor = data.node.items.pageInfo.endCursor;
+      if (!cursor) break;
+    }
+
+    const items: GitHubBoardItem[] = rawItems.map((it) => {
+      const c = it.content;
+      const { fields, startDate, targetDate } = collapseFieldValues(it.fieldValues.nodes);
+      const contentType = (c?.__typename ?? 'DraftIssue') as GitHubBoardItem['contentType'];
+      const linkedPullRequests: GitHubPullRequest[] =
+        c?.__typename === 'PullRequest'
+          ? [normPull({
+              number: c.number!, title: c.title ?? '', state: c.state ?? 'OPEN', isDraft: Boolean(c.isDraft),
+              url: c.url ?? '', author: c.author ?? null, labels: c.labels?.nodes, createdAt: c.createdAt ?? '', updatedAt: c.updatedAt ?? '',
+            })]
+          : c?.__typename === 'Issue'
+            ? (c.closedByPullRequestsReferences?.nodes ?? []).map(normPull)
+            : [];
+      return {
+        itemId: it.id,
+        contentType,
+        title: c?.title ?? '(draft)',
+        number: c?.number ?? null,
+        url: c?.url ?? null,
+        state: c?.state ? normState(c.state) : null,
+        status: groupFieldName ? fields[groupFieldName] ?? null : null,
+        assignees: normAssignees(c?.assignees?.nodes),
+        labels: normLabels(c?.labels?.nodes),
+        linkedPullRequests,
+        fields,
+        startDate,
+        targetDate,
+      };
+    });
+
+    return {
+      projectId: ghProjectId,
+      projectNumber: meta.node.number,
+      viewNumber,
+      name: view.name,
+      layout,
+      groupFieldId,
+      groupFieldName,
+      columns,
+      items,
+    };
+  }, force);
+}
+
+const UPDATE_PROJECT_META_MUTATION_FIELDS: Record<string, { decl: string; input: string }> = {
+  title: { decl: '$title:String', input: 'title:$title' },
+  shortDescription: { decl: '$shortDescription:String', input: 'shortDescription:$shortDescription' },
+  public: { decl: '$public:Boolean', input: 'public:$public' },
+};
+
+/** Update a Projects V2 project's title, description, and/or visibility. */
+export async function updateProjectMeta(
+  projectId: string,
+  ghProjectId: string,
+  patch: { title?: string; shortDescription?: string; public?: boolean },
+): Promise<void> {
+  const { hasProjectScope: scope } = await resolveRepo(projectId);
+  if (!scope) throw new GitHubCliError('The `project` scope is required. Run `gh auth refresh -s project`.', 'missing-scope');
+  const decls = ['$id:ID!'];
+  const inputs = ['projectId:$id'];
+  const vars: Record<string, string | number | boolean> = { id: ghProjectId };
+  for (const [key, val] of Object.entries(patch)) {
+    if (val === undefined) continue;
+    const spec = UPDATE_PROJECT_META_MUTATION_FIELDS[key];
+    if (!spec) continue;
+    decls.push(spec.decl);
+    inputs.push(spec.input);
+    vars[key] = val as string | boolean;
+  }
+  if (inputs.length === 1) throw new GitHubCliError('No project fields to update', 'failed');
+  const mutation = `mutation(${decls.join(',')}){ updateProjectV2(input:{${inputs.join(',')}}){ projectV2{ id } } }`;
+  await ghGraphql(mutation, vars);
+  invalidateCache(`overview:${ghProjectId}`);
+  invalidateCache(`view:${ghProjectId}`);
+  invalidateCache('linked-projects:');
 }
 
 // ---------------------------------------------------------------------------
@@ -634,4 +1080,60 @@ export async function removeBoardItem(projectId: string, ghProjectId: string, it
   if (!scope) throw new GitHubCliError('The `project` scope is required. Run `gh auth refresh -s project`.', 'missing-scope');
   await ghGraphql(DELETE_ITEM_MUTATION, { project: ghProjectId, item: itemId });
   invalidateCache(`board:${ghProjectId}`);
+}
+
+// ---------------------------------------------------------------------------
+// Pull request creation (integrated issue → worktree → PR workflow)
+// ---------------------------------------------------------------------------
+
+async function gitInDir(cwd: string, args: string[]): Promise<void> {
+  await execFileAsync('git', args, { cwd, timeout: 60_000, encoding: 'utf8' });
+}
+
+/**
+ * Push a worktree's branch and open a pull request for it. When the worktree is
+ * linked to an issue, `Closes #<n>` is appended to the body (unless already
+ * present). Returns the new PR's number and URL.
+ */
+export async function createPullRequest(
+  projectId: string,
+  worktreeId: string,
+  opts: { title: string; body?: string; draft?: boolean; base?: string },
+): Promise<{ number: number; url: string }> {
+  const project = getProjectById(projectId);
+  if (!project) throw new GitHubCliError('Project not found', 'not-found');
+  const wt = getWorktreeById(worktreeId);
+  if (!wt || wt.projectId !== projectId) throw new GitHubCliError('Worktree not found', 'not-found');
+  const { nameWithOwner } = await resolveRepo(projectId);
+
+  const title = opts.title.trim();
+  if (!title) throw new GitHubCliError('PR title is required', 'failed');
+
+  let body = opts.body ?? '';
+  if (wt.issueNumber && !new RegExp(`(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#${wt.issueNumber}\\b`, 'i').test(body)) {
+    body = `${body}${body ? '\n\n' : ''}Closes #${wt.issueNumber}`;
+  }
+
+  // Ensure the branch exists on the remote so gh can open the PR.
+  try {
+    await gitInDir(wt.worktreePath, ['push', '-u', 'origin', `HEAD:${wt.branch}`]);
+  } catch (err) {
+    throw classifyGhError((err as { stderr?: string }).stderr ?? '', err);
+  }
+
+  const args = [
+    'pr', 'create', '-R', nameWithOwner,
+    '--head', wt.branch,
+    '--title', title,
+    '--body', body,
+  ];
+  if (opts.base) args.push('--base', opts.base);
+  if (opts.draft) args.push('--draft');
+
+  const out = await ghRaw(args, wt.worktreePath);
+  const urlMatch = out.match(/https?:\/\/\S+\/pull\/(\d+)/);
+  const url = urlMatch ? urlMatch[0] : out.trim();
+  const number = urlMatch ? Number(urlMatch[1]) : 0;
+  invalidateCache(`pulls:${nameWithOwner}`);
+  return { number, url };
 }

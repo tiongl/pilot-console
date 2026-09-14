@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Bot, Terminal, Sparkles } from 'lucide-react';
+import { Bot, Terminal, SquareTerminal, Sparkles } from 'lucide-react';
 
-export type TabMode = 'cli' | 'shell' | 'powershell' | 'agent';
+export type TabMode = 'cli' | 'cli-classic' | 'shell' | 'powershell' | 'agent';
 
 interface NewTabMenuProps {
   onSelect: (mode: TabMode) => void;
@@ -49,6 +49,9 @@ export default function NewTabMenu({ onSelect }: NewTabMenuProps) {
         >
           <button onClick={() => { onSelect('cli'); setOpen(false); }} className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground flex items-center gap-2" data-testid="menu-cli">
             <Bot className="h-3 w-3" /> Copilot CLI
+          </button>
+          <button onClick={() => { onSelect('cli-classic'); setOpen(false); }} className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground flex items-center gap-2" data-testid="menu-cli-classic" title="Copilot CLI with an accurate terminal identity (TERM=xterm-256color) instead of the compatibility default — fixes scrollback/redraw glitches at the cost of re-exposing any TUI rendering bugs the default was working around.">
+            <SquareTerminal className="h-3 w-3" /> Copilot CLI (classic terminal)
           </button>
           <button onClick={() => { onSelect('agent'); setOpen(false); }} className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground flex items-center gap-2" data-testid="menu-agent">
             <Sparkles className="h-3 w-3" /> Copilot Agent

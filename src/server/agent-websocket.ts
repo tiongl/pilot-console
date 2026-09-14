@@ -7,6 +7,7 @@ import {
   findAgentSession,
   subscribe,
   getReplay,
+  getEarlierReplay,
   getPendingAgentMessages,
   reconcileAgentSession,
   sendAgentMessage,
@@ -15,6 +16,7 @@ import {
   setAgentMode,
   respondToPermission,
   respondToExitPlan,
+  respondToAskUser,
   isAllowAllPermissions,
   setAllowAllPermissions,
   listAgentCommands,
@@ -22,12 +24,15 @@ import {
   listAgentSessionSummaries,
   resumeAgentSession,
   resumeBestAgentSessionForWorkspace,
+  getOrCreatePersistentLeadSession,
   getAgentDiff,
   shareAgentSession,
   getAgentShareStatus,
   getAgentUsage,
+  getQueuedPrompts,
+  dequeuePrompt,
 } from '../shared/agent-bridge';
-import type { AgentClientMessage, AgentServerMessage } from '../shared/types';
+import type { AgentClientMessage, AgentServerMessage, AgentSessionKind } from '../shared/types';
 
 interface AuthedAgentSocket extends WebSocket {
   userId?: string;
@@ -87,6 +92,10 @@ export function setupAgentWebSocketServer(): WebSocketServer {
     const requestedSessionId = url.searchParams.get('sessionId');
     const forceNew = url.searchParams.get('new') === 'true';
     const model = url.searchParams.get('model') || undefined;
+    const requestedKind = url.searchParams.get('kind');
+    const kind: AgentSessionKind = requestedKind === 'project_lead' || requestedKind === 'chief_of_staff'
+      ? requestedKind
+      : 'agent';
 
     const send = (msg: AgentServerMessage) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
@@ -111,17 +120,33 @@ export function setupAgentWebSocketServer(): WebSocketServer {
         }
       }
     } else if (forceNew) {
-      session = await createSafe(ws, ws.userId, projectId, worktreeId, model);
+      session = await createSafe(ws, ws.userId, projectId, worktreeId, model, kind);
       if (!session) return;
     } else {
-      session = findAgentSession(ws.userId, projectId ?? null, worktreeId ?? null);
+      session = findAgentSession(ws.userId, projectId ?? null, worktreeId ?? null, kind);
       if (!session) {
-        session = await resumeBestAgentSessionForWorkspace(ws.userId, projectId ?? null, worktreeId ?? null);
-        if (!session) {
-          session = await createSafe(ws, ws.userId, projectId, worktreeId, model);
+        if (kind === 'agent') {
+          session = await resumeBestAgentSessionForWorkspace(ws.userId, projectId ?? null, worktreeId ?? null);
+        } else {
+          session = await createPersistentLeadSafe(
+            ws,
+            ws.userId,
+            kind === 'project_lead' ? projectId : null,
+            kind,
+            model,
+          );
+          if (!session) return;
+        }
+        if (!session && kind === 'agent') {
+          session = await createSafe(ws, ws.userId, projectId, worktreeId, model, kind);
           if (!session) return;
         }
       }
+    }
+
+    if (!session) {
+      ws.close(4002, 'Failed to restore session');
+      return;
     }
 
     const sessionId = session.sessionId;
@@ -135,8 +160,9 @@ export function setupAgentWebSocketServer(): WebSocketServer {
       model: session.model,
       mode: session.mode,
       status: session.status,
+      turnStartedAt: session.turnStartTs,
     });
-    send({ type: 'replay', events: getReplay(sessionId) });
+    send({ type: 'replay', ...getReplay(sessionId) });
     for (const message of getPendingAgentMessages(sessionId)) send(message);
     void reconcileAgentSession(sessionId);
 
@@ -144,6 +170,7 @@ export function setupAgentWebSocketServer(): WebSocketServer {
     send({ type: 'share_status', status: getAgentShareStatus(sessionId) });
     send({ type: 'allow_all', enabled: isAllowAllPermissions(sessionId) });
     send({ type: 'usage', usage: getAgentUsage(sessionId) });
+    send({ type: 'queued', prompts: getQueuedPrompts(sessionId) });
 
     // Push the dynamic slash-command catalog (plugin/skill-aware).
     listAgentCommands(sessionId)
@@ -173,11 +200,17 @@ export function setupAgentWebSocketServer(): WebSocketServer {
         case 'exit_plan_response':
           respondToExitPlan(sessionId, msg.requestId, msg.action);
           break;
+        case 'ask_user_response':
+          respondToAskUser(sessionId, msg.requestId, msg.answer);
+          break;
         case 'set_mode':
           setAgentMode(sessionId, msg.mode);
           break;
         case 'set_model':
           await setAgentModel(sessionId, msg.model);
+          break;
+        case 'dequeue':
+          dequeuePrompt(sessionId, msg.index);
           break;
         case 'list_commands':
           send({ type: 'commands', commands: await listAgentCommands(sessionId) });
@@ -200,7 +233,10 @@ export function setupAgentWebSocketServer(): WebSocketServer {
           send({ type: 'share_status', status: getAgentShareStatus(sessionId) });
           break;
         case 'replay':
-          send({ type: 'replay', events: getReplay(sessionId) });
+          send({ type: 'replay', ...getReplay(sessionId) });
+          break;
+        case 'fetch_earlier':
+          send({ type: 'earlier', ...getEarlierReplay(sessionId, msg.beforeId) });
           break;
       }
     });
@@ -213,15 +249,35 @@ export function setupAgentWebSocketServer(): WebSocketServer {
   return wss;
 }
 
+async function createPersistentLeadSafe(
+  ws: AuthedAgentSocket,
+  userId: string,
+  projectId: string | null,
+  kind: Extract<AgentSessionKind, 'project_lead' | 'chief_of_staff'>,
+  model?: string,
+) {
+  try {
+    return await getOrCreatePersistentLeadSession(userId, projectId, kind, model);
+  } catch (err) {
+    console.error(`[agent-ws] failed to restore ${kind} session:`, err);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Failed to restore lead session. Check Copilot CLI auth.' } satisfies AgentServerMessage));
+    }
+    ws.close(4002, 'Failed to restore lead session');
+    return undefined;
+  }
+}
+
 async function createSafe(
   ws: AuthedAgentSocket,
   userId: string,
   projectId: string | null,
   worktreeId: string | null,
   model?: string,
+  kind: AgentSessionKind = 'agent',
 ) {
   try {
-    return await createAgentSession(userId, projectId, worktreeId, model);
+    return await createAgentSession(userId, projectId, worktreeId, model, kind);
   } catch (err) {
     console.error('[agent-ws] failed to create agent session:', err);
     if (ws.readyState === WebSocket.OPEN) {

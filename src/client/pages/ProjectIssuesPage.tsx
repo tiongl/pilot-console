@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
-import { useParams } from 'react-router';
-import { CircleDot, MessageSquare } from 'lucide-react';
+import { Link, useParams } from 'react-router';
+import { CircleDot, MessageSquare, Play, Loader2 } from 'lucide-react';
 import { useGitHubResource } from '../hooks/useGitHubResource';
+import { useStartIssueSession } from '../hooks/useStartIssueSession';
 import { GitHubViewShell } from '../components/github/GitHubViewShell';
 import { Input } from '@/components/ui/input';
 import {
@@ -19,6 +20,7 @@ export default function ProjectIssuesPage() {
   const { id = '' } = useParams<{ id: string }>();
   const { data, loading, loaded, error, refresh } = useGitHubResource<{ issues: GitHubIssue[] }>(id, '/issues');
   const issues = data?.issues ?? [];
+  const { start, startingIssue } = useStartIssueSession(id);
 
   const [stateFilter, setStateFilter] = useState<StateFilter>('open');
   const [labelFilter, setLabelFilter] = useState('all');
@@ -61,9 +63,9 @@ export default function ProjectIssuesPage() {
             <div key={i.number} className="flex items-start gap-3 p-3">
               <CircleDot className={`mt-0.5 h-4 w-4 shrink-0 ${i.state === 'open' ? 'text-green-600' : 'text-purple-500'}`} />
               <div className="min-w-0 flex-1">
-                <a href={i.url} target="_blank" rel="noreferrer" className="font-medium hover:underline">
+                <Link to={`/projects/${id}/view/issues/${i.number}`} className="font-medium hover:underline">
                   {i.title}
-                </a>
+                </Link>
                 <span className="ml-1 text-xs text-muted-foreground">#{i.number}</span>
                 <div className="mt-1 flex flex-wrap items-center gap-1.5">
                   {i.labels.map((l) => (
@@ -82,6 +84,22 @@ export default function ProjectIssuesPage() {
                   <MessageSquare className="h-3.5 w-3.5" />
                   {i.comments}
                 </div>
+              )}
+              {i.state === 'open' && (
+                <button
+                  type="button"
+                  onClick={() => start(i.number)}
+                  disabled={startingIssue === i.number}
+                  className="inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs text-muted-foreground transition-colors hover:border-primary hover:text-primary disabled:opacity-50"
+                  title="Work locally: create a worktree branch and launch a Copilot session seeded from this issue"
+                >
+                  {startingIssue === i.number ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Play className="h-3.5 w-3.5" />
+                  )}
+                  Work locally
+                </button>
               )}
             </div>
           ))}

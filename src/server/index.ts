@@ -10,22 +10,49 @@ import { promisify } from 'util';
 import { parse } from 'url';
 import { requireAuth, SESSION_COOKIE, createSession, destroySession, getUserFromToken } from './middleware/auth';
 import { getGitHubCliProfile } from '../shared/gh-cli-auth';
+import {
+  listMarketplaces as libListMarketplaces,
+  browsePlugins as libBrowsePlugins,
+  listInstalledPlugins as libListInstalledPlugins,
+  installPlugin as libInstallPlugin,
+  uninstallPlugin as libUninstallPlugin,
+} from '../shared/skill-catalog';
 import { upsertUser, listUsers, updateUserRole, deleteUser } from '../shared/user-store';
-import { createProject, listProjects, getProjectById, updateProject, deleteProject, addSkill, listSkills, updateSkill, deleteSkill, listWorktrees, createWorktree, attachExistingWorktree, attachSubnode, getWorktreeById, deleteWorktree } from '../shared/project-store';
+import { createProject, listProjects, getProjectById, updateProject, deleteProject, addSkill, listSkills, updateSkill, deleteSkill, listWorktrees, createWorktree, attachExistingWorktree, attachSubnode, getWorktreeById, consumeWorktreeSeed } from '../shared/project-store';
+import { assessWorktreeCleanup, closeWorktree } from '../shared/worktree-cleanup';
+import { createTodo, deleteTodo, listTodos, updateTodo } from '../shared/todo-store';
 import { listSessionsForUser, listAllSessions, getCopilotSessionDetail, listCopilotSessionsForProject } from '../shared/session-store';
 import { setupWebSocketServer } from './websocket';
 import { setupAgentWebSocketServer } from './agent-websocket';
-import { listAgentModels, detachAgentBridge } from '../shared/agent-bridge';
+import { setupServerWebSocketServer } from './server-websocket';
+import { listServersByProject, getServerById, deleteServer } from '../shared/server-store';
+import { stopServer, restartServer, isServerActive } from '../shared/server-runtime';
+import { listArtifactsByProject, getArtifactById, deleteArtifact } from '../shared/lavish-store';
+import { stopLavishArtifact } from '../shared/lavish-runtime';
+import { lavishProxyMiddleware, handleLavishUpgrade } from './lavish-proxy';
+import { listAgentModels, detachAgentBridge, listLiveAgentSessions } from '../shared/agent-bridge';
 import { getAllSessions, getAllSessionsWithExited, getSessionStatus, endCliSession, endSessionByProject, initDaemonBridge } from '../shared/cli-bridge';
 import { getDb } from '../shared/db';
+import { getDigest, listDigests, bootstrapDigest, reconcileDigest } from '../shared/digest-store';
+import { listMergeRequests, getMergeRequest, setMergePriority, resolveMergeRequest, releaseMergeLock, getMergeLock, executeApprovedMerge } from '../shared/merge-store';
+import { getOrBootstrapProjectMemory, refreshProjectMemory } from '../shared/project-memory-store';
+import { listCosBriefings, listCosBriefingsForProject } from '../shared/cos-briefing-store';
+import { listDelegations, listAllDelegations, clearDelegationUnread, unreadDelegationCounts } from '../shared/delegation-store';
 import { revealPathInFileSystem } from './file-system';
 import scheduleRoutes from './routes/schedules';
 import githubRoutes from './routes/github';
 import { startScheduler } from './scheduler';
+import { startDelegationMonitor } from './delegation-monitor';
 import { startLagMonitor, getPerfSnapshot, recordApiCall } from './perf-monitor';
 import './renderers'; // register built-in renderers
 
 const app = express();
+
+// The Lavish reverse proxy must forward the RAW request body to the Lavish
+// daemon, so it is mounted before express.json() (which would otherwise consume
+// the body). It authenticates via the session cookie internally.
+app.use('/api/lavish/:artifactId', lavishProxyMiddleware);
+
 app.use(express.json());
 app.use(cookieParser());
 
@@ -95,6 +122,51 @@ app.get('/api/projects', (req, res) => {
   const db = getDb();
   const projects = db.prepare('SELECT id, name, repo_path as repoPath, description, pinned, sort_order as sortOrder, created_at as createdAt FROM projects ORDER BY pinned DESC, sort_order, name').all();
   res.json({ projects });
+});
+
+app.get('/api/chief-of-staff/overview', (_req, res) => {
+  const db = getDb();
+  const projects = db.prepare('SELECT id, name FROM projects ORDER BY name').all() as Array<{ id: string; name: string }>;
+  const projectNames = new Map(projects.map((project) => [project.id, project.name]));
+  const workers = listLiveAgentSessions()
+    .filter((session) => session.kind === 'agent' && session.worktreeId)
+    .map((session) => ({
+      ...session,
+      projectName: session.projectId ? projectNames.get(session.projectId) ?? session.projectId : 'Unknown project',
+    }));
+  const leadSessions = listLiveAgentSessions()
+    .filter((session) => session.kind === 'project_lead')
+    .map((session) => ({
+      ...session,
+      projectName: session.projectId ? projectNames.get(session.projectId) ?? session.projectId : 'Unknown project',
+    }));
+  const digests = db.prepare(`
+    SELECT d.worktree_id as worktreeId, d.project_id as projectId, w.name as worktreeName,
+           d.headline, d.status, d.detail, d.updated_at as updatedAt
+    FROM agent_digests d
+    JOIN worktrees w ON w.id = d.worktree_id
+    ORDER BY d.updated_at DESC
+    LIMIT 50
+  `).all() as Array<Record<string, unknown>>;
+  const threads = db.prepare(`
+    SELECT dt.id, dt.project_id as projectId, p.name as projectName, dt.title,
+           dt.question, dt.status, dt.updated_at as updatedAt
+    FROM decision_threads dt
+    JOIN projects p ON p.id = dt.project_id
+    WHERE dt.status NOT IN ('confirmed', 'closed', 'resolved')
+    ORDER BY dt.updated_at DESC
+    LIMIT 25
+  `).all();
+  const history = db.prepare(`
+    SELECT a.id, a.project_id as projectId, p.name as projectName, a.actor,
+           a.action, a.reasoning, a.risk_level as riskLevel, a.subject_id as subjectId, a.created_at as createdAt
+    FROM project_audit_log a
+    JOIN projects p ON p.id = a.project_id
+    ORDER BY a.created_at DESC
+    LIMIT 25
+  `).all();
+  const briefings = listCosBriefings(25);
+  res.json({ workers, leadSessions, digests, threads, history, briefings });
 });
 
 app.post('/api/projects', (req, res) => {
@@ -183,12 +255,395 @@ app.get('/api/projects/:id/worktrees/:worktreeId', (req, res) => {
   res.json(wt);
 });
 
-app.delete('/api/projects/:id/worktrees/:worktreeId', (req, res) => {
+app.get('/api/projects/:id/digests', (req, res) => {
   try {
-    deleteWorktree(req.params.worktreeId, req.params.id);
-    res.json({ ok: true });
+    const digests = listDigests(req.params.id);
+    res.json({ digests });
+  } catch (err) {
+    res.status(404).json({ error: (err as Error).message });
+  }
+});
+
+app.get('/api/projects/:id/audit-log', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+  const entries = getDb().prepare(
+    'SELECT * FROM project_audit_log WHERE project_id = ? ORDER BY created_at DESC LIMIT ?',
+  ).all(req.params.id, limit);
+  res.json({ entries });
+});
+
+app.get('/api/projects/:id/delegations', requireAuth, (req, res) => {
+  const projectId = String(req.params.id);
+  const project = getProjectById(projectId);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  res.json({ delegations: listDelegations(projectId) });
+});
+
+app.post('/api/projects/:id/delegations/:delegationId/read', requireAuth, (req, res) => {
+  const project = getProjectById(String(req.params.id));
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  clearDelegationUnread(String(req.params.delegationId));
+  res.json({ ok: true });
+});
+
+app.get('/api/delegations/unread', requireAuth, (_req, res) => {
+  res.json({ counts: unreadDelegationCounts() });
+});
+
+app.get('/api/delegations', requireAuth, (_req, res) => {
+  res.json({ delegations: listAllDelegations() });
+});
+
+// --- Managed servers (Project Lead "start server" feature) ---
+app.get('/api/projects/:id/servers', requireAuth, (req, res) => {
+  const projectId = String(req.params.id);
+  const project = getProjectById(projectId);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const servers = listServersByProject(projectId).map((s) => ({
+    id: s.id,
+    projectId: s.projectId,
+    name: s.name,
+    command: s.command,
+    status: s.status,
+    exitCode: s.exitCode,
+    startedAt: s.startedAt,
+    stoppedAt: s.stoppedAt,
+    createdAt: s.createdAt,
+    running: isServerActive(s.id),
+  }));
+  res.json({ servers });
+});
+
+app.post('/api/servers/:serverId/stop', requireAuth, (req, res) => {
+  const server = getServerById(String(req.params.serverId));
+  if (!server) { res.status(404).json({ error: 'Server not found' }); return; }
+  stopServer(server.id);
+  res.json({ ok: true, serverId: server.id });
+});
+
+app.post('/api/servers/:serverId/restart', requireAuth, async (req, res) => {
+  const server = getServerById(String(req.params.serverId));
+  if (!server) { res.status(404).json({ error: 'Server not found' }); return; }
+  try {
+    const result = await restartServer(req.user?.id ?? '', server.id);
+    res.json({ ok: true, serverId: server.id, status: result.status });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.delete('/api/servers/:serverId', requireAuth, (req, res) => {
+  const server = getServerById(String(req.params.serverId));
+  if (!server) { res.status(404).json({ error: 'Server not found' }); return; }
+  if (isServerActive(server.id)) stopServer(server.id);
+  deleteServer(server.id);
+  res.json({ ok: true, serverId: server.id });
+});
+
+// --- Lavish artifacts (Project Lead "open artifact" live-embed feature) ---
+app.get('/api/projects/:id/lavish', requireAuth, (req, res) => {
+  const projectId = String(req.params.id);
+  const project = getProjectById(projectId);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const artifacts = listArtifactsByProject(projectId).map((a) => ({
+    id: a.id,
+    projectId: a.projectId,
+    name: a.name,
+    status: a.status,
+    sessionKey: a.sessionKey,
+    proxyPath: a.sessionKey ? `/api/lavish/${a.id}/session/${a.sessionKey}` : null,
+    createdAt: a.createdAt,
+  }));
+  res.json({ artifacts });
+});
+
+app.delete('/api/lavish-artifacts/:artifactId', requireAuth, (req, res) => {
+  const artifact = getArtifactById(String(req.params.artifactId));
+  if (!artifact) { res.status(404).json({ error: 'Artifact not found' }); return; }
+  stopLavishArtifact(artifact.id);
+  deleteArtifact(artifact.id);
+  res.json({ ok: true, artifactId: artifact.id });
+});
+
+app.get('/api/projects/:id/memory', (req, res) => {  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  res.json(getOrBootstrapProjectMemory(req.params.id));
+});
+
+app.post('/api/projects/:id/memory/refresh', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  res.json(refreshProjectMemory(req.params.id));
+});
+
+app.get('/api/projects/:id/briefings', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  res.json({ briefings: listCosBriefingsForProject(req.params.id) });
+});
+
+app.get('/api/projects/:id/decision-threads', requireAuth, (req, res) => {
+  const projectId = String(req.params.id);
+  const project = getProjectById(projectId);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+  const threads = search
+    ? getDb().prepare(`
+        SELECT * FROM decision_threads
+        WHERE project_id = ? AND (title LIKE ? OR question LIKE ? OR decision LIKE ?)
+        ORDER BY updated_at DESC
+      `).all(projectId, `%${search}%`, `%${search}%`, `%${search}%`)
+    : getDb().prepare(
+        'SELECT * FROM decision_threads WHERE project_id = ? ORDER BY updated_at DESC',
+      ).all(projectId);
+  res.json({ threads });
+});
+
+app.patch('/api/projects/:id/decision-threads/:threadId', requireAuth, (req, res) => {
+  const thread = getDb().prepare(
+    'SELECT id FROM decision_threads WHERE id = ? AND project_id = ?',
+  ).get(String(req.params.threadId), String(req.params.id));
+  if (!thread) { res.status(404).json({ error: 'Decision thread not found' }); return; }
+  const fields = req.body as {
+    status?: string; decision?: string; rationale?: string; userVerdict?: string; followUpActions?: string;
+  };
+  getDb().prepare(`
+    UPDATE decision_threads SET
+      status = COALESCE(?, status),
+      decision = COALESCE(?, decision),
+      rationale = COALESCE(?, rationale),
+      user_verdict = COALESCE(?, user_verdict),
+      follow_up_actions = COALESCE(?, follow_up_actions),
+      updated_at = datetime('now')
+    WHERE id = ? AND project_id = ?
+  `).run(
+    fields.status ?? null,
+    fields.decision ?? null,
+    fields.rationale ?? null,
+    fields.userVerdict ?? null,
+    fields.followUpActions ?? null,
+    String(req.params.threadId),
+    String(req.params.id),
+  );
+  if (fields.status && fields.status !== 'open') refreshProjectMemory(String(req.params.id));
+  const updated = getDb().prepare('SELECT * FROM decision_threads WHERE id = ?').get(String(req.params.threadId));
+  res.json({ ok: true, thread: updated });
+});
+
+app.get('/api/projects/:id/autonomy', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const settings = getDb().prepare(
+    'SELECT project_id as projectId, merge_mode as mergeMode, intervention_mode as interventionMode, skill_install_mode as skillInstallMode, github_task_mode as githubTaskMode, dnd FROM project_autonomy_settings WHERE project_id = ?',
+  ).get(req.params.id) ?? { projectId: req.params.id, mergeMode: 'advisory', interventionMode: 'flag_only', skillInstallMode: 'suggest_only', githubTaskMode: 'off', dnd: 0 };
+  res.json({ settings });
+});
+
+app.patch('/api/projects/:id/autonomy', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  const { mergeMode = 'advisory', interventionMode = 'flag_only', skillInstallMode = 'suggest_only', githubTaskMode = 'off', dnd = false } = req.body as {
+    mergeMode?: string; interventionMode?: string; skillInstallMode?: string; githubTaskMode?: string; dnd?: boolean;
+  };
+  if (!['advisory', 'auto_queue', 'full_auto'].includes(mergeMode) ||
+      !['flag_only', 'flag_nudge', 'flag_nudge_cancel'].includes(interventionMode) ||
+      !['suggest_only', 'approve_and_install'].includes(skillInstallMode) ||
+      !['off', 'read_only', 'manage'].includes(githubTaskMode)) {
+    res.status(400).json({ error: 'Invalid autonomy settings' });
+    return;
+  }
+  getDb().prepare(`
+    INSERT INTO project_autonomy_settings (project_id, merge_mode, intervention_mode, skill_install_mode, github_task_mode, dnd)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(project_id) DO UPDATE SET
+      merge_mode = excluded.merge_mode,
+      intervention_mode = excluded.intervention_mode,
+      skill_install_mode = excluded.skill_install_mode,
+      github_task_mode = excluded.github_task_mode,
+      dnd = excluded.dnd
+  `).run(req.params.id, mergeMode, interventionMode, skillInstallMode, githubTaskMode, dnd ? 1 : 0);
+  res.json({ ok: true });
+});
+
+app.get('/api/merge-queue', (_req, res) => {
+  res.json({ requests: listMergeRequests() });
+});
+
+app.get('/api/portfolio-alerts', (_req, res) => {
+  const db = getDb();
+  const rows: Array<{ projectId: string; projectName: string; kind: 'blocked' | 'stale' | 'merge' | 'decision'; label: string; detail: string }> = [];
+  const projects = db.prepare('SELECT id, name FROM projects ORDER BY name').all() as Array<{ id: string; name: string }>;
+  for (const project of projects) {
+    const settings = db.prepare('SELECT dnd FROM project_autonomy_settings WHERE project_id = ?').get(project.id) as { dnd?: number } | undefined;
+    if (settings?.dnd) continue;
+    const digests = db.prepare(`
+      SELECT headline, status, detail, updated_at as updatedAt
+      FROM agent_digests WHERE project_id = ?
+      AND status IN ('blocked', 'in_progress')
+    `).all(project.id) as Array<{ headline: string | null; status: string; detail: string | null; updatedAt: string | null }>;
+    for (const digest of digests) {
+      const timestamp = digest.updatedAt ? new Date(`${digest.updatedAt.replace(' ', 'T')}Z`).getTime() : Date.now();
+      if (digest.status === 'blocked') {
+        rows.push({ projectId: project.id, projectName: project.name, kind: 'blocked', label: 'Blocked worktree', detail: digest.detail || digest.headline || 'A worktree reports a blocker.' });
+      } else if (Date.now() - timestamp > 30 * 60 * 1000) {
+        rows.push({ projectId: project.id, projectName: project.name, kind: 'stale', label: 'Stale activity', detail: digest.detail || digest.headline || 'No digest update in more than 30 minutes.' });
+      }
+    }
+    const pending = db.prepare(
+      "SELECT COUNT(*) as count FROM merge_requests WHERE project_id = ? AND status IN ('pending', 'approved', 'conflict')",
+    ).get(project.id) as { count: number };
+    if (pending.count > 0) rows.push({ projectId: project.id, projectName: project.name, kind: 'merge', label: 'Merge queue', detail: `${pending.count} merge request${pending.count === 1 ? '' : 's'} need attention.` });
+    const decisions = db.prepare(
+      "SELECT COUNT(*) as count FROM decision_threads WHERE project_id = ? AND status = 'open'",
+    ).get(project.id) as { count: number };
+    if (decisions.count > 0) rows.push({ projectId: project.id, projectName: project.name, kind: 'decision', label: 'Open decision', detail: `${decisions.count} decision thread${decisions.count === 1 ? '' : 's'} awaiting a verdict.` });
+  }
+  res.json({ rows: rows.slice(0, 20) });
+});
+
+app.get('/api/projects/:id/merge-queue', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  res.json({ requests: listMergeRequests(req.params.id) });
+});
+
+app.patch('/api/projects/:id/merge-queue/:requestId/priority', (req, res) => {
+  try {
+    const request = getMergeRequest(req.params.requestId);
+    if (!request || request.projectId !== req.params.id) { res.status(404).json({ error: 'Merge request not found' }); return; }
+    res.json(setMergePriority(request.id, req.body.priority));
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.post('/api/projects/:id/merge-queue/:requestId/approve', async (req, res) => {
+  try {
+    const request = getMergeRequest(req.params.requestId);
+    if (!request || request.projectId !== req.params.id) { res.status(404).json({ error: 'Merge request not found' }); return; }
+    resolveMergeRequest(request.id, 'approved', req.body.note);
+    getDb().prepare(`
+      INSERT INTO project_audit_log (id, project_id, actor, action, reasoning, risk_level)
+      VALUES (?, ?, 'project_lead', 'approve_merge', ?, 'medium')
+    `).run(crypto.randomUUID(), req.params.id, req.body.note ?? 'Approved merge request');
+    res.json(await executeApprovedMerge(request.id));
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.post('/api/projects/:id/merge-queue/:requestId/reject', (req, res) => {
+  try {
+    const request = getMergeRequest(req.params.requestId);
+    if (!request || request.projectId !== req.params.id) { res.status(404).json({ error: 'Merge request not found' }); return; }
+    const resolved = resolveMergeRequest(request.id, 'rejected', req.body.reason);
+    getDb().prepare(`
+      INSERT INTO project_audit_log (id, project_id, actor, action, reasoning, risk_level)
+      VALUES (?, ?, 'project_lead', 'reject_merge', ?, 'medium')
+    `).run(crypto.randomUUID(), req.params.id, req.body.reason);
+    res.json({ request: resolved });
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+app.post('/api/projects/:id/merge-lock/release', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  releaseMergeLock(req.params.id);
+  getDb().prepare(`
+    INSERT INTO project_audit_log (id, project_id, actor, action, reasoning, risk_level)
+    VALUES (?, ?, 'user', 'force_release_merge_lock', ?, 'high')
+  `).run(crypto.randomUUID(), req.params.id, req.body.reason ?? 'Merge lock force-released');
+  res.json({ ok: true });
+});
+
+app.get('/api/projects/:id/merge-lock', (req, res) => {
+  const project = getProjectById(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
+  res.json({ lock: getMergeLock(req.params.id) });
+});
+
+app.get('/api/projects/:id/worktrees/:worktreeId/digest', (req, res) => {
+  try {
+    const digest = getDigest(req.params.worktreeId, req.params.id);
+    res.json({ digest });
+  } catch (err) {
+    res.status(404).json({ error: (err as Error).message });
+  }
+});
+
+app.post('/api/projects/:id/worktrees/:worktreeId/digest/bootstrap', (req, res) => {
+  try {
+    const digest = getDigest(req.params.worktreeId, req.params.id) ?? bootstrapDigest(req.params.worktreeId);
+    res.status(201).json({ digest });
+  } catch (err) {
+    res.status(404).json({ error: (err as Error).message });
+  }
+});
+
+app.post('/api/projects/:id/worktrees/:worktreeId/digest/reconcile', (req, res) => {
+  try {
+    const digest = getDigest(req.params.worktreeId, req.params.id);
+    if (!digest) bootstrapDigest(req.params.worktreeId);
+    res.json({ digest: reconcileDigest(req.params.worktreeId) });
+  } catch (err) {
+    res.status(404).json({ error: (err as Error).message });
+  }
+});
+
+app.post('/api/projects/:id/worktrees/:worktreeId/digest/spot-check', (req, res) => {
+  try {
+    const digest = getDigest(req.params.worktreeId, req.params.id);
+    if (!digest) bootstrapDigest(req.params.worktreeId);
+    const live = reconcileDigest(req.params.worktreeId);
+    getDb().prepare(`
+      INSERT INTO project_audit_log (id, project_id, actor, action, reasoning, risk_level)
+      VALUES (?, ?, 'user', 'digest_spot_check', ?, 'low')
+    `).run(
+      crypto.randomUUID(),
+      req.params.id,
+      req.body?.reason ?? 'User requested a live digest spot-check',
+    );
+    res.json({ digest: live, checked: true });
+  } catch (err) {
+    res.status(404).json({ error: (err as Error).message });
+  }
+});
+
+// One-shot: return and clear a worktree's seed prompt (used to auto-start the
+// Copilot CLI session for the issue the worktree was created for).
+app.get('/api/projects/:id/worktrees/:worktreeId/seed', (req, res) => {
+  const wt = getWorktreeById(req.params.worktreeId);
+  if (!wt || wt.projectId !== req.params.id) {
+    res.status(404).json({ error: 'Not found' });
+    return;
+  }
+  res.json({ seed: consumeWorktreeSeed(req.params.worktreeId) });
+});
+
+app.delete('/api/projects/:id/worktrees/:worktreeId', async (req, res) => {
+  const projectId = String(req.params.id);
+  const worktreeId = String(req.params.worktreeId);
+  try {
+    // The dialog spells out what will be lost, so a user-driven delete is
+    // always allowed — but it still routes through closeWorktree so sessions
+    // are released and delegations retired the same way the lead's are.
+    const result = await closeWorktree(projectId, worktreeId, { force: true });
+    res.json({ ok: true, closedSessions: result.closedSessions.length });
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+/** What, if anything, stops this worktree being cleaned up. */
+app.get('/api/projects/:id/worktrees/:worktreeId/cleanup-check', async (req, res) => {
+  try {
+    res.json(await assessWorktreeCleanup(String(req.params.id), String(req.params.worktreeId)));
+  } catch (err) {
+    res.status(404).json({ error: (err as Error).message });
   }
 });
 
@@ -285,36 +740,34 @@ app.delete('/api/projects/:id/skills/:skillId', (req, res) => {
 
 // --- Todos ---
 app.get('/api/projects/:id/todos', (req, res) => {
-  const db = getDb();
-  const todos = db.prepare('SELECT id, project_id as projectId, parent_id as parentId, text, done, position, created_at as createdAt FROM project_todos WHERE project_id = ? ORDER BY position').all(req.params.id);
-  res.json({ todos });
+  res.json({ todos: listTodos(req.params.id) });
 });
 
 app.post('/api/projects/:id/todos', (req, res) => {
-  const db = getDb();
-  const id = crypto.randomUUID();
-  const maxPos = db.prepare('SELECT COALESCE(MAX(position), -1) as maxPos FROM project_todos WHERE project_id = ? AND parent_id IS ?').get(req.params.id, req.body.parentId || null) as { maxPos: number };
-  db.prepare('INSERT INTO project_todos (id, project_id, parent_id, text, position) VALUES (?, ?, ?, ?, ?)').run(id, req.params.id, req.body.parentId || null, req.body.text || '', (maxPos?.maxPos ?? -1) + 1);
-  res.status(201).json({ id });
+  try {
+    const todo = createTodo({
+      projectId: req.params.id,
+      text: typeof req.body.text === 'string' ? req.body.text : '',
+      parentId: req.body.parentId ?? null,
+    });
+    res.status(201).json({ id: todo.id, todo });
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+  }
 });
 
 app.patch('/api/projects/:id/todos/:todoId', (req, res) => {
-  const db = getDb();
-  const sets: string[] = [];
-  const vals: unknown[] = [];
-  if (req.body.text !== undefined) { sets.push('text = ?'); vals.push(req.body.text); }
-  if (req.body.done !== undefined) { sets.push('done = ?'); vals.push(req.body.done ? 1 : 0); }
-  if (req.body.parentId !== undefined) { sets.push('parent_id = ?'); vals.push(req.body.parentId); }
-  if (req.body.position !== undefined) { sets.push('position = ?'); vals.push(req.body.position); }
-  if (sets.length > 0) {
-    vals.push(req.params.todoId, req.params.id);
-    db.prepare(`UPDATE project_todos SET ${sets.join(', ')} WHERE id = ? AND project_id = ?`).run(...vals);
+  try {
+    const todo = updateTodo(req.params.id, req.params.todoId, req.body);
+    if (!todo) return res.status(404).json({ error: 'Todo not found' });
+    res.json({ ok: true, todo });
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
   }
-  res.json({ ok: true });
 });
 
 app.delete('/api/projects/:id/todos/:todoId', (req, res) => {
-  getDb().prepare('DELETE FROM project_todos WHERE id = ? AND project_id = ?').run(req.params.todoId, req.params.id);
+  deleteTodo(req.params.id, req.params.todoId);
   res.json({ ok: true });
 });
 
@@ -872,18 +1325,7 @@ app.get('/api/copilot-config/agents-md', (req, res) => {
 // --- Skill Catalog ---
 app.get('/api/skill-catalog/marketplaces', (req, res) => {
   try {
-    const raw = execSync('gh copilot plugin marketplace list', { encoding: 'utf-8', timeout: 15000 });
-    const marketplaces: { name: string; source: string; builtin: boolean }[] = [];
-    let builtinSection = false;
-    for (const line of raw.split('\n')) {
-      const trimmed = line.trim();
-      if (/included with/i.test(trimmed)) { builtinSection = true; continue; }
-      if (/registered marketplace/i.test(trimmed)) { builtinSection = false; continue; }
-      const m = trimmed.match(/^\S+\s+([\w-]+)\s+\((?:GitHub:\s*)?([^)]+)\)/);
-      if (!m) continue;
-      marketplaces.push({ name: m[1], source: m[2], builtin: builtinSection });
-    }
-    res.json({ marketplaces });
+    res.json({ marketplaces: libListMarketplaces() });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -893,13 +1335,7 @@ app.get('/api/skill-catalog/browse', (req, res) => {
   const marketplace = req.query.marketplace as string;
   if (!marketplace) { res.status(400).json({ error: 'Missing marketplace' }); return; }
   try {
-    const raw = execSync(`gh copilot plugin marketplace browse ${marketplace}`, { encoding: 'utf-8', timeout: 30000 });
-    const plugins: { name: string; description: string }[] = [];
-    for (const line of raw.split('\n')) {
-      const m = line.trim().match(/^\S+\s+([\w-]+)\s+-\s+(.+)/);
-      if (m) plugins.push({ name: m[1], description: m[2].trim() });
-    }
-    res.json({ plugins, marketplace });
+    res.json({ plugins: libBrowsePlugins(marketplace), marketplace });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -907,13 +1343,7 @@ app.get('/api/skill-catalog/browse', (req, res) => {
 
 app.get('/api/skill-catalog/installed', (req, res) => {
   try {
-    const raw = execSync('gh copilot plugin list', { encoding: 'utf-8', timeout: 15000 });
-    const installed: { name: string; marketplace: string; version: string }[] = [];
-    for (const line of raw.split('\n')) {
-      const m = line.trim().match(/^\S+\s+([\w-]+)@([\w-]+)\s+\(v?([\d.]+)\)/);
-      if (m) installed.push({ name: m[1], marketplace: m[2], version: m[3] });
-    }
-    res.json({ installed });
+    res.json({ installed: libListInstalledPlugins() });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -923,8 +1353,8 @@ app.post('/api/skill-catalog/install', (req, res) => {
   const { plugin, marketplace } = req.body;
   if (!plugin || !marketplace) { res.status(400).json({ error: 'Missing plugin or marketplace' }); return; }
   try {
-    const output = execSync(`gh copilot plugin install ${plugin}@${marketplace}`, { encoding: 'utf-8', timeout: 60000 });
-    res.json({ ok: true, output: output.trim() });
+    const output = libInstallPlugin(plugin, marketplace);
+    res.json({ ok: true, output });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -934,8 +1364,8 @@ app.post('/api/skill-catalog/uninstall', (req, res) => {
   const { plugin, marketplace } = req.body;
   if (!plugin || !marketplace) { res.status(400).json({ error: 'Missing plugin or marketplace' }); return; }
   try {
-    const output = execSync(`gh copilot plugin uninstall ${plugin}@${marketplace}`, { encoding: 'utf-8', timeout: 30000 });
-    res.json({ ok: true, output: output.trim() });
+    const output = libUninstallPlugin(plugin, marketplace);
+    res.json({ ok: true, output });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -996,8 +1426,12 @@ app.get('/api/daemon/status', requireAuth, async (req, res) => {
   if (client.isConnected) {
     try {
       const sessions = await client.listSessions();
+      const { isRuntimeHostedByDaemon } = await import('../shared/agent-bridge');
       res.json({
         connected: true,
+        // False means agent sessions live in-process and will not survive a
+        // server restart, which shows up to users as "cannot reconnect".
+        agentRuntimeHostedByDaemon: isRuntimeHostedByDaemon(),
         sessions: sessions.map(s => ({
           sessionId: s.sessionId,
           alive: s.alive,
@@ -1084,6 +1518,16 @@ app.post('/api/daemon/restart', requireAuth, async (req, res) => {
   }
 });
 
+app.post('/api/agent/reconnect', requireAuth, async (_req, res) => {
+  try {
+    const { reconnectAgentRuntime } = await import('../shared/agent-bridge');
+    await reconnectAgentRuntime();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
 app.get('/api/daemon/sessions/:id/buffer', requireAuth, async (req, res) => {
   const { getDaemonClient } = await import('../daemon/client');
   const client = getDaemonClient();
@@ -1137,15 +1581,22 @@ const httpServer = createServer(app);
 // WebSocket
 const wss = setupWebSocketServer();
 const agentWss = setupAgentWebSocketServer();
+const serverWss = setupServerWebSocketServer();
 httpServer.on('upgrade', (req, socket, head) => {
   const { pathname } = parse(req.url!, true);
-  if (pathname === '/ws') {
+  if (pathname && pathname.startsWith('/api/lavish/')) {
+    handleLavishUpgrade(req, socket, head);
+  } else if (pathname === '/ws') {
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req);
     });
   } else if (pathname === '/ws/agent') {
     agentWss.handleUpgrade(req, socket, head, (ws) => {
       agentWss.emit('connection', ws, req);
+    });
+  } else if (pathname === '/ws/server') {
+    serverWss.handleUpgrade(req, socket, head, (ws) => {
+      serverWss.emit('connection', ws, req);
     });
   } else {
     socket.destroy();
@@ -1178,6 +1629,7 @@ console.log('[server] Initializing daemon bridge before accepting requests...');
     // Start the report scheduler and perf monitor once the server is live
     startScheduler();
     startLagMonitor();
+    startDelegationMonitor();
   });
 })();
 

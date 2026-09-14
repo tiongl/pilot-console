@@ -64,6 +64,7 @@ export type WsServerMessage =
   | { type: 'pong' }
   | { type: 'perf-ping'; ts: number }
   | { type: 'git-changed'; projectId: string; worktreeId: string | null }
+  | { type: 'worktrees-changed'; projectId: string }
   | { type: 'report-ready'; runId: string; scheduleId: string; scheduleName: string; status: string }
   | { type: 'schedule-changed'; action: 'created' | 'updated' | 'deleted' | 'imported'; scheduleId?: string };
 
@@ -77,6 +78,7 @@ export type WsServerMessage =
 // ---------------------------------------------------------------------------
 
 export type AgentStatus = 'idle' | 'busy';
+export type AgentSessionKind = 'agent' | 'project_lead' | 'chief_of_staff';
 
 /** Agent UI mode, mirroring the Copilot CLI (Shift+Tab cycles these). */
 export type AgentMode = 'interactive' | 'plan' | 'autopilot';
@@ -204,10 +206,14 @@ export type AgentClientMessage =
   | { type: 'set_allow_all'; enabled: boolean }
   | { type: 'set_mode'; mode: AgentMode }
   | { type: 'exit_plan_response'; requestId: string; action: string }
+  // Answer to an `ask_user_request`. `answer` is one of the offered options, or
+  // free text when the prompt allowed it.
+  | { type: 'ask_user_response'; requestId: string; answer: string }
   | { type: 'set_model'; model: string }
+  // Drop a follow-up the user queued while the agent was mid-turn.
+  | { type: 'dequeue'; index: number }
   // Discover the current slash-command catalog (dynamic; plugin-aware).
-  | { type: 'list_commands' }
-  // Invoke a runtime/skill/plugin slash command by name with raw argument text.
+  | { type: 'list_commands' }  // Invoke a runtime/skill/plugin slash command by name with raw argument text.
   | { type: 'run_command'; name: string; input?: string }
   // List resumable sessions for this project (native `/resume` switcher).
   | { type: 'list_sessions' }
@@ -217,17 +223,34 @@ export type AgentClientMessage =
   | { type: 'share_session'; mode: AgentShareMode }
   // Report the current GitHub share status.
   | { type: 'get_share_status' }
-  | { type: 'replay' };
+  | { type: 'replay' }
+  // Pull the transcript slice preceding the oldest event the client holds.
+  | { type: 'fetch_earlier'; beforeId?: string };
 
 /** Server → Client messages for the `/ws/agent` socket. */
 export type AgentServerMessage =
-  | { type: 'ready'; sessionId: string; model: string; mode: AgentMode; status: AgentStatus }
-  | { type: 'replay'; events: AgentTranscriptEvent[] }
+  | {
+      type: 'ready';
+      sessionId: string;
+      model: string;
+      mode: AgentMode;
+      status: AgentStatus;
+      /** Wall-clock start of the in-flight turn (the user's request), if busy. */
+      turnStartedAt?: number | null;
+    }
+  // The tail of the conversation. `hasMore` means older events exist on the
+  // server and can be pulled with `fetch_earlier`.
+  | { type: 'replay'; events: AgentTranscriptEvent[]; hasMore?: boolean }
+  // An older slice, in response to `fetch_earlier`; prepended by the client.
+  | { type: 'earlier'; events: AgentTranscriptEvent[]; hasMore: boolean }
   // Upsert (create or update) a transcript entry, keyed by `event.id`.
   | { type: 'event'; event: AgentTranscriptEvent }
   // Streaming text deltas appended to an existing entry (live-only, not replayed).
   | { type: 'assistant_delta'; id: string; delta: string }
   | { type: 'tool_delta'; id: string; delta: string }
+  // Replace a tool entry's output wholesale, for the rare case where a tool
+  // rewrites rather than extends what it has already emitted.
+  | { type: 'tool_output'; id: string; output: string }
   | { type: 'permission_request'; requestId: string; title: string; detail: string; canSession: boolean }
   | { type: 'permission_resolved'; requestId: string }
   // Whether the session auto-approves every permission request.
@@ -240,10 +263,33 @@ export type AgentServerMessage =
       planContent?: string;
       actions: string[];
       recommended: string;
+      reviewNote?: string;
     }
   | { type: 'exit_plan_resolved'; requestId: string }
-  | { type: 'status'; status: AgentStatus }
+  // The agent is asking the user a question it wants answered by clicking
+  // rather than typing. Raised by the `ask_user` tool.
+  | {
+      type: 'ask_user_request';
+      requestId: string;
+      question: string;
+      detail?: string;
+      options: string[];
+      /** Whether the user may type an answer instead of picking an option. */
+      allowText: boolean;
+    }
+  | { type: 'ask_user_resolved'; requestId: string }
+  | {
+      type: 'status';
+      status: AgentStatus;
+      /**
+       * Wall-clock start of the in-flight turn — the moment the user's request
+       * was submitted, not when the model started generating. Null when idle.
+       */
+      turnStartedAt?: number | null;
+    }
   | { type: 'model'; model: string }
+  // Follow-ups the user submitted mid-turn, in the order they will be sent.
+  | { type: 'queued'; prompts: string[] }
   | { type: 'mode'; mode: AgentMode }
   // The dynamic slash-command catalog for this session.
   | { type: 'commands'; commands: AgentSlashCommand[] }
@@ -274,7 +320,25 @@ export interface Worktree {
   worktreePath: string;
   isManaged: boolean;
   type: WorktreeType;
+  /** GitHub issue number this worktree was created for, if any. */
+  issueNumber: number | null;
   createdAt: string;
+}
+
+export type AgentDigestStatus = 'in_progress' | 'blocked' | 'ready_to_merge' | 'idle';
+export type AgentDigestScope = 'small' | 'medium' | 'large';
+
+export interface AgentDigest {
+  worktreeId: string;
+  projectId: string;
+  headline: string | null;
+  status: AgentDigestStatus | null;
+  detail: string | null;
+  scope: AgentDigestScope | null;
+  touchedFiles: string[];
+  riskNotes: string | null;
+  stuckSince: string | null;
+  updatedAt: string | null;
 }
 
 export interface ChatMessage {
@@ -316,6 +380,33 @@ export interface GitHubProjectV2Summary {
   url: string;
   closed: boolean;
   ownerLogin: string;
+  /** Whether the board is publicly visible (else private to its owner/collaborators). */
+  public: boolean;
+}
+
+/** The layout GitHub renders a Projects V2 view with. */
+export type GitHubProjectViewLayout = 'board' | 'table' | 'roadmap';
+
+/** A saved view inside a Projects V2 project. */
+export interface GitHubProjectViewSummary {
+  id: string;
+  number: number;
+  name: string;
+  layout: GitHubProjectViewLayout;
+  /** Name of the field the view groups by (columns for board/roadmap), if any. */
+  groupByField: string | null;
+}
+
+/** Metadata + saved views for a single Projects V2 project. */
+export interface GitHubProjectOverview {
+  id: string;
+  number: number;
+  title: string;
+  shortDescription: string | null;
+  public: boolean;
+  url: string;
+  viewerCanUpdate: boolean;
+  views: GitHubProjectViewSummary[];
 }
 
 export interface GitHubMilestone {
@@ -353,6 +444,11 @@ export interface GitHubIssue {
   updatedAt: string;
 }
 
+/** A single issue with its full body (markdown) for the detail view. */
+export interface GitHubIssueDetail extends GitHubIssue {
+  body: string;
+}
+
 export interface GitHubPullRequest {
   number: number;
   title: string;
@@ -379,6 +475,12 @@ export interface GitHubBoardItem {
   labels: GitHubLabel[];
   /** PRs linked to this item (the item itself if a PR, or PRs closing its issue). */
   linkedPullRequests: GitHubPullRequest[];
+  /** Generic field values (field name → display string) for table/roadmap views. */
+  fields: Record<string, string>;
+  /** Roadmap start date (ISO), from a date/iteration field, if any. */
+  startDate: string | null;
+  /** Roadmap target/end date (ISO), from a date/iteration field, if any. */
+  targetDate: string | null;
 }
 
 /** A Status field option = a board column. */
@@ -393,6 +495,20 @@ export interface GitHubBoard {
   projectNumber: number;
   title: string;
   statusFieldId: string | null;
+  columns: GitHubBoardColumn[];
+  items: GitHubBoardItem[];
+}
+
+/** A resolved Projects V2 view: its layout, grouping field, columns and items. */
+export interface GitHubProjectView {
+  projectId: string;
+  projectNumber: number;
+  viewNumber: number;
+  name: string;
+  layout: GitHubProjectViewLayout;
+  /** The single-select field used for grouping (columns); null when none. */
+  groupFieldId: string | null;
+  groupFieldName: string | null;
   columns: GitHubBoardColumn[];
   items: GitHubBoardItem[];
 }

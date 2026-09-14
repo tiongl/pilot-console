@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import type { AgentServerMessage } from '@/types';
 
@@ -17,6 +17,13 @@ vi.mock('@/hooks/useAgentSocket', () => ({
     hooked.onMessage = opts.onMessage;
     hooked.lastOptions = opts;
     return { state: 'open' as const, send: hooked.send, reset: hooked.reset, switchTo: hooked.switchTo };
+  },
+}));
+
+vi.mock('mermaid', () => ({
+  default: {
+    initialize: vi.fn(),
+    render: vi.fn(async () => ({ svg: '<svg viewBox="0 0 200 100" data-testid="agent-mermaid-svg"></svg>' })),
   },
 }));
 
@@ -79,6 +86,72 @@ describe('AgentPane', () => {
     expect(screen.getByText('Hi there')).toBeTruthy();
   });
 
+  it('copies an assistant reply as markdown source and rendered text', async () => {
+    const writeText = vi.fn((_text: string) => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'assistant', id: 'a1', ts: 2, content: '# Title\n\nBody text' },
+      ],
+    });
+
+    const trigger = await screen.findByTestId('assistant-copy-button');
+    fireEvent.click(trigger);
+    const md = await screen.findByTestId('assistant-copy-markdown');
+    fireEvent.click(md);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('# Title\n\nBody text'));
+
+    fireEvent.click(await screen.findByTestId('assistant-copy-button'));
+    const txt = await screen.findByTestId('assistant-copy-text');
+    fireEvent.click(txt);
+    await waitFor(() => {
+      const copied = writeText.mock.calls.at(-1)?.[0] as string;
+      expect(copied).toContain('Title');
+      expect(copied).toContain('Body text');
+      expect(copied).not.toContain('#');
+    });
+  });
+  it('renders mermaid diagrams in assistant markdown', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        {
+          kind: 'assistant',
+          id: 'a1',
+          ts: 1,
+          content: '```mermaid\ngraph TD;A-->B;\n```',
+        },
+      ],
+    });
+
+    const frame = await screen.findByTestId('mermaid-diagram');
+    expect(frame.querySelector('svg')).toBeTruthy();
+  });
+
+  it('renders rich markdown code blocks with copy controls and math', async () => {
+    renderPane();
+    emit({
+      type: 'event',
+      event: {
+        kind: 'assistant',
+        id: 'a-rich',
+        ts: 1,
+        content: '```typescript\nconst answer = 42;\n```\n\nInline math: $x^2$.',
+      },
+    });
+
+    expect(await screen.findByText('typescript')).toBeTruthy();
+    expect(screen.getByLabelText('Copy code')).toBeTruthy();
+    expect(screen.getByText('answer')).toBeTruthy();
+    expect(document.querySelector('.katex')).toBeTruthy();
+  });
+
   it('hides an assistant entry that has no text', async () => {
     renderPane();
     emit({
@@ -116,7 +189,8 @@ describe('AgentPane', () => {
       },
     });
     await waitFor(() => expect(screen.getByText('bash')).toBeTruthy());
-    expect(screen.getAllByText('Launching command')).toHaveLength(2);
+    // Collapsed header, expanded body, and the composer progress banner.
+    expect(screen.getAllByText('Launching command')).toHaveLength(3);
     expect(screen.getByTestId('tool-progress-c1')).toHaveTextContent('Running for 0s');
   });
 
@@ -314,6 +388,42 @@ describe('AgentPane', () => {
     expect(hooked.send).toHaveBeenCalledWith({ type: 'cancel' });
   });
 
+  it('still lets the user send a follow-up while the agent is busy', async () => {
+    renderPane();
+    emit({ type: 'status', status: 'busy' });
+
+    const textarea = screen.getByPlaceholderText(/Message Copilot/i);
+    fireEvent.change(textarea, { target: { value: 'what about the other topic?' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+
+    expect(hooked.send).toHaveBeenCalledWith({ type: 'send', prompt: 'what about the other topic?' });
+    // Stop stays available alongside send, so a busy turn is never a dead end.
+    expect(screen.getByTitle('Stop')).toBeTruthy();
+  });
+
+  it('lists queued follow-ups and can drop one', async () => {
+    renderPane();
+    emit({ type: 'status', status: 'busy' });
+    emit({ type: 'queued', prompts: ['first follow-up', 'second follow-up'] });
+
+    const queue = await screen.findByTestId('agent-queued');
+    expect(queue.textContent).toContain('2 follow-ups queued');
+    expect(screen.getByText('first follow-up')).toBeTruthy();
+
+    fireEvent.click(screen.getAllByTitle('Remove this queued follow-up')[1]);
+    expect(hooked.send).toHaveBeenCalledWith({ type: 'dequeue', index: 1 });
+  });
+
+  it('hides the queue once the server reports it empty', async () => {
+    renderPane();
+    emit({ type: 'status', status: 'busy' });
+    emit({ type: 'queued', prompts: ['only one'] });
+    expect(await screen.findByTestId('agent-queued')).toBeTruthy();
+
+    emit({ type: 'queued', prompts: [] });
+    await waitFor(() => expect(screen.queryByTestId('agent-queued')).toBeNull());
+  });
+
   it('runs /clear to start a new session', async () => {
     renderPane();
     const textarea = screen.getByPlaceholderText(/Message Copilot/i);
@@ -508,7 +618,8 @@ describe('AgentPane', () => {
     const badge = await screen.findByTestId('tool-badge-c1');
     expect(badge.textContent).toContain('powershell');
     expect(badge.textContent).not.toContain('Build the project');
-    expect(badge.textContent).toContain('2.5s');
+    // Durations render in whole minutes/seconds everywhere: 2.5s rounds to 3s.
+    expect(badge.textContent).toContain('3s');
     // Shell tools are indistinguishable by name alone, so a short command
     // prefix rides along on the badge face.
     expect(badge.textContent).toContain('npm run bu…');
@@ -582,14 +693,14 @@ describe('AgentPane', () => {
     expect(screen.getByTestId('filter-tool-output')).not.toBeChecked();
   });
 
-  it('renders a system message entry with a "System message" indicator', async () => {
+  it('does not render system messages', async () => {
     renderPane();
     emit({
       type: 'event',
       event: { kind: 'system', id: 's1', ts: 1, content: 'You are a helpful assistant.' },
     });
-    await waitFor(() => expect(screen.getByText('System message')).toBeTruthy());
-    expect(screen.getByText('You are a helpful assistant.')).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText('You are a helpful assistant.')).toBeNull());
+    expect(screen.queryByText('System message')).toBeNull();
   });
 
   it('shares the session read-only from the Share panel', async () => {
@@ -679,8 +790,78 @@ describe('AgentPane', () => {
     await waitFor(() => expect(screen.getByText('message 100')).toBeTruthy());
   });
 
-  it('shows the token/credit usage badge in the header', async () => {
+
+  it('pulls older transcript slices from the server when the local window runs out', async () => {
     renderPane();
+    const events = Array.from({ length: 5 }, (_, i) => ({
+      kind: 'user' as const,
+      id: `u${i}`,
+      ts: i,
+      content: `message ${i}`,
+    }));
+    // A short tail plus `hasMore`: everything local is already on screen, so
+    // the only way to see more is to ask the server.
+    emit({ type: 'replay', events, hasMore: true });
+    await waitFor(() => expect(screen.getByText('message 4')).toBeTruthy());
+
+    hooked.send.mockClear();
+    fireEvent.click(screen.getByTestId('agent-fetch-earlier'));
+    expect(hooked.send).toHaveBeenCalledWith({ type: 'fetch_earlier', beforeId: 'u0' });
+
+    emit({
+      type: 'earlier',
+      events: [{ kind: 'user' as const, id: 'old1', ts: -1, content: 'ancient message' }],
+      hasMore: false,
+    });
+    // The fetched slice is rendered immediately, not hidden behind another click.
+    await waitFor(() => expect(screen.getByText('ancient message')).toBeTruthy());
+    expect(screen.queryByTestId('agent-fetch-earlier')).toBeNull();
+  });
+
+  it('does not offer a server fetch when the whole transcript is already loaded', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [{ kind: 'user' as const, id: 'u0', ts: 0, content: 'only message' }],
+      hasMore: false,
+    });
+    await waitFor(() => expect(screen.getByText('only message')).toBeTruthy());
+    expect(screen.queryByTestId('agent-fetch-earlier')).toBeNull();
+  });
+
+  it('appends streamed tool output without repeating what is already shown', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'tool' as const, id: 'tool:c1', ts: 0, toolCallId: 'c1', toolName: 'bash', status: 'running' as const, output: '' },
+      ],
+      hasMore: false,
+    });
+    emit({ type: 'tool_delta', id: 'tool:c1', delta: 'line 1' });
+    emit({ type: 'tool_delta', id: 'tool:c1', delta: '\nline 2' });
+
+    await waitFor(() => expect(screen.getByText(/line 1\s+line 2/)).toBeTruthy());
+    // The first line must appear once, not once per streamed frame.
+    expect(screen.getAllByText(/line 1/)).toHaveLength(1);
+  });
+
+  it('replaces tool output when a tool rewrites rather than extends it', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'tool' as const, id: 'tool:c1', ts: 0, toolCallId: 'c1', toolName: 'bash', status: 'running' as const, output: '50% done' },
+      ],
+      hasMore: false,
+    });
+    emit({ type: 'tool_output', id: 'tool:c1', output: 'done' });
+
+    await waitFor(() => expect(screen.getByText('done')).toBeTruthy());
+    expect(screen.queryByText(/50%/)).toBeNull();
+  });
+
+  it('shows the token/credit usage badge in the header', async () => {    renderPane();
     emit({
       type: 'usage',
       usage: {
@@ -726,6 +907,98 @@ describe('AgentPane', () => {
     fireEvent.click(jump);
     expect(scroller.scrollTop).toBe(2_000);
     await waitFor(() => expect(screen.queryByTestId('agent-jump-to-bottom')).toBeNull());
+  });
+
+  /**
+   * Following the bottom cannot rely on React commits alone. Markdown, diagrams
+   * and images settle afterwards, and that late growth fires no scroll event —
+   * so the view silently drifts up while the pane still thinks it is pinned.
+   */
+  describe('auto-follow', () => {
+    /** Give the pane a real geometry, since jsdom lays nothing out. */
+    const measure = (scroller: HTMLElement, scrollHeight: number, clientHeight = 400) => {
+      Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: scrollHeight });
+      Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: clientHeight });
+    };
+
+    const settled = async (scroller: HTMLElement) => {
+      // Content the pane did not render itself, e.g. a diagram finishing late.
+      scroller.appendChild(document.createElement('div'));
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => requestAnimationFrame(() => r(null)));
+    };
+
+    it('re-pins when content grows after the render', async () => {
+      const { container } = renderPane();
+      emit({ type: 'replay', events: [{ kind: 'assistant', id: 'a1', ts: 1, content: 'Reply' }] });
+      await waitFor(() => expect(screen.getByText('Reply')).toBeTruthy());
+
+      const scroller = container.querySelector('.overflow-y-auto') as HTMLElement;
+      measure(scroller, 2_000);
+      // The growth itself moved us off the bottom; no scroll event was fired.
+      scroller.scrollTop = 0;
+      await settled(scroller);
+
+      expect(scroller.scrollTop).toBe(2_000);
+    });
+
+    it('leaves the scroll alone once the user has scrolled away', async () => {
+      const { container } = renderPane();
+      emit({ type: 'replay', events: [{ kind: 'assistant', id: 'a1', ts: 1, content: 'Reply' }] });
+      await waitFor(() => expect(screen.getByText('Reply')).toBeTruthy());
+
+      const scroller = container.querySelector('.overflow-y-auto') as HTMLElement;
+      measure(scroller, 2_000);
+      scroller.scrollTop = 0;
+      fireEvent.scroll(scroller);
+      await screen.findByTestId('agent-jump-to-bottom');
+
+      await settled(scroller);
+      expect(scroller.scrollTop).toBe(0);
+    });
+
+    it('keeps following from a hair above the bottom', async () => {
+      const { container } = renderPane();
+      emit({ type: 'replay', events: [{ kind: 'assistant', id: 'a1', ts: 1, content: 'Reply' }] });
+      await waitFor(() => expect(screen.getByText('Reply')).toBeTruthy());
+
+      const scroller = container.querySelector('.overflow-y-auto') as HTMLElement;
+      measure(scroller, 2_000);
+      // 50px short of the bottom: a nudge of the wheel, not a decision to read back.
+      scroller.scrollTop = 1_550;
+      fireEvent.scroll(scroller);
+
+      expect(screen.queryByTestId('agent-jump-to-bottom')).toBeNull();
+      await settled(scroller);
+      expect(scroller.scrollTop).toBe(2_000);
+    });
+
+    it('says it is following while the agent writes', async () => {
+      renderPane();
+      expect(screen.queryByTestId('agent-following')).toBeNull();
+
+      emit({ type: 'status', status: 'busy' });
+      expect(await screen.findByTestId('agent-following')).toBeTruthy();
+
+      emit({ type: 'status', status: 'idle' });
+      await waitFor(() => expect(screen.queryByTestId('agent-following')).toBeNull());
+    });
+
+    it('calls out new messages rather than a plain jump while busy', async () => {
+      const { container } = renderPane();
+      emit({ type: 'status', status: 'busy' });
+      emit({ type: 'replay', events: [{ kind: 'assistant', id: 'a1', ts: 1, content: 'Reply' }] });
+      await waitFor(() => expect(screen.getByText('Reply')).toBeTruthy());
+
+      const scroller = container.querySelector('.overflow-y-auto') as HTMLElement;
+      measure(scroller, 2_000);
+      scroller.scrollTop = 0;
+      fireEvent.scroll(scroller);
+
+      const jump = await screen.findByTestId('agent-jump-to-bottom');
+      expect(jump.textContent).toContain('New messages');
+      expect(screen.queryByTestId('agent-following')).toBeNull();
+    });
   });
 
   it('searches the conversation and reports the match count', async () => {
@@ -899,5 +1172,289 @@ describe('AgentPane', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe('turn progress', () => {
+    it('shows no progress banner while the agent is idle', () => {
+      renderPane();
+      emit({ type: 'status', status: 'idle', turnStartedAt: null });
+      expect(screen.queryByTestId('agent-turn-progress')).toBeNull();
+    });
+
+    it('shows a live progress banner with elapsed time while the agent works', () => {
+      vi.useFakeTimers();
+      try {
+        const started = Date.now();
+        renderPane();
+        emit({ type: 'status', status: 'busy', turnStartedAt: started });
+
+        expect(screen.getByTestId('agent-turn-progress')).toBeTruthy();
+        expect(screen.getByTestId('agent-turn-elapsed').textContent).toBe('0s');
+
+        act(() => {
+          vi.advanceTimersByTime(5_000);
+        });
+        expect(screen.getByTestId('agent-turn-elapsed').textContent).toBe('5s');
+
+        // Past a minute the counter switches to minutes + zero-padded seconds.
+        act(() => {
+          vi.advanceTimersByTime(60_000);
+        });
+        expect(screen.getByTestId('agent-turn-elapsed').textContent).toBe('1m 05s');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('measures elapsed time from the server-reported request start, not from render', () => {
+      vi.useFakeTimers();
+      try {
+        renderPane();
+        // The turn began 90s ago; a reconnect must not restart the clock.
+        emit({ type: 'status', status: 'busy', turnStartedAt: Date.now() - 90_000 });
+        expect(screen.getByTestId('agent-turn-elapsed').textContent).toBe('1m 30s');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('clears the progress banner once the turn completes', () => {
+      renderPane();
+      emit({ type: 'status', status: 'busy', turnStartedAt: Date.now() });
+      expect(screen.getByTestId('agent-turn-progress')).toBeTruthy();
+      emit({ type: 'status', status: 'idle', turnStartedAt: null });
+      expect(screen.queryByTestId('agent-turn-progress')).toBeNull();
+    });
+
+    it('renders assistant reply durations in minutes and seconds', () => {
+      renderPane();
+      emit({
+        type: 'event',
+        event: { kind: 'assistant', id: 'a1', ts: Date.now(), content: 'done', durationMs: 95_000 },
+      });
+      expect(screen.getByText(/1m 35s/)).toBeTruthy();
+    });
+  });
+
+  // The agent can put a question to the user as buttons so non-freeform
+  // answers need a click rather than typing.
+  describe('ask_user prompts', () => {
+    const question = {
+      type: 'ask_user_request' as const,
+      requestId: 'q1',
+      question: 'Which database?',
+      detail: 'Both are already installed.',
+      options: ['Postgres', 'SQLite'],
+      allowText: true,
+    };
+
+    it('renders the question, detail, and one button per option', () => {
+      renderPane();
+      emit(question);
+      const card = screen.getByTestId('ask-user-prompt');
+      expect(card.textContent).toContain('Which database?');
+      expect(card.textContent).toContain('Both are already installed.');
+      expect(screen.getByRole('button', { name: 'Postgres' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'SQLite' })).toBeTruthy();
+    });
+
+    it('sends the clicked option back and clears the prompt', () => {
+      renderPane();
+      emit(question);
+      fireEvent.click(screen.getByRole('button', { name: 'SQLite' }));
+      expect(hooked.send).toHaveBeenCalledWith({
+        type: 'ask_user_response',
+        requestId: 'q1',
+        answer: 'SQLite',
+      });
+      expect(screen.queryByTestId('ask-user-prompt')).toBeNull();
+    });
+
+    it('accepts a typed answer when the prompt allows one', () => {
+      renderPane();
+      emit(question);
+      const box = screen.getByLabelText('Type an answer instead');
+      fireEvent.change(box, { target: { value: '  DuckDB  ' } });
+      fireEvent.keyDown(box, { key: 'Enter' });
+      expect(hooked.send).toHaveBeenCalledWith({
+        type: 'ask_user_response',
+        requestId: 'q1',
+        answer: 'DuckDB',
+      });
+    });
+
+    it('omits the free-text box when the agent wants a strict choice', () => {
+      renderPane();
+      emit({ ...question, allowText: false });
+      expect(screen.queryByLabelText('Type an answer instead')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Postgres' })).toBeTruthy();
+    });
+
+    it('removes the prompt when the server resolves it elsewhere', () => {
+      renderPane();
+      emit(question);
+      emit({ type: 'ask_user_resolved', requestId: 'q1' });
+      expect(screen.queryByTestId('ask-user-prompt')).toBeNull();
+    });
+
+    it('replaces rather than duplicates a re-sent question on reconnect', () => {
+      renderPane();
+      emit(question);
+      emit(question);
+      expect(screen.getAllByTestId('ask-user-prompt')).toHaveLength(1);
+    });
+
+    // The agent's turn is parked inside the ask_user call, so a normal send
+    // would queue behind a turn that can never end. The buttons must never be
+    // a gate on typing.
+    it('answers the pending question with text typed in the main composer', () => {
+      renderPane();
+      emit(question);
+      const textarea = screen.getByPlaceholderText(/Click an option above/i);
+      fireEvent.change(textarea, { target: { value: 'actually use DuckDB' } });
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+      expect(hooked.send).toHaveBeenCalledWith({
+        type: 'ask_user_response',
+        requestId: 'q1',
+        answer: 'actually use DuckDB',
+      });
+      expect(hooked.send).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'send' }),
+      );
+      expect(screen.queryByTestId('ask-user-prompt')).toBeNull();
+    });
+
+    it('still shows a pending question while the Outline view is open', async () => {
+      renderPane();
+      emit(question);
+      fireEvent.click(screen.getByTestId('agent-outline-toggle'));
+      await screen.findByTestId('agent-outline');
+      // The agent's turn is parked on this question; hiding it behind a view
+      // toggle makes the session look hung with nothing to click.
+      expect(screen.getByTestId('ask-user-prompt')).toBeTruthy();
+    });
+
+    it('routes the composer back to a normal send once nothing is pending', () => {
+      renderPane();
+      emit(question);
+      emit({ type: 'ask_user_resolved', requestId: 'q1' });
+      const textarea = screen.getByPlaceholderText(/Message Copilot/i);
+      fireEvent.change(textarea, { target: { value: 'carry on' } });
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+      expect(hooked.send).toHaveBeenCalledWith({ type: 'send', prompt: 'carry on' });
+    });
+
+    it('still runs slash commands while a question is pending', () => {
+      renderPane();
+      emit(question);
+      const textarea = screen.getByPlaceholderText(/Click an option above/i);
+      fireEvent.change(textarea, { target: { value: '/mode autopilot' } });
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+      expect(hooked.send).toHaveBeenCalledWith({ type: 'set_mode', mode: 'autopilot' });
+    });
+  });
+
+  describe('voice input', () => {
+    class FakeRecognition {
+      static instances: FakeRecognition[] = [];
+      continuous = false;
+      interimResults = false;
+      lang = '';
+      maxAlternatives = 1;
+      started = 0;
+      onresult: ((e: unknown) => void) | null = null;
+      onerror: ((e: { error: string }) => void) | null = null;
+      onend: (() => void) | null = null;
+      onstart: (() => void) | null = null;
+      constructor() {
+        FakeRecognition.instances.push(this);
+      }
+      start() {
+        this.started += 1;
+      }
+      stop() {
+        this.onend?.();
+      }
+      abort() {}
+      say(transcript: string, isFinal: boolean) {
+        this.onresult?.({
+          resultIndex: 0,
+          results: { length: 1, 0: { length: 1, isFinal, 0: { transcript } } },
+        });
+      }
+    }
+
+    beforeEach(() => {
+      FakeRecognition.instances = [];
+      (window as unknown as { SpeechRecognition?: unknown }).SpeechRecognition = FakeRecognition;
+    });
+
+    afterEach(() => {
+      delete (window as unknown as { SpeechRecognition?: unknown }).SpeechRecognition;
+    });
+
+    function startDictation() {
+      renderPane();
+      act(() => {
+        fireEvent.click(screen.getByTestId('agent-dictate'));
+      });
+      return FakeRecognition.instances.at(-1)!;
+    }
+
+    it('fills the composer with speech so it can be edited before sending', () => {
+      const recognition = startDictation();
+      act(() => recognition.say('add a retry to the fetch call', true));
+
+      const box = screen.getByPlaceholderText(/Listening/) as HTMLTextAreaElement;
+      expect(box.value).toBe('add a retry to the fetch call');
+      // Still a normal textarea: the point is to edit before sending.
+      expect(hooked.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'send' }));
+    });
+
+    it('shows interim speech and then the corrected final text', () => {
+      const recognition = startDictation();
+      act(() => recognition.say('add a retro', false));
+      expect((screen.getByPlaceholderText(/Listening/) as HTMLTextAreaElement).value).toBe('add a retro');
+
+      act(() => recognition.say('add a retry', true));
+      expect((screen.getByPlaceholderText(/Listening/) as HTMLTextAreaElement).value).toBe('add a retry');
+    });
+
+    it('appends to text already typed instead of replacing it', () => {
+      renderPane();
+      const box = screen.getByPlaceholderText(/Message Copilot/) as HTMLTextAreaElement;
+      fireEvent.change(box, { target: { value: 'Fix the bug:' } });
+      act(() => {
+        fireEvent.click(screen.getByTestId('agent-dictate'));
+      });
+      act(() => FakeRecognition.instances.at(-1)!.say('it throws on empty input', true));
+
+      expect((screen.getByPlaceholderText(/Listening/) as HTMLTextAreaElement).value).toBe(
+        'Fix the bug: it throws on empty input',
+      );
+    });
+
+    it('stops listening when the message is sent', () => {
+      const recognition = startDictation();
+      act(() => recognition.say('hello', true));
+      fireEvent.click(screen.getByTitle('Send'));
+
+      expect(hooked.send).toHaveBeenCalledWith({ type: 'send', prompt: 'hello' });
+      expect(screen.getByTestId('agent-dictate').getAttribute('aria-pressed')).toBe('false');
+    });
+
+    it('reports a blocked microphone instead of failing silently', () => {
+      const recognition = startDictation();
+      act(() => recognition.onerror?.({ error: 'not-allowed' }));
+
+      expect(screen.getByText(/Microphone access was blocked/)).toBeTruthy();
+      expect(screen.getByTestId('agent-dictate').getAttribute('aria-pressed')).toBe('false');
+    });
+
+    it('hides the mic entirely in browsers without the Web Speech API', () => {
+      delete (window as unknown as { SpeechRecognition?: unknown }).SpeechRecognition;
+      renderPane();
+      expect(screen.queryByTestId('agent-dictate')).toBeNull();
+    });
   });
 });

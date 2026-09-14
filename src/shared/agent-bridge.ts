@@ -4,6 +4,11 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { getDb } from './db';
 import { getProjectById, getWorktreeById } from './project-store';
+import { createWorktreeAgentTools } from './digest-tools';
+import { createProjectLeadTools } from './project-lead-tools';
+import { createChiefOfStaffTools } from './chief-of-staff-tools';
+import { createMergeTools } from './merge-tools';
+import { getOrBootstrapProjectMemory } from './project-memory-store';
 import { getDaemonClient } from '../daemon/client';
 import type {
   AgentServerMessage,
@@ -16,6 +21,7 @@ import type {
   AgentShareMode,
   AgentShareStatus,
   AgentUsage,
+  AgentSessionKind,
 } from './types';
 import type {
   CopilotClient as CopilotClientType,
@@ -25,9 +31,30 @@ import type {
   PermissionRequestResult,
   ExitPlanModeRequest,
   ExitPlanModeResult,
+  Tool,
 } from '@github/copilot-sdk';
+import { defineTool } from '@github/copilot-sdk';
 
 const MAX_TRANSCRIPT_EVENTS = 5_000;
+/**
+ * Hard ceiling on the serialized transcript kept in memory and persisted to
+ * `cli_sessions.output_log`.
+ *
+ * The event count alone is not a real bound — 5,000 events of large tool
+ * output is hundreds of megabytes — and `output_log` is rewritten in full on
+ * every save, so an unbounded transcript makes every save and every replay
+ * more expensive. Trimming loses nothing durable: the runtime keeps the
+ * complete event log on disk and a resume rebuilds from it.
+ */
+const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
+/** Trim well under the ceiling so the next several saves do not re-trim. */
+const TRANSCRIPT_TRIM_TARGET_BYTES = Math.floor(MAX_TRANSCRIPT_BYTES * 0.8);
+/**
+ * How many transcript events a client receives when it connects. Older events
+ * are fetched on demand, so opening a long conversation does not ship the
+ * whole history over the socket.
+ */
+export const REPLAY_WINDOW = 800;
 const SAVE_DEBOUNCE_MS = 1_500;
 const TOOL_RECONCILE_MS = 5_000;
 /** How often a busy session double-checks liveness against the runtime. */
@@ -73,11 +100,17 @@ interface PendingPlan {
   message: Extract<AgentServerMessage, { type: 'exit_plan_request' }>;
 }
 
+interface PendingQuestion {
+  resolve: (answer: string) => void;
+  message: Extract<AgentServerMessage, { type: 'ask_user_request' }>;
+}
+
 export interface AgentSession {
   sessionId: string;
   userId: string;
   projectId: string | null;
   worktreeId: string | null;
+  kind: AgentSessionKind;
   cwd: string;
   model: string;
   mode: AgentMode;
@@ -87,6 +120,8 @@ export interface AgentSession {
   subscribers: Set<AgentSubscriber>;
   pendingPermissions: Map<string, PendingPermission>;
   pendingPlans: Map<string, PendingPlan>;
+  /** Questions raised by the `ask_user` tool, awaiting a click from the user. */
+  pendingQuestions: Map<string, PendingQuestion>;
   sdk: CopilotSession;
   unsubscribe: () => void;
   saveTimer: ReturnType<typeof setTimeout> | null;
@@ -99,17 +134,65 @@ export interface AgentSession {
   assistantByMessageId: Map<string, string>;
   /** Maps SDK messageId → `message_start` time, used to derive reply duration. */
   assistantStartTs: Map<string, number>;
+  /**
+   * Wall-clock start of the in-flight turn: the moment the user's request was
+   * submitted. Durations reported to the UI are measured from here through to
+   * completion so they cover the whole round trip (queueing, thinking, tools),
+   * not just token generation. Null whenever the session is idle.
+   */
+  turnStartTs: number | null;
   /** Maps SDK toolCallId → transcript entry id for tool activity */
   toolByCallId: Map<string, string>;
+  /**
+   * Raw cumulative length of each running tool's streamed output, keyed by
+   * tool call id. `tool.execution_partial_result` reports a snapshot of
+   * everything produced so far, not an increment, so this is what lets us
+   * send clients only the new suffix.
+   */
+  toolPartialLen: Map<string, number>;
   /** Current GitHub session-sharing state (remote-control mode). */
   share: AgentShareStatus;
   /** Accumulated token/billing usage across every model call in the session. */
   usage: AgentUsage;
   /** When true, every permission request is auto-approved without prompting. */
   allowAllPermissions: boolean;
+  /**
+   * A session nobody is expected to be watching: a worker the Project Lead
+   * delegated to, rather than something the user opened. There is no client to
+   * answer a permission prompt, so prompting would block the run forever.
+   * Optional so session objects built before this field existed stay assignable.
+   */
+  unattended?: boolean;
+  /**
+   * Follow-up prompts the user submitted while a turn was already in flight.
+   * The SDK accepts one turn at a time, so instead of rejecting the input (or
+   * forcing the user to wait for a long delegation to finish) we hold it here
+   * and send it the moment the session goes idle. Optional so session objects
+   * built before this field existed stay assignable.
+   */
+  queuedPrompts?: string[];
 }
 
 const agentSessions = new Map<string, AgentSession>();
+
+/**
+ * In-flight `resumeAgentSession` calls, keyed by the requested session id.
+ *
+ * Resuming is a slow, awaited round trip (`client.resumeSession`), and the
+ * session is only registered in `agentSessions` once that resolves. Without
+ * this guard, two overlapping connects for the same id — a reconnect storm, a
+ * StrictMode double-mount, or two panes bound to the same Chief-of-Staff/Lead
+ * session — each build a *separate* session object with its own SDK connection
+ * and its own `pendingPermissions` map. Whichever registers last wins, so the
+ * permission promise the runtime is actually blocked on can end up stranded in
+ * an orphaned object that `setAllowAllPermissions` / `setAgentMode` /
+ * `respondToPermission` (all keyed by `agentSessions.get`) can never resolve —
+ * the "allow all / autopilot does nothing on a reloaded session" symptom.
+ * Coalescing concurrent resumes onto one promise keeps a single canonical
+ * session object per id.
+ */
+const resumeInFlight = new Map<string, Promise<AgentSession | undefined>>();
+const persistentLeadInFlight = new Map<string, Promise<AgentSession>>();
 
 // ---------------------------------------------------------------------------
 // Shared Copilot SDK client (lazy singleton)
@@ -194,6 +277,28 @@ export async function reconnectAgentRuntime(): Promise<void> {
   clientPromise = null;
   modelsCache = null;
   modelsPromise = null;
+  // Every in-memory handle points at the runtime we are about to replace.
+  // Leaving them behind makes `findAgentSession` hand out sessions backed by
+  // a dead connection, which is what kept a blank lead conversation pinned
+  // in place even after the real one became resumable again. Flush their
+  // state first so nothing is lost, then force the next connect to re-resolve
+  // from the database.
+  for (const session of agentSessions.values()) {
+    if (session.saveTimer) {
+      clearTimeout(session.saveTimer);
+      session.saveTimer = null;
+    }
+    stopToolReconciliation(session);
+    stopBusyWatchdog(session);
+    try {
+      session.unsubscribe();
+    } catch {
+      /* ignore */
+    }
+    persistTranscript(session, true);
+    persistAgentState(session);
+  }
+  agentSessions.clear();
   if (previous) {
     try {
       const client = await previous;
@@ -321,22 +426,162 @@ export function getAgentSession(sessionId: string): AgentSession | undefined {
   return agentSessions.get(sessionId);
 }
 
+export function listLiveAgentSessions() {
+  return [...agentSessions.values()]
+    .filter((session) => session.alive)
+    .map((session) => ({
+      sessionId: session.sessionId,
+      projectId: session.projectId,
+      worktreeId: session.worktreeId,
+      kind: session.kind,
+      status: session.status,
+      mode: session.mode,
+      cwd: session.cwd,
+    }));
+}
+
 export function findAgentSession(
   userId: string,
   projectId: string | null,
   worktreeId: string | null,
+  kind: AgentSessionKind = 'agent',
 ): AgentSession | undefined {
   for (const s of agentSessions.values()) {
     if (
       s.userId === userId &&
       s.projectId === projectId &&
       (s.worktreeId ?? null) === (worktreeId ?? null) &&
+      s.kind === kind &&
       s.alive
     ) {
       return s;
     }
   }
   return undefined;
+}
+
+/**
+ * Close out empty lead/CoS rows once we have settled on the live conversation.
+ *
+ * Each failed resume used to leave a blank session behind, and those rows are
+ * what made this "singleton" grow without bound. Only rows with no transcript
+ * are retired, and never one that is still live in this process, so a real
+ * conversation can never be discarded.
+ */
+function retireEmptyLeadSessions(
+  userId: string,
+  kind: Extract<AgentSessionKind, 'project_lead' | 'chief_of_staff'>,
+  projectId: string | null,
+  keepSessionId: string,
+): void {
+  try {
+    const stale = getDb().prepare(`
+      SELECT id
+      FROM cli_sessions
+      WHERE user_id = ?
+        AND kind = ?
+        AND project_id IS ?
+        AND worktree_id IS NULL
+        AND ended_at IS NULL
+        AND id != ?
+        AND (output_log IS NULL OR length(output_log) <= 2)
+    `).all(userId, kind, projectId, keepSessionId) as Array<{ id: string }>;
+
+    const retire = getDb().prepare(
+      "UPDATE cli_sessions SET ended_at = datetime('now') WHERE id = ?",
+    );
+    for (const row of stale) {
+      const live = agentSessions.get(row.id);
+      if (live?.alive) continue;
+      retire.run(row.id);
+    }
+  } catch {
+    /* housekeeping only — never block opening the conversation */
+  }
+}
+
+function persistentLeadKey(
+  userId: string,
+  kind: Extract<AgentSessionKind, 'project_lead' | 'chief_of_staff'>,
+  projectId: string | null,
+): string {
+  return `${userId}:${kind}:${projectId ?? ''}`;
+}
+
+/**
+ * Return the single durable lead conversation for this user and scope.
+ *
+ * A live session wins, except when it is still empty and a stored
+ * conversation exists: failed resumes leave blank sessions behind, and
+ * preferring one would pin an empty chat in place of the user's real history.
+ * Concurrent mounts share one create/resume path.
+ */
+export async function getOrCreatePersistentLeadSession(
+  userId: string,
+  projectId: string | null,
+  kind: Extract<AgentSessionKind, 'project_lead' | 'chief_of_staff'>,
+  model?: string,
+): Promise<AgentSession> {
+  const live = findAgentSession(userId, projectId, null, kind);
+  if (live && live.transcript.length > 0) return live;
+
+  const key = persistentLeadKey(userId, kind, projectId);
+  const pending = persistentLeadInFlight.get(key);
+  if (pending) return pending;
+
+  const run = (async () => {
+    // Prefer the conversation that actually has history. Failed resumes used
+    // to leave behind empty rows with a newer `started_at`, so ordering by
+    // recency alone hands the user a blank session and buries the real one.
+    // `length(output_log) > 2` skips both NULL and an empty JSON array.
+    const rows = getDb().prepare(`
+      SELECT id, (output_log IS NOT NULL AND length(output_log) > 2) AS hasContent
+      FROM cli_sessions
+      WHERE user_id = ?
+        AND kind = ?
+        AND project_id IS ?
+        AND worktree_id IS NULL
+        AND ended_at IS NULL
+      ORDER BY (output_log IS NOT NULL AND length(output_log) > 2) DESC,
+               started_at DESC,
+               rowid DESC
+      LIMIT 20
+    `).all(userId, kind, projectId) as Array<{ id: string; hasContent: number }>;
+
+    // A blank live session holds this kind's external tools on the runtime
+    // connection, so resuming the real conversation would fail with a tool
+    // name clash and we would fall back to the blank one forever. Nothing is
+    // lost by ending it: it has no transcript.
+    let blankLive = live;
+    if (blankLive && rows.some((row) => row.hasContent && row.id !== blankLive!.sessionId)) {
+      await endAgentSession(blankLive.sessionId);
+      blankLive = undefined;
+    }
+
+    for (const row of rows) {
+      // The blank live session is already attached; resuming it again would
+      // clash with its own tool registrations.
+      if (row.id === blankLive?.sessionId) continue;
+      const resumed = await resumeAgentSession(userId, row.id);
+      if (resumed) {
+        retireEmptyLeadSessions(userId, kind, projectId, resumed.sessionId);
+        return resumed;
+      }
+    }
+
+    // Nothing stored could be reopened — reuse the empty live session rather
+    // than stacking up another one.
+    if (blankLive) return blankLive;
+
+    const created = await createAgentSession(userId, projectId, null, model, kind);
+    retireEmptyLeadSessions(userId, kind, projectId, created.sessionId);
+    return created;
+  })().finally(() => {
+    persistentLeadInFlight.delete(key);
+  });
+
+  persistentLeadInFlight.set(key, run);
+  return run;
 }
 
 // ---------------------------------------------------------------------------
@@ -371,9 +616,48 @@ function upsertEvent(session: AgentSession, event: AgentTranscriptEvent): void {
 function setStatus(session: AgentSession, status: AgentStatus): void {
   if (session.status === status) return;
   session.status = status;
-  emit(session, { type: 'status', status });
+  // Anchor the turn clock the first time we go busy and clear it on completion,
+  // so every duration the UI renders spans user-request → done.
+  if (status === 'busy') {
+    if (session.turnStartTs === null) session.turnStartTs = Date.now();
+  } else {
+    session.turnStartTs = null;
+  }
+  emit(session, { type: 'status', status, turnStartedAt: session.turnStartTs });
   if (status === 'busy') ensureBusyWatchdog(session);
-  else stopBusyWatchdog(session);
+  else {
+    stopBusyWatchdog(session);
+    // The turn that was blocking the user's follow-ups just ended — send the
+    // next one. Deferred so this runs after the current event handler unwinds.
+    if (session.queuedPrompts?.length) queueMicrotask(() => void flushQueuedPrompts(session));
+  }
+}
+
+function emitQueued(session: AgentSession): void {
+  emit(session, { type: 'queued', prompts: [...(session.queuedPrompts ?? [])] });
+}
+
+/** Send the oldest queued follow-up, if the session is idle and still alive. */
+export async function flushQueuedPrompts(session: AgentSession): Promise<void> {
+  if (!session.alive || session.status === 'busy') return;
+  const next = session.queuedPrompts?.shift();
+  if (next === undefined) return;
+  emitQueued(session);
+  await sendToSession(session, next);
+}
+
+/** Follow-ups waiting to be sent, oldest first. */
+export function getQueuedPrompts(sessionId: string): string[] {
+  return [...(agentSessions.get(sessionId)?.queuedPrompts ?? [])];
+}
+
+/** Drop a queued follow-up the user changed their mind about. */
+export function dequeuePrompt(sessionId: string, index: number): void {
+  const session = agentSessions.get(sessionId);
+  if (!session?.queuedPrompts) return;
+  if (index < 0 || index >= session.queuedPrompts.length) return;
+  session.queuedPrompts.splice(index, 1);
+  emitQueued(session);
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +721,21 @@ function runningTools(session: AgentSession) {
     (event): event is Extract<AgentTranscriptEvent, { kind: 'tool' }> =>
       event.kind === 'tool' && event.status === 'running',
   );
+}
+
+/** Find a live worktree-agent session without requiring the lead to know its user id. */
+export function findLiveWorktreeAgent(projectId: string, worktreeId: string): AgentSession | undefined {
+  for (const session of agentSessions.values()) {
+    if (
+      session.alive &&
+      session.kind === 'agent' &&
+      session.projectId === projectId &&
+      session.worktreeId === worktreeId
+    ) {
+      return session;
+    }
+  }
+  return undefined;
 }
 
 function stopToolReconciliation(session: AgentSession): void {
@@ -531,6 +830,9 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
   switch (event.type) {
     case 'user.message': {
       const content = (event.data as { content?: string }).content ?? '';
+      // The user's request is the origin of the turn clock: everything that
+      // follows is reported as elapsed time from this moment.
+      session.turnStartTs = ts;
       upsertEvent(session, { kind: 'user', id: event.id, ts, content });
       break;
     }
@@ -574,12 +876,15 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
       if (!content) break;
       const startTs = (messageId ? session.assistantStartTs.get(messageId) : undefined) ?? ts;
       if (messageId) session.assistantStartTs.delete(messageId);
+      // Duration is measured from the user's request, not from the first token,
+      // so it reflects the wait the user actually experienced.
+      const originTs = session.turnStartTs ?? startTs;
       upsertEvent(session, {
         kind: 'assistant',
         id: entryId,
         ts: startTs,
         content,
-        durationMs: Math.max(0, ts - startTs),
+        durationMs: Math.max(0, ts - originTs),
       });
       break;
     }
@@ -597,6 +902,7 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
       const data = event.data as { toolCallId: string; toolName: string; arguments?: unknown };
       const entryId = `tool:${data.toolCallId}`;
       session.toolByCallId.set(data.toolCallId, entryId);
+      session.toolPartialLen?.delete(data.toolCallId);
       upsertEvent(session, {
         kind: 'tool',
         id: entryId,
@@ -614,9 +920,30 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
       const entryId = session.toolByCallId.get(data.toolCallId);
       if (entryId) {
         const entry = session.transcript.find((e) => e.id === entryId);
-        if (entry && entry.kind === 'tool')
-          entry.output = clampText((entry.output ?? '') + data.partialOutput, MAX_TOOL_OUTPUT_CHARS);
-        emit(session, { type: 'tool_delta', id: entryId, delta: data.partialOutput });
+        // `partialOutput` is a snapshot of everything the tool has produced so
+        // far, not an increment. Appending it repeated the output on screen
+        // until `tool.execution_complete` replaced it with the real result.
+        // Sending the snapshot itself would be quadratic on the wire, so send
+        // only the new suffix and keep the snapshot as the stored truth.
+        if (!session.toolPartialLen) session.toolPartialLen = new Map();
+        const seen = session.toolPartialLen.get(data.toolCallId) ?? 0;
+        const snapshot = data.partialOutput;
+        if (snapshot.length === seen) break;
+        session.toolPartialLen.set(data.toolCallId, snapshot.length);
+        if (entry && entry.kind === 'tool') {
+          entry.output = clampText(snapshot, MAX_TOOL_OUTPUT_CHARS);
+        }
+        if (snapshot.length > seen) {
+          emit(session, { type: 'tool_delta', id: entryId, delta: snapshot.slice(seen) });
+        } else {
+          // The tool rewrote rather than extended its output (a progress bar
+          // redrawing, for example), so the client cannot append its way there.
+          emit(session, {
+            type: 'tool_output',
+            id: entryId,
+            output: clampText(snapshot, MAX_TOOL_OUTPUT_CHARS),
+          });
+        }
       }
       break;
     }
@@ -657,6 +984,7 @@ export function handleSdkEvent(session: AgentSession, event: SessionEvent): void
         durationMs: prior ? Math.max(0, ts - prior.ts) : undefined,
       });
       if (runningTools(session).length === 0) stopToolReconciliation(session);
+      session.toolPartialLen?.delete(data.toolCallId);
       break;
     }
     case 'session.error': {
@@ -894,7 +1222,7 @@ async function waitForSession(
 
 function makePermissionHandler(
   getSession: () => AgentSession | undefined,
-  fallback?: { allowAllPermissions?: boolean },
+  fallback?: { allowAllPermissions?: boolean; unattended?: boolean },
 ) {
   return async (request: PermissionRequest): Promise<PermissionRequestResult> => {
     // A resumed session can re-emit prompts that were pending while nobody was
@@ -902,7 +1230,9 @@ function makePermissionHandler(
     // Wait briefly rather than blanket-approving work the user never saw.
     const session = (await waitForSession(getSession)) ?? undefined;
     if (!session) {
-      return fallback?.allowAllPermissions ? { kind: 'approve-once' } : { kind: 'reject' };
+      return fallback?.allowAllPermissions || fallback?.unattended
+        ? { kind: 'approve-once' }
+        : { kind: 'reject' };
     }
     if (autoApprovesPermissions(session)) return { kind: 'approve-once' };
 
@@ -932,6 +1262,95 @@ function makeExitPlanHandler(getSession: () => AgentSession | undefined) {
     const session = getSession();
     if (!session) return { approved: false };
 
+    if (session.kind === 'agent' && session.projectId && session.worktreeId) {
+      const projectId = session.projectId;
+      const worktreeId = session.worktreeId;
+      const planContent = request.planContent ?? request.summary;
+
+      // Work the Project Lead delegated is reviewed by the lead itself: the
+      // worker blocks here until the lead approves or asks for changes.
+      const { getDelegationForWorktree } = await import('./delegation-store');
+      if (getDelegationForWorktree(worktreeId)) {
+        const { requestLeadPlanReview } = await import('./delegation-runtime');
+        const decision = await requestLeadPlanReview({
+          userId: session.userId,
+          projectId,
+          worktreeId,
+          summary: request.summary,
+          planContent,
+        });
+        if (decision) {
+          emit(session, {
+            type: 'event',
+            event: {
+              kind: 'notice',
+              id: randomUUID(),
+              ts: Date.now(),
+              message: decision.approved
+                ? `Project Lead approved the plan: ${decision.note}`
+                : `Project Lead requested changes: ${decision.note}`,
+            },
+          });
+          return decision.approved
+            ? { approved: true, selectedAction: request.recommendedAction }
+            : { approved: false };
+        }
+        // No answer in time — fall through and ask the user directly.
+        emit(session, {
+          type: 'event',
+          event: {
+            kind: 'notice',
+            id: randomUUID(),
+            ts: Date.now(),
+            message: 'Project Lead did not respond to the plan review; escalating to you.',
+          },
+        });
+      }
+
+      const { reviewPlanForWorker } = await import('./project-lead-tools');
+      const scope = request.summary.toLowerCase().includes('large') ? 'large'
+        : request.summary.toLowerCase().includes('medium') ? 'medium' : 'small';
+      const review = reviewPlanForWorker(projectId, worktreeId, planContent, scope);
+      if (review.action === 'approve' || review.action === 'approve-with-note') {
+        emit(session, {
+          type: 'event',
+          event: {
+            kind: 'notice',
+            id: randomUUID(),
+            ts: Date.now(),
+            message: `Project Lead ${review.action}: ${review.reason}`,
+          },
+        });
+        return { approved: true, selectedAction: request.recommendedAction };
+      }
+      if (review.action === 'request-changes') {
+        emit(session, {
+          type: 'event',
+          event: {
+            kind: 'notice',
+            id: randomUUID(),
+            ts: Date.now(),
+            message: `Project Lead requested plan changes: ${review.reason}`,
+          },
+        });
+        return { approved: false };
+      }
+      const requestId = randomUUID();
+      return new Promise<ExitPlanModeResult>((resolve) => {
+        const message: Extract<AgentServerMessage, { type: 'exit_plan_request' }> = {
+          type: 'exit_plan_request',
+          requestId,
+          summary: request.summary,
+          planContent: request.planContent,
+          actions: request.actions,
+          recommended: request.recommendedAction,
+          reviewNote: `Project Lead escalation: ${review.reason}`,
+        };
+        session.pendingPlans.set(requestId, { resolve, message });
+        emit(session, message);
+      });
+    }
+
     const requestId = randomUUID();
     return new Promise<ExitPlanModeResult>((resolve) => {
       const message: Extract<AgentServerMessage, { type: 'exit_plan_request' }> = {
@@ -960,11 +1379,15 @@ export function respondToPermission(
 
 /**
  * Whether a permission request should be approved without asking the user:
- * either the session is in "allow everything" mode (any agent mode) or the
- * agent is running auto-pilot.
+ * the session is in "allow everything" mode (any agent mode), the agent is
+ * running auto-pilot, or nobody is attached to answer in the first place.
+ *
+ * That last case covers workers the Project Lead delegated to. They run in a
+ * worktree the system created, with no client subscribed, so a prompt has no
+ * one to answer it and the worker would sit blocked until it was cancelled.
  */
 export function autoApprovesPermissions(session: AgentSession): boolean {
-  return session.allowAllPermissions || session.mode === 'autopilot';
+  return session.allowAllPermissions || session.mode === 'autopilot' || session.unattended === true;
 }
 
 /** Session-level permission resolution. Exported for unit testing. */
@@ -1073,9 +1496,37 @@ function scheduleSave(session: AgentSession): void {
   }, SAVE_DEBOUNCE_MS);
 }
 
+/**
+ * Serialize the transcript, first dropping the oldest events if it exceeds the
+ * byte budget.
+ *
+ * Callers were about to stringify anyway, so the JSON is returned rather than
+ * recomputed. The expensive per-event measuring pass only runs when the
+ * transcript is actually over budget, and the trim goes well below the ceiling
+ * so it does not re-trigger on the next save.
+ */
+export function serializeTranscriptWithinBudget(session: AgentSession): string {
+  const json = JSON.stringify(session.transcript);
+  if (json.length <= MAX_TRANSCRIPT_BYTES) return json;
+
+  const sizes = session.transcript.map((event) => JSON.stringify(event).length + 1);
+  let total = sizes.reduce((sum, size) => sum + size, 0);
+  let drop = 0;
+  while (drop < sizes.length && total > TRANSCRIPT_TRIM_TARGET_BYTES) {
+    total -= sizes[drop];
+    drop++;
+  }
+  if (drop === 0) return json;
+  session.transcript.splice(0, drop);
+  console.log(
+    `[agent-bridge] trimmed ${drop} oldest events from ${session.sessionId} to stay within the transcript budget`,
+  );
+  return JSON.stringify(session.transcript);
+}
+
 function persistTranscript(session: AgentSession, ended = false): void {
   try {
-    const json = JSON.stringify(session.transcript);
+    const json = serializeTranscriptWithinBudget(session);
     if (ended) {
       getDb()
         .prepare("UPDATE cli_sessions SET output_log = ?, ended_at = datetime('now') WHERE id = ?")
@@ -1099,7 +1550,56 @@ export interface PersistedAgentState {
   projectId?: string | null;
   worktreeId?: string | null;
   allowAllPermissions?: boolean;
+  unattended?: boolean;
   cwd?: string;
+}
+
+function createPendingAgentSession(
+  userId: string,
+  projectId: string | null,
+  worktreeId: string | null,
+  kind: AgentSessionKind,
+  cwd: string,
+  model: string,
+  mode: AgentMode,
+  allowAllPermissions: boolean,
+  unattended = false,
+): AgentSession {
+  return {
+    // Replaced with the runtime session id as soon as create/resume resolves.
+    sessionId: `pending:${randomUUID()}`,
+    userId,
+    projectId,
+    worktreeId,
+    kind,
+    cwd,
+    model,
+    mode,
+    status: 'idle',
+    alive: true,
+    transcript: [],
+    subscribers: new Set(),
+    pendingPermissions: new Map(),
+    pendingPlans: new Map(),
+    pendingQuestions: new Map(),
+    sdk: undefined as unknown as CopilotSession,
+    unsubscribe: () => {},
+    saveTimer: null,
+    toolReconcileTimer: null,
+    toolReconcileInFlight: false,
+    busyWatchdogTimer: null,
+    busyWatchdogInFlight: false,
+    assistantByMessageId: new Map(),
+    assistantStartTs: new Map(),
+    turnStartTs: null,
+    toolByCallId: new Map(),
+    toolPartialLen: new Map(),
+    share: { mode: 'off', steerable: false },
+    usage: emptyAgentUsage(),
+    allowAllPermissions,
+    unattended,
+    queuedPrompts: [],
+  };
 }
 
 export function persistAgentState(session: AgentSession): void {
@@ -1109,6 +1609,7 @@ export function persistAgentState(session: AgentSession): void {
     projectId: session.projectId,
     worktreeId: session.worktreeId,
     allowAllPermissions: session.allowAllPermissions,
+    unattended: session.unattended,
     cwd: session.cwd,
   };
   try {
@@ -1170,6 +1671,119 @@ const TURN_START_EVENTS = new Set([
   'tool.execution_start',
 ]);
 
+const AGENT_RENDERING_INSTRUCTIONS = `
+Format responses for the web Agent tab using Markdown. Use headings, lists, tables, and task lists when they improve clarity.
+Put source code, commands, logs, stack traces, JSON, YAML, XML, and diffs in fenced code blocks with an accurate language tag.
+Use fenced mermaid blocks for flowcharts, sequence diagrams, state machines, ER diagrams, and other visual explanations.
+Use LaTeX delimiters ($...$ or $$...$$) for mathematical notation.
+Use Markdown links for URLs and GitHub issues, pull requests, and commits. Do not emit raw HTML.
+Keep code blocks and tool output focused; avoid excessively large unstructured dumps.
+`;
+
+const ASK_USER_INSTRUCTIONS = `
+When you need a decision from the user and the answer is a choice rather than free prose —
+yes/no, approve/revise, pick one of several approaches or files — call the ask_user tool so
+they can answer with a single click. Offer specific, self-explanatory options. Do not end a
+turn with a question in prose when ask_user would do; only fall back to prose for genuinely
+open-ended questions.
+This applies above all to go-ahead checks. Whenever you would write "shall I proceed?",
+"want me to continue?", "ready for me to apply this?" or similar, ask it with ask_user and
+make the first option an explicit go-ahead ("Go ahead", "Yes, apply it") so the user can
+approve with one click instead of typing. Never leave a confirmation sitting in prose.
+The user may ignore the buttons and type something else; whatever they type comes back to
+you as the answer. Treat a typed reply as their real instruction and follow it, even when it
+does not match any option you offered.
+`;
+
+const WORKTREE_DIGEST_INSTRUCTIONS = `
+When working in a worktree, keep the portfolio dashboard current by calling update_digest
+at meaningful milestones and before becoming idle. Use concise, factual summaries; include
+the files you changed or intend to change in touched_files, and report blocked status rather
+than guessing when you need input.
+`;
+
+const CHIEF_OF_STAFF_INSTRUCTIONS = `
+You are the user's Chief of Staff. Work only from compact project and worktree status
+rollups exposed by your tools. Do not request or reconstruct raw project transcripts.
+Prioritize portfolio sequencing, surface blockers, and hand technical questions to a
+Project Lead through a decision thread. Project Leads send you briefings (via
+list_project_briefings) after significant conversations or decisions; check these to stay
+aware of what is happening in each project without reading its full chat history.
+`;
+
+const PROJECT_LEAD_BASE_INSTRUCTIONS = `
+You are the Project Lead for this project. Review project status, coordinate worktrees, and
+ask for clarification before delegating ambiguous work. At the start of a conversation, call
+get_project_memory to load (and, if needed, bootstrap) your persistent understanding of this
+project's README, recent history, worktrees, and open decisions.
+
+Delegation is asynchronous. Use delegate_to_worker to start a background worker on a task:
+it creates or reuses a worktree, opens its own Copilot session, and hands over the work. The
+worker plans first and comes back to you through decide_worker_plan before it changes any
+files, and it can reach you with ask_project_lead when it hits a blocker — answer with
+nudge_worker. Once you have delegated, say what you delegated and end your turn. Never idle,
+poll, sleep, or re-read digests in a loop waiting for a worker to finish — that blocks the
+conversation and the user cannot ask you about anything else while your turn is open. Check
+progress with list_delegations/get_digest only when the user asks or at the start of a later
+turn, and report what changed then.
+
+Workers report to you rather than the other way round: you are messaged when one submits a
+plan, asks a question, finishes, blocks, or stops unexpectedly. When a worker stops without
+finishing, close it out with cancel_worker and then, if the work still matters, call
+delegate_to_worker again passing that same worktreeId so its branch and existing work are
+reused instead of started over. cancel_worker succeeds even when the worker has already
+stopped — that is how you clear a dead delegation so the slot is free.
+
+When you would otherwise review a worker's diff or run its tests inline — which burns your own
+context and blocks you from coordinating — hand the review off instead with
+spin_off_review(worktreeId, focus, transcriptSnapshot?, deepMerge?). It spawns a review persona
+that carries your context (your focus brief, and optionally a slice of your reasoning), runs
+async in that worktree, may read the diff and run the tests but never commits or modifies
+anything, and reports a pass / changes-needed verdict back to you which you then own and act on
+(approve the merge, or nudge the worker with the findings). Reviews draw on their own
+concurrency budget, separate from workers, so you can start one even when workers are maxed
+out. Merge-back is verdict-only by default; pass deepMerge:true for a high-stakes review to
+also fold the reviewer's reasoning back so you can answer follow-ups as if you reviewed. Like
+delegation this returns immediately — say what you spun off and end your turn.
+
+After reaching a decision or
+completing a significant review, call brief_chief_of_staff with a headline-style summary of
+one or two sentences (280 characters or less) so the Chief of Staff stays aware of this
+project's conversation without reading the full transcript. Briefings are a digest, not a
+recap: state what was decided and what it unblocks, and leave the detail in the transcript.
+
+Keep the project todo list current — it is your plan of record, shared with the user, and it
+outlives this conversation when the transcript is compacted away. Call list_todos at the start
+of a turn that involves planning, add_todos when work is identified, and update_todo to tick
+items off as they actually land. Do not keep a plan only in your reply: the user reads the
+list in the Project Lead detail panel and expects it to reflect reality.
+
+Clean up after yourself. Every worktree holds a tab on the user's Project Lead page and a node
+in their sidebar, so finished work that is never retired buries the work that is still live.
+Once a worker's changes have landed on the base branch, call list_closable_worktrees and then
+close_worktree on each one it reports as safe. Do this as part of wrapping up a piece of work —
+when a merge completes or a worker reports done — not only when the user asks. close_worktree
+refuses anything with uncommitted changes, unmerged commits, a merge in flight, or a worker
+mid-turn, so it is safe to try; report what it refused rather than working around it.
+
+When a task would clearly benefit from a skill you don't have — interactive HTML/diagram
+editing is the canonical case, where the Lavish skill helps — suggest installing it. Use
+browse_skills to see what is available. Only when the project's skill_install_mode is
+approve_and_install may you offer to install it: ask the user to approve with ask_user, and
+only if they say yes call install_skill with approved:true (it also loads the plugin into your
+live session so you can start using it). Under suggest_only, recommend the skill and how it
+helps but never install it — install_skill will refuse.
+
+When this project's github_task_mode is not off, you have first-class GitHub task tools. Use
+the read tools (list_github_issues, get_github_issue, list_pull_requests, list_milestones,
+get_github_board) to ground planning in real issues, PRs, and the board. Under read_only you may
+only examine. Under manage you may also file and update issues, move board cards, and open the
+pull request that closes an issue — but every such write requires an explicit user go-ahead: ask
+with ask_user first and only if they say yes call the tool with confirmed:true (never write
+without it). The typical loop is: examine an issue, delegate a worker to a worktree to do the
+work, then open the PR that closes it.
+`;
+
 export function deriveStatusFromEvents(events: SessionEvent[] | undefined): AgentStatus {
   if (!Array.isArray(events)) return 'idle';
   for (let i = events.length - 1; i >= 0; i -= 1) {
@@ -1181,56 +1795,306 @@ export function deriveStatusFromEvents(events: SessionEvent[] | undefined): Agen
   return 'idle';
 }
 
+/**
+ * The tool set a session is entitled to for its kind/scope. Shared by
+ * `createAgentSession` and `resumeAgentSession` so a session resumed after a
+ * server restart gets back the same tools it was created with — the SDK
+ * negotiates tool availability per-connection, so omitting this on resume
+ * silently strips a session's tools, which is why unresumed sessions can look
+ * "dead" (any turn that needs a tool call stalls or errors).
+ */
+/** Fallback choices when the agent asks a question without offering any. */
+const DEFAULT_ASK_OPTIONS = ['Yes', 'No'];
+const MAX_ASK_OPTIONS = 8;
+
+/**
+ * Lets the agent put a question to the user as clickable buttons instead of
+ * making them type an answer. Every session gets this — answering "which of
+ * these three?" with a mouse is useful whatever the agent is doing.
+ */
+export function createAskUserTool(getSession: () => AgentSession | undefined): Tool<any> {
+  return defineTool('ask_user', {
+    description:
+      'Ask the user a question and let them answer by clicking a button. Use this for ANY ' +
+      'non-freeform question — yes/no confirmations, "shall I proceed?" go-ahead checks, ' +
+      'picking between approaches, choosing a file or branch — instead of asking in prose and ' +
+      'waiting for them to type. Returns the option the user chose, or whatever they typed ' +
+      'instead. Prefer this over ending your turn with a question.',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: {
+          type: 'string',
+          description: 'The question, phrased so the options below are the obvious answers.',
+          maxLength: 500,
+        },
+        detail: {
+          type: 'string',
+          description: 'Optional context shown under the question, e.g. the trade-offs involved.',
+          maxLength: 2000,
+        },
+        options: {
+          type: 'array',
+          items: { type: 'string' },
+          description: `The answers to offer as buttons (max ${MAX_ASK_OPTIONS}). Defaults to Yes/No.`,
+        },
+        allowText: {
+          type: 'boolean',
+          description: 'Also let the user type their own answer. Default true.',
+        },
+      },
+      required: ['question'],
+    },
+    handler: async ({
+      question,
+      detail,
+      options,
+      allowText,
+    }: {
+      question: string;
+      detail?: string;
+      options?: string[];
+      allowText?: boolean;
+    }): Promise<string> => {
+      const session = getSession();
+      // An unattended worker has nobody watching its pane, so blocking here
+      // would stall the run until it is cancelled by hand.
+      if (!session || !session.alive) {
+        return 'No interactive user is attached to this session. Decide for yourself and continue.';
+      }
+      if (session.unattended) {
+        return 'This session is running unattended, so nobody can answer. Use your best judgement and continue.';
+      }
+
+      const cleaned = (options ?? [])
+        .map((option) => String(option ?? '').trim())
+        .filter(Boolean)
+        .slice(0, MAX_ASK_OPTIONS);
+      const requestId = randomUUID();
+      const message: Extract<AgentServerMessage, { type: 'ask_user_request' }> = {
+        type: 'ask_user_request',
+        requestId,
+        question: String(question ?? '').trim() || 'Which would you prefer?',
+        detail: detail ? String(detail) : undefined,
+        options: cleaned.length ? cleaned : DEFAULT_ASK_OPTIONS,
+        allowText: allowText !== false,
+      };
+
+      return new Promise<string>((resolve) => {
+        session.pendingQuestions.set(requestId, { resolve, message });
+        emit(session, message);
+      });
+    },
+    skipPermission: true,
+    defer: 'never',
+  });
+}
+
+/** Deliver the user's click back to the waiting `ask_user` call. */
+export function respondToAskUser(sessionId: string, requestId: string, answer: string): void {
+  const session = agentSessions.get(sessionId);
+  if (!session) return;
+  resolveAskUser(session, requestId, answer);
+}
+
+/** Session-level `ask_user` resolution. Exported for unit testing. */
+export function resolveAskUser(session: AgentSession, requestId: string, answer: string): void {
+  const pending = session.pendingQuestions.get(requestId);
+  if (!pending) return;
+  session.pendingQuestions.delete(requestId);
+  pending.resolve(answer);
+  emit(session, { type: 'ask_user_resolved', requestId });
+}
+
+/**
+ * Re-raise an `ask_user` question that a restart left unanswered.
+ *
+ * The promise the tool call is parked on lives in this process, so a server
+ * restart orphans it: the transcript still shows the call running, the browser
+ * has no card to click, and the turn can never end. That looks exactly like a
+ * broken ask_user — the tool appears in the transcript with no question.
+ *
+ * Rebuild the prompt from the recorded arguments and deliver the answer as an
+ * ordinary message. The tool result itself has nowhere to go now, but the agent
+ * still gets its answer and the conversation moves again.
+ */
+export async function reviveOrphanedQuestions(session: AgentSession): Promise<void> {
+  // A conversation whose newest tool call is an ask_user that never returned
+  // successfully is parked on a promise this process no longer holds. That
+  // includes one a previous resume already marked interrupted: marking it did
+  // not end the turn, so the session stayed busy and quietly queued everything
+  // the user typed.
+  const lastTool = [...session.transcript]
+    .reverse()
+    .find((event): event is Extract<AgentTranscriptEvent, { kind: 'tool' }> => event.kind === 'tool');
+  if (!lastTool || lastTool.toolName !== 'ask_user' || lastTool.status === 'success') return;
+
+  // The runtime is still waiting for a tool result that can never arrive, and
+  // a session in that state accepts a prompt and then silently drops it — no
+  // reply, no error. Only aborting the dead turn releases it, and it must
+  // happen before we go idle and flush anything queued behind it.
+  try {
+    await session.sdk.abort();
+  } catch (err) {
+    console.error(`[agent-bridge] abort of an orphaned ask_user failed for ${session.sessionId}:`, err);
+  }
+  setStatus(session, 'idle');
+
+  const stuck = session.transcript.filter(
+    (event): event is Extract<AgentTranscriptEvent, { kind: 'tool' }> =>
+      event.kind === 'tool' && event.toolName === 'ask_user' && event.status === 'running',
+  );
+  if (stuck.length === 0) return;
+
+  for (const event of stuck) {
+    upsertEvent(session, {
+      ...event,
+      status: 'error',
+      output: 'Interrupted by a restart before the user answered.',
+    });
+  }
+
+  // Only the most recent question is still worth asking; anything older was
+  // superseded by whatever the conversation did next.
+  const last = stuck[stuck.length - 1];
+  const args = (last.args ?? {}) as {
+    question?: unknown;
+    detail?: unknown;
+    options?: unknown;
+    allowText?: unknown;
+  };
+  const question = String(args.question ?? '').trim();
+  if (!question) return;
+
+  const options = Array.isArray(args.options)
+    ? args.options
+        .map((option) => String(option ?? '').trim())
+        .filter(Boolean)
+        .slice(0, MAX_ASK_OPTIONS)
+    : [];
+  const requestId = randomUUID();
+  const message: Extract<AgentServerMessage, { type: 'ask_user_request' }> = {
+    type: 'ask_user_request',
+    requestId,
+    question,
+    detail: args.detail ? String(args.detail) : undefined,
+    options: options.length ? options : DEFAULT_ASK_OPTIONS,
+    allowText: args.allowText !== false,
+  };
+  session.pendingQuestions.set(requestId, {
+    message,
+    resolve: (answer) => {
+      void sendToSession(session, answer);
+    },
+  });
+  emit(session, message);
+}
+
+export function buildToolsForKind(
+  kind: AgentSessionKind,
+  projectId: string | null,
+  worktreeId: string | null,
+  userId?: string,
+  getSessionId?: () => string | undefined,
+  isReview = false,
+): Tool<any>[] | undefined {
+  const askUser = createAskUserTool(() => {
+    const id = getSessionId?.();
+    return id ? agentSessions.get(id) : undefined;
+  });
+  if (kind === 'chief_of_staff') return [...createChiefOfStaffTools(), askUser];
+  if (kind === 'project_lead')
+    return projectId ? [...createProjectLeadTools(projectId, userId, getSessionId), askUser] : [askUser];
+  if (worktreeId) {
+    const worktreeTools = createWorktreeAgentTools(worktreeId, projectId, userId);
+    // A spin_off_review reviewer is report-only: it must not be able to initiate
+    // a merge, which is a decision that belongs to the main Project Lead. Strip
+    // the merge tools (request_merge/check_merge_status) so an autopilot reviewer
+    // cannot usurp it; it keeps update_digest and ask_project_lead to report back.
+    return isReview
+      ? [...worktreeTools, askUser]
+      : [...worktreeTools, ...createMergeTools(worktreeId), askUser];
+  }
+  return [askUser];
+}
+
+/**
+ * The appended system prompt for a session of this kind.
+ *
+ * Applied on resume as well as create. The runtime persists whatever was set
+ * when a session was first created, so a long-lived Chief of Staff or Project
+ * Lead conversation would otherwise keep its original instructions for ever:
+ * every guidance change here reached only brand-new sessions, and the durable
+ * ones — the only ones the user actually works in — silently never saw it.
+ */
+function buildSystemInstructions(
+  kind: AgentSessionKind,
+  projectId: string | null | undefined,
+  worktreeId: string | null | undefined,
+): string {
+  // Project Leads bootstrap (or reuse) a persistent project-memory summary so a fresh
+  // conversation is immediately grounded in the project's README, history, and open work.
+  let projectMemorySummary = '';
+  if (kind === 'project_lead' && projectId) {
+    try {
+      const memory = getOrBootstrapProjectMemory(projectId);
+      projectMemorySummary = `\n\n## Project memory (bootstrapped)\n${memory.summary}`;
+    } catch (err) {
+      console.warn(`[agent-bridge] Failed to bootstrap project memory for ${projectId}:`, err);
+    }
+  }
+
+  return [
+    AGENT_RENDERING_INSTRUCTIONS,
+    ASK_USER_INSTRUCTIONS,
+    worktreeId ? WORKTREE_DIGEST_INSTRUCTIONS : '',
+    kind === 'project_lead' ? `\n${PROJECT_LEAD_BASE_INSTRUCTIONS}${projectMemorySummary}` : '',
+    kind === 'chief_of_staff' ? CHIEF_OF_STAFF_INSTRUCTIONS : '',
+  ].join('');
+}
+
 export async function createAgentSession(
   userId: string,
   projectId: string | null,
   worktreeId: string | null,
   model = DEFAULT_MODEL,
+  kind: AgentSessionKind = 'agent',
+  mode: AgentMode = DEFAULT_MODE,
+  options: { unattended?: boolean; isReview?: boolean } = {},
 ): Promise<AgentSession> {
   const client = await getClient();
   const cwd = resolveCwd(projectId, worktreeId);
 
-  // Placeholder holder so the permission handler can reach the session even
-  // though it's created before the SDK session resolves.
-  let sessionRef: AgentSession | undefined;
+  // Created up front so permission/plan callbacks fired during
+  // `createSession` can queue prompts instead of timing out and rejecting.
+  const session = createPendingAgentSession(
+    userId,
+    projectId ?? null,
+    worktreeId ?? null,
+    kind,
+    cwd,
+    model,
+    mode,
+    false,
+    options.unattended ?? false,
+  );
+  let sessionRef: AgentSession | undefined = session;
 
   const sdk = await client.createSession({
     model,
     streaming: true,
     workingDirectory: cwd,
+    systemMessage: {
+      mode: 'append',
+      content: buildSystemInstructions(kind, projectId, worktreeId),
+    },
+    tools: buildToolsForKind(kind, projectId, worktreeId, userId, () => sessionRef?.sessionId, options.isReview ?? false),
     onPermissionRequest: makePermissionHandler(() => sessionRef),
     onExitPlanModeRequest: makeExitPlanHandler(() => sessionRef),
   });
 
-  const session: AgentSession = {
-    sessionId: sdk.sessionId,
-    userId,
-    projectId: projectId ?? null,
-    worktreeId: worktreeId ?? null,
-    cwd,
-    model,
-    mode: DEFAULT_MODE,
-    status: 'idle',
-    alive: true,
-    transcript: [],
-    subscribers: new Set(),
-    pendingPermissions: new Map(),
-    pendingPlans: new Map(),
-    sdk,
-    unsubscribe: () => {},
-    saveTimer: null,
-    toolReconcileTimer: null,
-    toolReconcileInFlight: false,
-    busyWatchdogTimer: null,
-    busyWatchdogInFlight: false,
-    assistantByMessageId: new Map(),
-    assistantStartTs: new Map(),
-    toolByCallId: new Map(),
-    share: { mode: 'off', steerable: false },
-    usage: emptyAgentUsage(),
-    allowAllPermissions: false,
-  };
-  sessionRef = session;
+  session.sessionId = sdk.sessionId;
+  session.sdk = sdk;
 
   session.unsubscribe = sdk.on((event) => handleSdkEvent(session, event));
   agentSessions.set(session.sessionId, session);
@@ -1239,7 +2103,7 @@ export async function createAgentSession(
   db.prepare('INSERT OR IGNORE INTO users (id, github_id, role) VALUES (?, ?, ?)').run(userId, userId, 'user');
   db.prepare(
     'INSERT INTO cli_sessions (id, user_id, project_id, worktree_id, copilot_session_id, kind) VALUES (?, ?, ?, ?, ?, ?)',
-  ).run(session.sessionId, userId, projectId ?? null, worktreeId ?? null, session.sessionId, 'agent');
+  ).run(session.sessionId, userId, projectId ?? null, worktreeId ?? null, session.sessionId, kind);
   persistAgentState(session);
 
   console.log(`[agent-bridge] Created agent session ${session.sessionId}, cwd=${cwd}, model=${model}`);
@@ -1249,6 +2113,26 @@ export async function createAgentSession(
 export async function sendAgentMessage(sessionId: string, prompt: string): Promise<void> {
   const session = agentSessions.get(sessionId);
   if (!session || !session.alive) return;
+  await sendToSession(session, prompt);
+}
+
+/**
+ * Deliver a prompt to a live session, queueing it when a turn is already in
+ * flight. Exported for tests; callers should prefer `sendAgentMessage`.
+ */
+export async function sendToSession(session: AgentSession, prompt: string): Promise<void> {
+  if (!session.alive) return;
+  // The SDK runs one turn at a time. Rather than dropping input typed during a
+  // long turn (a Project Lead waiting on a worker can stay busy for minutes),
+  // hold it and replay it when the session next goes idle.
+  if (session.status === 'busy') {
+    (session.queuedPrompts ??= []).push(prompt);
+    emitQueued(session);
+    return;
+  }
+  // The turn clock starts when the user hands us the prompt, before the SDK
+  // round trip, so queueing and connection time are included in the total.
+  session.turnStartTs = Date.now();
   setStatus(session, 'busy');
   try {
     await session.sdk.send({ prompt, agentMode: session.mode });
@@ -1263,6 +2147,13 @@ export async function cancelAgent(sessionId: string): Promise<void> {
   const session = agentSessions.get(sessionId);
   if (!session || !session.alive) return;
 
+  // Stopping the turn also abandons anything queued behind it; otherwise the
+  // queue would immediately start a new turn the user just asked to stop.
+  if (session.queuedPrompts?.length) {
+    session.queuedPrompts.length = 0;
+    emitQueued(session);
+  }
+
   for (const [requestId, pending] of session.pendingPermissions) {
     session.pendingPermissions.delete(requestId);
     pending.resolve({ kind: 'reject' });
@@ -1272,6 +2163,11 @@ export async function cancelAgent(sessionId: string): Promise<void> {
     session.pendingPlans.delete(requestId);
     pending.resolve({ approved: false });
     emit(session, { type: 'exit_plan_resolved', requestId });
+  }
+  for (const [requestId, pending] of session.pendingQuestions) {
+    session.pendingQuestions.delete(requestId);
+    pending.resolve('The user cancelled the turn instead of answering.');
+    emit(session, { type: 'ask_user_resolved', requestId });
   }
   for (const event of session.transcript) {
     if (event.kind === 'tool' && event.status === 'running') {
@@ -1515,28 +2411,187 @@ export async function resumeAgentSession(userId: string, sessionId: string): Pro
   const existing = agentSessions.get(sessionId);
   if (existing && existing.alive) return existing;
 
+  // Coalesce concurrent resumes of the same id onto one promise so overlapping
+  // connects can never build competing session objects (see `resumeInFlight`).
+  const pending = resumeInFlight.get(sessionId);
+  if (pending) return pending;
+
+  const run = resumeAgentSessionUncached(userId, sessionId).finally(() => {
+    resumeInFlight.delete(sessionId);
+  });
+  resumeInFlight.set(sessionId, run);
+  return run;
+}
+
+/**
+ * True when the runtime reports a session id it does not know about, as
+ * opposed to a transient transport failure. Only these are safe to tombstone.
+ */
+function isSessionGoneError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  return /session not found/i.test(message);
+}
+
+/**
+ * True when the runtime refuses a resume because another connection still owns
+ * this session's external tools. The conversation is fine; the registration is
+ * stale, and restarting the runtime clears it.
+ */
+function isToolClashError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  return /tool name clash/i.test(message);
+}
+
+async function resumeAgentSessionUncached(
+  userId: string,
+  sessionId: string,
+  allowRuntimeRecovery = true,
+): Promise<AgentSession | undefined> {
+  // A resume may have completed while we were queued behind another caller.
+  const existing = agentSessions.get(sessionId);
+  if (existing && existing.alive) return existing;
+  // A dead-but-still-attached handle keeps this session's external tools
+  // registered, which would make our own resume fail with a tool name clash.
+  if (existing) {
+    agentSessions.delete(sessionId);
+    try {
+      await existing.sdk?.disconnect?.();
+    } catch {
+      /* already gone */
+    }
+  }
+
   const client = await getClient();
-  let sessionRef: AgentSession | undefined;
 
   // Load persisted state first: a resumed session may re-emit permission
   // prompts immediately, and the handler needs to know whether this session
   // had "allow all" enabled before it was detached.
   const persisted = loadAgentState(sessionId);
+  // The runtime negotiates tool availability per-connection: resuming without
+  // re-declaring the tools a session was created with leaves it with none,
+  // so any turn that needs to call a tool silently stalls or errors — this is
+  // the "dead after a server restart" symptom. Recover the original kind from
+  // `cli_sessions` (not persisted in `PersistedAgentState`) so we can rebuild
+  // the same tool set `createAgentSession` registered.
+  const kindRow = getDb().prepare('SELECT kind FROM cli_sessions WHERE id = ?').get(sessionId) as
+    | { kind?: AgentSessionKind }
+    | undefined;
+  const kind: AgentSessionKind = kindRow?.kind ?? 'agent';
+  const projectId = persisted.projectId ?? null;
+  const worktreeId = persisted.worktreeId ?? null;
+
+  // A worktree with a live delegation belongs to a worker the Project Lead
+  // started, which nobody is subscribed to. Sessions created before the flag
+  // existed have it missing, so derive it here rather than resuming them
+  // straight back onto the permission prompt they were already stuck on. The
+  // same lookup recovers whether this session is a spin_off_review reviewer, so
+  // its merge tools stay stripped across a restart.
+  let unattended = persisted.unattended ?? false;
+  let isReview = false;
+  if (worktreeId) {
+    try {
+      const { getDelegationForWorktree } = await import('./delegation-store');
+      const delegation = getDelegationForWorktree(worktreeId);
+      if (delegation && delegation.sessionId === sessionId) {
+        if (!unattended) unattended = true;
+        isReview = delegation.isReview === 1;
+      }
+    } catch (err) {
+      console.warn(`[agent-bridge] Could not check delegation for ${sessionId}:`, err);
+    }
+  }
+
+  const session = createPendingAgentSession(
+    userId,
+    projectId,
+    worktreeId,
+    kind,
+    persisted.cwd ?? process.cwd(),
+    persisted.model ?? DEFAULT_MODEL,
+    persisted.mode ?? DEFAULT_MODE,
+    persisted.allowAllPermissions ?? false,
+    unattended,
+  );
+  // Keep the requested id while resume is in flight so diagnostics stay clear.
+  session.sessionId = sessionId;
+  let sessionRef: AgentSession | undefined = session;
+
+  const tools = buildToolsForKind(kind, projectId, worktreeId, userId, () => sessionRef?.sessionId, isReview);
 
   let sdk;
   try {
     sdk = await client.resumeSession(sessionId, {
       streaming: true,
       continuePendingWork: true,
+      // Re-applied on every resume: the runtime keeps the prompt a session was
+      // created with, so without this a durable lead or CoS conversation never
+      // learns about tools or guidance added since the day it started.
+      systemMessage: {
+        mode: 'append',
+        content: buildSystemInstructions(kind, projectId, worktreeId),
+      },
+      tools,
       onPermissionRequest: makePermissionHandler(() => sessionRef, {
         allowAllPermissions: persisted.allowAllPermissions,
+        unattended,
       }),
       onExitPlanModeRequest: makeExitPlanHandler(() => sessionRef),
     });
   } catch (err) {
     console.error(`[agent-bridge] resumeSession failed for ${sessionId}:`, err);
+    if (isToolClashError(err)) {
+      // The conversation is intact but a connection leaked by an earlier
+      // server process still owns its tools, and a clash survives restarts of
+      // this process. Creating a fresh session here would silently hide the
+      // user's history, so restart the runtime — which drops every stale
+      // registration — and try the resume once more.
+      if (allowRuntimeRecovery) {
+        console.warn(
+          `[agent-bridge] session ${sessionId} is held by a stale runtime connection; ` +
+            'restarting the runtime to release it.',
+        );
+        try {
+          await reconnectAgentRuntime();
+        } catch (recoveryErr) {
+          console.error('[agent-bridge] runtime restart failed:', recoveryErr);
+          return undefined;
+        }
+        return resumeAgentSessionUncached(userId, sessionId, false);
+      }
+      console.error(
+        `[agent-bridge] session ${sessionId} is still held by a stale runtime connection after a restart.`,
+      );
+      return undefined;
+    }
+    // A session the runtime has never heard of can never come back: the
+    // runtime was restarted or the session was pruned. Tombstone the row so
+    // we stop retrying it on every lead/CoS open. Transient faults (runtime
+    // down, socket errors) are left alone so they retry once it recovers.
+    //
+    // Only ever retire *empty* rows. A restarted runtime can report a real
+    // session as missing before it has re-indexed its on-disk state, and
+    // tombstoning a transcript we still have would hide the user's
+    // conversation permanently.
+    if (isSessionGoneError(err)) {
+      try {
+        getDb()
+          .prepare(`
+            UPDATE cli_sessions
+            SET ended_at = datetime('now')
+            WHERE id = ?
+              AND ended_at IS NULL
+              AND (output_log IS NULL OR length(output_log) <= 2)
+          `)
+          .run(sessionId);
+      } catch {
+        /* best effort — a failed tombstone only costs a future retry */
+      }
+    }
     return undefined;
   }
+  session.sessionId = sdk.sessionId;
+  session.cwd = sdk.workspacePath ?? session.cwd;
+  session.sdk = sdk;
 
   // Stored transcript, used as a fallback when the runtime cannot replay.
   let transcript: AgentTranscriptEvent[] = [];
@@ -1551,36 +2606,7 @@ export async function resumeAgentSession(userId: string, sessionId: string): Pro
       /* ignore corrupt logs */
     }
   }
-
-  const session: AgentSession = {
-    sessionId: sdk.sessionId,
-    userId,
-    projectId: persisted.projectId ?? null,
-    worktreeId: persisted.worktreeId ?? null,
-    cwd: sdk.workspacePath ?? persisted.cwd ?? process.cwd(),
-    model: persisted.model ?? DEFAULT_MODEL,
-    mode: persisted.mode ?? DEFAULT_MODE,
-    status: 'idle',
-    alive: true,
-    transcript,
-    subscribers: new Set(),
-    pendingPermissions: new Map(),
-    pendingPlans: new Map(),
-    sdk,
-    unsubscribe: () => {},
-    saveTimer: null,
-    toolReconcileTimer: null,
-    toolReconcileInFlight: false,
-    busyWatchdogTimer: null,
-    busyWatchdogInFlight: false,
-    assistantByMessageId: new Map(),
-    assistantStartTs: new Map(),
-    toolByCallId: new Map(),
-    share: { mode: 'off', steerable: false },
-    usage: emptyAgentUsage(),
-    allowAllPermissions: persisted.allowAllPermissions ?? false,
-  };
-  sessionRef = session;
+  session.transcript = transcript;
 
   // The runtime's own event log is the source of truth: while we were detached
   // it kept recording (finishing a turn, or shutting the session down), so our
@@ -1599,18 +2625,24 @@ export async function resumeAgentSession(userId: string, sessionId: string): Pro
     session.transcript = [];
     session.assistantByMessageId.clear();
     session.assistantStartTs.clear();
+    session.turnStartTs = null;
     session.toolByCallId.clear();
     // Rebuilt from the log below. Token counts cannot be recovered (the SDK
     // marks `assistant.usage` ephemeral) but the durable usage checkpoints do
     // restore the session-wide cost.
     session.usage = emptyAgentUsage();
     for (const event of replayed) handleSdkEvent(session, event);
+    // The runtime's log is the full history (far larger than what we keep), so
+    // bring the rebuilt transcript back inside the budget before any client
+    // attaches to it.
+    serializeTranscriptWithinBudget(session);
   }
   setStatus(session, deriveStatusFromEvents(replayed));
 
   session.unsubscribe = sdk.on((event) => handleSdkEvent(session, event));
   agentSessions.set(session.sessionId, session);
   ensureToolReconciliation(session);
+  await reviveOrphanedQuestions(session);
 
   // Ensure a DB row exists (older/remote sessions may not have one locally).
   getDb()
@@ -1745,8 +2777,77 @@ export function subscribe(sessionId: string, subscriber: AgentSubscriber): () =>
   };
 }
 
-export function getReplay(sessionId: string): AgentTranscriptEvent[] {
-  return agentSessions.get(sessionId)?.transcript ?? [];
+export function sliceReplayTail(
+  transcript: AgentTranscriptEvent[],
+  limit = REPLAY_WINDOW,
+): { events: AgentTranscriptEvent[]; hasMore: boolean } {
+  if (transcript.length <= limit) return { events: transcript, hasMore: false };
+  return { events: transcript.slice(-limit), hasMore: true };
+}
+
+/**
+ * The slice immediately preceding `beforeId`.
+ *
+ * Anchoring on an event id rather than an index keeps this correct while the
+ * transcript is being appended to or trimmed underneath us. An id we no longer
+ * hold means it was trimmed away, so there is nothing earlier to send.
+ */
+export function sliceReplayBefore(
+  transcript: AgentTranscriptEvent[],
+  beforeId: string | undefined,
+  limit = REPLAY_WINDOW,
+): { events: AgentTranscriptEvent[]; hasMore: boolean } {
+  const end = beforeId ? transcript.findIndex((event) => event.id === beforeId) : transcript.length;
+  if (end <= 0) return { events: [], hasMore: false };
+  const start = Math.max(0, end - limit);
+  return { events: transcript.slice(start, end), hasMore: start > 0 };
+}
+
+/**
+ * The tail of a session's transcript, plus whether older events remain.
+ *
+ * Shipping the whole transcript on every connect is what made opening a long
+ * conversation expensive; clients render a window anyway and pull older slices
+ * through `getEarlierReplay` only when the user asks for them.
+ */
+export function getReplay(
+  sessionId: string,
+  limit = REPLAY_WINDOW,
+): { events: AgentTranscriptEvent[]; hasMore: boolean } {
+  return sliceReplayTail(agentSessions.get(sessionId)?.transcript ?? [], limit);
+}
+
+export function getEarlierReplay(
+  sessionId: string,
+  beforeId: string | undefined,
+  limit = REPLAY_WINDOW,
+): { events: AgentTranscriptEvent[]; hasMore: boolean } {
+  return sliceReplayBefore(agentSessions.get(sessionId)?.transcript ?? [], beforeId, limit);
+}
+
+/**
+ * A bounded, human-readable condensation of a session's own reasoning, used to
+ * fold a review sub-agent's thinking back to the Project Lead on deepMerge.
+ *
+ * Reuses the transcript tail slice rather than the raw persisted JSON: it pulls
+ * the reasoning/assistant text of the most recent events and hard-caps the
+ * result so it never bloats the lead's conversation. Returns '' when there is
+ * no live session or nothing worth folding in.
+ */
+export function summarizeSessionReasoning(sessionId: string, budgetChars = 2000): string {
+  const session = agentSessions.get(sessionId);
+  if (!session) return '';
+  const { events } = sliceReplayTail(session.transcript);
+  const parts: string[] = [];
+  for (const event of events) {
+    if (event.kind !== 'reasoning' && event.kind !== 'assistant') continue;
+    const text = event.content?.replace(/\s+/g, ' ').trim();
+    if (text) parts.push(text);
+  }
+  const joined = parts.join('\n');
+  if (joined.length <= budgetChars) return joined;
+  // Keep the tail: the most recent reasoning is the closest to the verdict.
+  return `…${joined.slice(joined.length - budgetChars)}`;
 }
 
 export async function reconcileAgentSession(sessionId: string): Promise<void> {
@@ -1764,6 +2865,7 @@ export function pendingMessagesForSession(session: AgentSession): AgentServerMes
   return [
     ...[...session.pendingPermissions.values()].map((pending) => pending.message),
     ...[...session.pendingPlans.values()].map((pending) => pending.message),
+    ...[...session.pendingQuestions.values()].map((pending) => pending.message),
   ];
 }
 
@@ -1787,6 +2889,11 @@ export async function endAgentSession(sessionId: string): Promise<void> {
     session.pendingPlans.delete(requestId);
     pending.resolve({ approved: false });
   }
+  // Unblock any `ask_user` call still waiting on a click.
+  for (const [requestId, pending] of session.pendingQuestions) {
+    session.pendingQuestions.delete(requestId);
+    pending.resolve('The session was closed before the user answered.');
+  }
   try {
     session.unsubscribe();
   } catch {
@@ -1799,6 +2906,24 @@ export async function endAgentSession(sessionId: string): Promise<void> {
   } catch (err) {
     console.error(`[agent-bridge] disconnect failed for ${sessionId}:`, err);
   }
+}
+
+/**
+ * Release every live agent session bound to a worktree.
+ *
+ * Deleting a worktree pulls the directory out from under any agent still
+ * working in it, so the sessions are ended first: a session left holding a
+ * deleted cwd keeps a runtime connection open and fails every later tool call.
+ * Returns the session ids that were ended.
+ */
+export async function endWorktreeAgentSessions(projectId: string, worktreeId: string): Promise<string[]> {
+  const ids = [...agentSessions.values()]
+    .filter((s) => s.projectId === projectId && s.worktreeId === worktreeId)
+    .map((s) => s.sessionId);
+  for (const id of ids) {
+    await endAgentSession(id);
+  }
+  return ids;
 }
 
 /** Graceful shutdown — persist and disconnect all agent sessions. */
@@ -1849,6 +2974,16 @@ export async function detachAgentBridge(): Promise<void> {
     }
     persistTranscript(session, true);
     persistAgentState(session);
+    // Release this connection's hold on the session. Unlike `client.stop()`
+    // (which destroys the session) `disconnect` only frees in-memory
+    // resources, and crucially it releases the session's external tool
+    // registrations. Skipping it leaks them into the daemon-hosted runtime,
+    // and every later resume fails with "External tool name clash ...
+    // already registered by another connection" — a lead or CoS conversation
+    // that can never be reopened.
+    void Promise.resolve(session.sdk?.disconnect?.()).catch(() => {
+      /* the connection is already gone */
+    });
   }
   agentSessions.clear();
 

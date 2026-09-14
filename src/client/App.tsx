@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate, useParams } from 'react-router';
+import { Routes, Route, Navigate, useLocation, useParams } from 'react-router';
 import { AuthProvider, useAuth } from './lib/auth-context';
 import { AutomationProvider } from './lib/automation-context';
 import { SplitProvider } from './lib/split-context';
@@ -14,12 +14,16 @@ import ProjectLayout from './pages/ProjectLayout';
 import KeepAliveChat from './components/KeepAliveChat';
 import ProjectSkillsPage from './pages/ProjectSkillsPage';
 import ProjectSettingsPage from './pages/ProjectSettingsPage';
+import ProjectViewLayout from './pages/ProjectViewLayout';
 import ProjectBoardPage from './pages/ProjectBoardPage';
 import ProjectMilestonesPage from './pages/ProjectMilestonesPage';
 import ProjectIssuesPage from './pages/ProjectIssuesPage';
+import ProjectIssueDetailPage from './pages/ProjectIssueDetailPage';
 import ProjectPullsPage from './pages/ProjectPullsPage';
 import WorktreeLayout from './pages/WorktreeLayout';
 import WorktreeChatPage from './pages/WorktreeChatPage';
+import ProjectChatPage from './pages/ProjectChatPage';
+import ProjectLeadPage from './pages/ProjectLeadPage';
 import AdminPage from './pages/AdminPage';
 import AdminSessionsPage from './pages/AdminSessionsPage';
 import AdminDaemonPage from './pages/AdminDaemonPage';
@@ -33,7 +37,11 @@ import { useReportNotifications } from './hooks/useReportNotifications';
 /** Uses KeepAliveChat to keep recently-used project terminals alive across switches */
 function ProjectChatKeepAlive() {
   const { id } = useParams<{ id: string }>();
+  const { search } = useLocation();
   const ctx = useProjectContextOptional();
+  if (new URLSearchParams(search).get('detachedTab') === '1') {
+    return <ProjectChatPage projectId={id} cwd={ctx?.cwd} />;
+  }
   return <KeepAliveChat projectId={id} cwd={ctx?.cwd} />;
 }
 
@@ -66,12 +74,17 @@ export function App() {
             <Route path="projects/:id" element={<ProjectLayout />}>
               <Route index element={<Navigate to="chat" replace />} />
               <Route path="chat" element={<ProjectChatKeepAlive />} />
+              <Route path="lead" element={<ProjectLeadPage />} />
+              <Route path="skills" element={<ProjectSkillsPage />} />
+              <Route path="settings" element={<ProjectSettingsPage />} />
+            </Route>
+            <Route path="projects/:id/view" element={<ProjectViewLayout />}>
+              <Route index element={<Navigate to="board" replace />} />
               <Route path="board" element={<ProjectBoardPage />} />
               <Route path="milestones" element={<ProjectMilestonesPage />} />
               <Route path="issues" element={<ProjectIssuesPage />} />
+              <Route path="issues/:number" element={<ProjectIssueDetailPage />} />
               <Route path="pulls" element={<ProjectPullsPage />} />
-              <Route path="skills" element={<ProjectSkillsPage />} />
-              <Route path="settings" element={<ProjectSettingsPage />} />
             </Route>
             <Route path="projects/:id/worktrees/:worktreeId" element={<WorktreeLayout />}>
               <Route index element={<Navigate to="chat" replace />} />
