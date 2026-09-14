@@ -7,6 +7,7 @@ import { getOrBootstrapProjectMemory, refreshProjectMemory } from './project-mem
 import { recordCosBriefing } from './cos-briefing-store';
 import {
   countActiveDelegations,
+  countActiveReviews,
   createDelegation,
   getDelegationForWorktree,
   listDelegations,
@@ -39,6 +40,12 @@ import {
 
 /** Ceiling on workers one project may have in flight at once. */
 export const MAX_ACTIVE_DELEGATIONS = 3;
+
+/**
+ * Ceiling on spin_off_review reviewers in flight at once, counted separately
+ * from builders so a review can always start even when builders are maxed out.
+ */
+export const MAX_ACTIVE_REVIEWS = 2;
 
 const BRIEFING_MAX_CHARS = 280;
 
@@ -566,6 +573,91 @@ export function createProjectLeadTools(  projectId: string,
           title: label,
           model: session.model,
           note: 'Worker started and planning. End your turn; it will come back to you for plan review.',
+        };
+      },
+      skipPermission: true,
+      defer: 'never',
+    }),
+    defineTool('spin_off_review', {
+      description:
+        'Hand a review off to a review sub-agent instead of doing it inline. Spawns an unattended review persona in an EXISTING worktree, seeded with your focus brief (and optional context), that may read the diff and run tests but never commits or modifies files. It works async and reports a pass / changes-needed verdict back to you, which you then own. This returns immediately — do not wait for it, end your turn and act on the verdict when it arrives.',
+      parameters: {
+        type: 'object',
+        properties: {
+          worktreeId: { type: 'string', description: 'The existing worktree whose diff/changes to review (typically a worker\'s worktree).' },
+          focus: { type: 'string', description: 'Your distilled brief: what the change should do, the specific risks/areas to check, and the acceptance criteria. This is the primary context the reviewer carries.' },
+          transcriptSnapshot: { type: 'string', description: 'Optional extra context to hand over (e.g. a condensed slice of your own reasoning). Appended verbatim to the seed.' },
+          deepMerge: { type: 'boolean', description: 'When true, the reviewer\'s condensed reasoning is folded back to you on finish so you can answer follow-ups as if you reviewed. Defaults to false (verdict only).' },
+        },
+        required: ['worktreeId', 'focus'],
+      },
+      handler: async ({ worktreeId, focus, transcriptSnapshot, deepMerge }: {
+        worktreeId: string; focus: string; transcriptSnapshot?: string; deepMerge?: boolean;
+      }) => {
+        if (!userId) throw new Error('This Project Lead session cannot start reviews (no owning user).');
+
+        const activeReviews = countActiveReviews(projectId);
+        if (activeReviews >= MAX_ACTIVE_REVIEWS) {
+          throw new Error(
+            `This project already has ${activeReviews} reviews in flight (limit ${MAX_ACTIVE_REVIEWS}). Wait for one to finish before spinning off another.`,
+          );
+        }
+
+        const existing = listWorktrees(projectId).find((w) => w.id === worktreeId);
+        if (!existing) throw new Error('Worktree does not belong to this project');
+
+        const label = shortTitle(`Review: ${existing.name ?? worktreeId}`);
+
+        const { createAgentSession, sendToSession } = await import('./agent-bridge');
+        // Autopilot + unattended: the reviewer reads and runs tests immediately
+        // with no plan-approval handshake (that gate is only for builders in
+        // 'plan' mode), and no permission prompts, since nobody is subscribed to
+        // answer them. It is report-only; the seed forbids any write/commit.
+        const model = await leadModel(getSessionId);
+        const session = await createAgentSession(
+          userId,
+          projectId,
+          worktreeId,
+          model,
+          'agent',
+          'autopilot',
+          { unattended: true },
+        );
+        const delegation = createDelegation({
+          projectId,
+          worktreeId,
+          title: label,
+          task: focus,
+          sessionId: session.sessionId,
+          isReview: true,
+          deepMerge: deepMerge === true,
+        });
+
+        await sendToSession(session, [
+          'You are the Project Lead\'s REVIEW PERSONA. You are reviewing the changes in THIS worktree, and your findings will be attributed to the Project Lead as if the Lead reviewed them itself.',
+          '',
+          'Focus brief (what to check, the risks, and the acceptance criteria):',
+          focus,
+          ...(transcriptSnapshot && transcriptSnapshot.trim()
+            ? ['', 'Additional context from the Lead:', transcriptSnapshot]
+            : []),
+          '',
+          'You MAY read the diff (e.g. `git --no-pager diff` against the base branch) and RUN THE TESTS to validate. You MUST NEVER commit, push, request a merge, or modify any tracked file — you are report-only. Running the test suite is allowed; changing the branch is not.',
+          '',
+          'When you are done, produce a VERDICT of exactly `pass` or `changes-needed`, with concrete findings backed by evidence (file:line references, failing test names/output). Publish it with update_digest: set status to `ready_to_merge` for a pass or `blocked` for changes-needed, put the verdict and headline finding in `headline`, and the full findings in `detail`. Write in FIRST-PERSON Lead voice (e.g. "I reviewed the auth changes; the token refresh has a race — src/auth.ts:88"), because it will be attributed to the Lead. Your update_digest report IS the report that goes back to the Lead.',
+          '',
+          'Be concise and self-terminate after reporting the verdict — do no open-ended work.',
+        ].join('\n'));
+
+        audit(projectId, 'spin_off_review', `${label}: ${condenseBriefing(focus)}`, 'medium', worktreeId);
+        return {
+          ok: true,
+          reviewId: delegation.id,
+          worktreeId,
+          sessionId: session.sessionId,
+          title: label,
+          model: session.model,
+          note: 'Review started unattended. End your turn; it will report a verdict back to you.',
         };
       },
       skipPermission: true,

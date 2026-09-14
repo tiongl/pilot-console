@@ -228,6 +228,10 @@ function initSchema(db: Database.Database) {
       status      TEXT NOT NULL DEFAULT 'planning',
       note        TEXT,
       unread      INTEGER NOT NULL DEFAULT 0,
+      -- 1 when this delegation is a spin_off_review reviewer, not a builder worker.
+      is_review   INTEGER NOT NULL DEFAULT 0,
+      -- 1 when the reviewer's condensed reasoning should be folded back to the lead.
+      deep_merge  INTEGER NOT NULL DEFAULT 0,
       created_at  TEXT DEFAULT (datetime('now')),
       updated_at  TEXT DEFAULT (datetime('now'))
     );
@@ -401,6 +405,19 @@ function initSchema(db: Database.Database) {
   // Migration: add read column to report_runs
   if (!runColNames.has('read')) {
     db.exec('ALTER TABLE report_runs ADD COLUMN read INTEGER NOT NULL DEFAULT 0');
+  }
+
+  // Migration: mark spin_off_review reviewer delegations distinctly from builder
+  // delegations so they draw on a separate concurrency cap and get review-aware
+  // report-back wording. deep_merge records whether the reviewer's condensed
+  // reasoning should be folded back to the lead on finish.
+  const delegationCols = db.pragma('table_info(delegations)') as Array<{ name: string }>;
+  const delegationColNames = new Set(delegationCols.map((c) => c.name));
+  if (!delegationColNames.has('is_review')) {
+    db.exec('ALTER TABLE delegations ADD COLUMN is_review INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!delegationColNames.has('deep_merge')) {
+    db.exec('ALTER TABLE delegations ADD COLUMN deep_merge INTEGER NOT NULL DEFAULT 0');
   }
 
   // Migration: automation_templates table for user-saved templates

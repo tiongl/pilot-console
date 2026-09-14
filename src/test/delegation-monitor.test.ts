@@ -24,10 +24,11 @@ describe('delegation stall monitor', () => {
     status: string;
     updatedAt: string;
     sessionId?: string | null;
+    isReview?: boolean;
   }) {
     db.prepare(
-      `INSERT INTO delegations (id, project_id, worktree_id, session_id, title, task, status, updated_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO delegations (id, project_id, worktree_id, session_id, title, task, status, is_review, updated_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       opts.id,
       projectId,
@@ -36,6 +37,7 @@ describe('delegation stall monitor', () => {
       `Title ${opts.id}`,
       'do the thing',
       opts.status,
+      opts.isReview ? 1 : 0,
       opts.updatedAt,
       opts.updatedAt,
     );
@@ -66,6 +68,8 @@ describe('delegation stall monitor', () => {
         status TEXT NOT NULL,
         note TEXT,
         unread INTEGER NOT NULL DEFAULT 0,
+        is_review INTEGER NOT NULL DEFAULT 0,
+        deep_merge INTEGER NOT NULL DEFAULT 0,
         created_at TEXT,
         updated_at TEXT
       );
@@ -123,6 +127,17 @@ describe('delegation stall monitor', () => {
     expect(notified[0].message).toContain('worker stopped');
     expect(notified[0].message).toContain('cancel_worker');
     expect(notified[0].message).toContain('wt1');
+  });
+
+  it('uses review-stopped wording for a stalled review sub-agent', async () => {
+    const now = Date.parse('2024-05-01T12:00:00Z');
+    seed({ id: 'r1', worktreeId: 'wt1', status: 'working', updatedAt: '2024-05-01 11:00:00', isReview: true });
+
+    expect(await monitor.sweepStalledDelegations(now)).toBe(1);
+    expect(notified).toHaveLength(1);
+    expect(notified[0].message).toContain('review stopped');
+    expect(notified[0].message).toContain('spin_off_review');
+    expect(notified[0].message).not.toContain('worker stopped');
   });
 
   it('leaves a worker alone while it is still busy', async () => {

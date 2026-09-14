@@ -139,6 +139,7 @@ async function buildTools(options: { interventionMode?: string; skillInstallMode
   vi.doMock('../shared/cos-briefing-store', () => ({ recordCosBriefing: vi.fn() }));
   vi.doMock('../shared/delegation-store', () => ({
     countActiveDelegations: () => 0,
+    countActiveReviews: () => 0,
     createDelegation: () => ({ id: 'deleg-1' }),
     getDelegationForWorktree: () => delegationForWorktree,
     listDelegations: () => [],

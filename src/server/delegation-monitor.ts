@@ -110,14 +110,23 @@ export async function sweepStalledDelegations(now = Date.now()): Promise<number>
 
     const userId = ownerOf(delegation);
     if (!userId) continue;
-    const message = [
-      `[worker stopped · ${delegation.title}]`,
-      `Worktree id: ${delegation.worktreeId}`,
-      '',
-      'This worker is no longer working and never reported a result. Its session ended or went idle mid-task — usually a crash or an interrupted turn, not a decision it made.',
-      '',
-      `Check what it left behind with get_digest. To retry, close it out with cancel_worker and start it again with delegate_to_worker using worktreeId "${delegation.worktreeId}" so its existing branch and work are reused.`,
-    ].join('\n');
+    const message = delegation.isReview
+      ? [
+          `[review stopped · ${delegation.title}]`,
+          `Worktree id: ${delegation.worktreeId}`,
+          '',
+          'This review sub-agent stopped without reporting a verdict. Its session ended or went idle mid-review — usually a crash or an interrupted turn, not a decision.',
+          '',
+          `Check what it left behind with get_digest. To retry, spin_off_review again on worktreeId "${delegation.worktreeId}", or review it yourself.`,
+        ].join('\n')
+      : [
+          `[worker stopped · ${delegation.title}]`,
+          `Worktree id: ${delegation.worktreeId}`,
+          '',
+          'This worker is no longer working and never reported a result. Its session ended or went idle mid-task — usually a crash or an interrupted turn, not a decision it made.',
+          '',
+          `Check what it left behind with get_digest. To retry, close it out with cancel_worker and start it again with delegate_to_worker using worktreeId "${delegation.worktreeId}" so its existing branch and work are reused.`,
+        ].join('\n');
     try {
       await notifyProjectLead(userId, delegation.projectId, message);
     } catch (err) {

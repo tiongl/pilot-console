@@ -1,8 +1,56 @@
 import { defineTool } from '@github/copilot-sdk';
 import type { Tool } from '@github/copilot-sdk';
 import { upsertDigest } from './digest-store';
-import { getDelegationForWorktree, markWorktreeDelegation } from './delegation-store';
+import { getDelegationForWorktree, markWorktreeDelegation, type Delegation } from './delegation-store';
 import { notifyProjectLead } from './delegation-runtime';
+
+/** Char budget for the reviewer reasoning folded back on a deepMerge review. */
+const REVIEW_REASONING_BUDGET = 2000;
+
+/**
+ * Fold a spin_off_review reviewer's verdict back to the Project Lead, framed so
+ * the Lead owns it as its own completed review. On a deepMerge review, a
+ * bounded condensation of the reviewer's reasoning is appended so the Lead can
+ * answer follow-ups; otherwise only the verdict + findings are sent (the raw
+ * reasoning stays viewable in the reviewer's own tab).
+ */
+async function buildReviewMergeBack(
+  delegation: Delegation,
+  worktreeId: string,
+  args: UpdateDigestArgs,
+  passed: boolean,
+): Promise<string> {
+  const verdict = passed ? 'pass' : 'changes-needed';
+  const lines = [
+    `[review finished · ${delegation.title}]`,
+    `Worktree id: ${worktreeId}`,
+    `Verdict: ${verdict}`,
+    '',
+    args.headline,
+    '',
+    args.detail,
+  ];
+
+  if (delegation.deepMerge && delegation.sessionId) {
+    try {
+      const { summarizeSessionReasoning } = await import('./agent-bridge');
+      const reasoning = summarizeSessionReasoning(delegation.sessionId, REVIEW_REASONING_BUDGET);
+      if (reasoning) {
+        lines.push('', 'My reasoning (folded in for follow-up):', reasoning);
+      }
+    } catch (err) {
+      console.error(`[digest-tools] Could not fold reviewer reasoning for ${worktreeId}:`, err);
+    }
+  }
+
+  lines.push(
+    '',
+    passed
+      ? 'This is your review. Act on it: approve_merge if you agree, or nudge_worker with the findings.'
+      : 'This is your review. Act on it: nudge_worker with the findings so the worker can address them, or reject_merge.',
+  );
+  return lines.join('\n');
+}
 
 interface UpdateDigestArgs {
   headline: string;
@@ -67,18 +115,20 @@ export function createWorktreeAgentTools(
           (args.status === 'blocked' && wasStatus !== 'blocked');
         if (delegation && announce && projectId && userId) {
           const finished = args.status === 'ready_to_merge';
-          const message = [
-            `[worker ${finished ? 'finished' : 'blocked'} · ${delegation.title}]`,
-            `Worktree id: ${worktreeId}`,
-            '',
-            args.headline,
-            '',
-            args.detail,
-            '',
-            finished
-              ? 'Review it with get_digest, then approve_merge or reject_merge. If more work is needed, use nudge_worker.'
-              : 'Unblock it with nudge_worker, or close it out with cancel_worker if it cannot continue.',
-          ].join('\n');
+          const message = delegation.isReview
+            ? await buildReviewMergeBack(delegation, worktreeId, args, finished)
+            : [
+                `[worker ${finished ? 'finished' : 'blocked'} · ${delegation.title}]`,
+                `Worktree id: ${worktreeId}`,
+                '',
+                args.headline,
+                '',
+                args.detail,
+                '',
+                finished
+                  ? 'Review it with get_digest, then approve_merge or reject_merge. If more work is needed, use nudge_worker.'
+                  : 'Unblock it with nudge_worker, or close it out with cancel_worker if it cannot continue.',
+              ].join('\n');
           try {
             await notifyProjectLead(userId, projectId, message);
           } catch (err) {
