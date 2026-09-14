@@ -1734,6 +1734,18 @@ delegate_to_worker again passing that same worktreeId so its branch and existing
 reused instead of started over. cancel_worker succeeds even when the worker has already
 stopped — that is how you clear a dead delegation so the slot is free.
 
+When you would otherwise review a worker's diff or run its tests inline — which burns your own
+context and blocks you from coordinating — hand the review off instead with
+spin_off_review(worktreeId, focus, transcriptSnapshot?, deepMerge?). It spawns a review persona
+that carries your context (your focus brief, and optionally a slice of your reasoning), runs
+async in that worktree, may read the diff and run the tests but never commits or modifies
+anything, and reports a pass / changes-needed verdict back to you which you then own and act on
+(approve the merge, or nudge the worker with the findings). Reviews draw on their own
+concurrency budget, separate from workers, so you can start one even when workers are maxed
+out. Merge-back is verdict-only by default; pass deepMerge:true for a high-stakes review to
+also fold the reviewer's reasoning back so you can answer follow-ups as if you reviewed. Like
+delegation this returns immediately — say what you spun off and end your turn.
+
 After reaching a decision or
 completing a significant review, call brief_chief_of_staff with a headline-style summary of
 one or two sentences (280 characters or less) so the Chief of Staff stays aware of this
@@ -1984,6 +1996,7 @@ export function buildToolsForKind(
   worktreeId: string | null,
   userId?: string,
   getSessionId?: () => string | undefined,
+  isReview = false,
 ): Tool<any>[] | undefined {
   const askUser = createAskUserTool(() => {
     const id = getSessionId?.();
@@ -1992,8 +2005,16 @@ export function buildToolsForKind(
   if (kind === 'chief_of_staff') return [...createChiefOfStaffTools(), askUser];
   if (kind === 'project_lead')
     return projectId ? [...createProjectLeadTools(projectId, userId, getSessionId), askUser] : [askUser];
-  if (worktreeId)
-    return [...createWorktreeAgentTools(worktreeId, projectId, userId), ...createMergeTools(worktreeId), askUser];
+  if (worktreeId) {
+    const worktreeTools = createWorktreeAgentTools(worktreeId, projectId, userId);
+    // A spin_off_review reviewer is report-only: it must not be able to initiate
+    // a merge, which is a decision that belongs to the main Project Lead. Strip
+    // the merge tools (request_merge/check_merge_status) so an autopilot reviewer
+    // cannot usurp it; it keeps update_digest and ask_project_lead to report back.
+    return isReview
+      ? [...worktreeTools, askUser]
+      : [...worktreeTools, ...createMergeTools(worktreeId), askUser];
+  }
   return [askUser];
 }
 
@@ -2039,7 +2060,7 @@ export async function createAgentSession(
   model = DEFAULT_MODEL,
   kind: AgentSessionKind = 'agent',
   mode: AgentMode = DEFAULT_MODE,
-  options: { unattended?: boolean } = {},
+  options: { unattended?: boolean; isReview?: boolean } = {},
 ): Promise<AgentSession> {
   const client = await getClient();
   const cwd = resolveCwd(projectId, worktreeId);
@@ -2067,7 +2088,7 @@ export async function createAgentSession(
       mode: 'append',
       content: buildSystemInstructions(kind, projectId, worktreeId),
     },
-    tools: buildToolsForKind(kind, projectId, worktreeId, userId, () => sessionRef?.sessionId),
+    tools: buildToolsForKind(kind, projectId, worktreeId, userId, () => sessionRef?.sessionId, options.isReview ?? false),
     onPermissionRequest: makePermissionHandler(() => sessionRef),
     onExitPlanModeRequest: makeExitPlanHandler(() => sessionRef),
   });
@@ -2462,13 +2483,19 @@ async function resumeAgentSessionUncached(
   // A worktree with a live delegation belongs to a worker the Project Lead
   // started, which nobody is subscribed to. Sessions created before the flag
   // existed have it missing, so derive it here rather than resuming them
-  // straight back onto the permission prompt they were already stuck on.
+  // straight back onto the permission prompt they were already stuck on. The
+  // same lookup recovers whether this session is a spin_off_review reviewer, so
+  // its merge tools stay stripped across a restart.
   let unattended = persisted.unattended ?? false;
-  if (!unattended && worktreeId) {
+  let isReview = false;
+  if (worktreeId) {
     try {
       const { getDelegationForWorktree } = await import('./delegation-store');
       const delegation = getDelegationForWorktree(worktreeId);
-      if (delegation && delegation.sessionId === sessionId) unattended = true;
+      if (delegation && delegation.sessionId === sessionId) {
+        if (!unattended) unattended = true;
+        isReview = delegation.isReview === 1;
+      }
     } catch (err) {
       console.warn(`[agent-bridge] Could not check delegation for ${sessionId}:`, err);
     }
@@ -2489,7 +2516,7 @@ async function resumeAgentSessionUncached(
   session.sessionId = sessionId;
   let sessionRef: AgentSession | undefined = session;
 
-  const tools = buildToolsForKind(kind, projectId, worktreeId, userId, () => sessionRef?.sessionId);
+  const tools = buildToolsForKind(kind, projectId, worktreeId, userId, () => sessionRef?.sessionId, isReview);
 
   let sdk;
   try {
@@ -2796,6 +2823,31 @@ export function getEarlierReplay(
   limit = REPLAY_WINDOW,
 ): { events: AgentTranscriptEvent[]; hasMore: boolean } {
   return sliceReplayBefore(agentSessions.get(sessionId)?.transcript ?? [], beforeId, limit);
+}
+
+/**
+ * A bounded, human-readable condensation of a session's own reasoning, used to
+ * fold a review sub-agent's thinking back to the Project Lead on deepMerge.
+ *
+ * Reuses the transcript tail slice rather than the raw persisted JSON: it pulls
+ * the reasoning/assistant text of the most recent events and hard-caps the
+ * result so it never bloats the lead's conversation. Returns '' when there is
+ * no live session or nothing worth folding in.
+ */
+export function summarizeSessionReasoning(sessionId: string, budgetChars = 2000): string {
+  const session = agentSessions.get(sessionId);
+  if (!session) return '';
+  const { events } = sliceReplayTail(session.transcript);
+  const parts: string[] = [];
+  for (const event of events) {
+    if (event.kind !== 'reasoning' && event.kind !== 'assistant') continue;
+    const text = event.content?.replace(/\s+/g, ' ').trim();
+    if (text) parts.push(text);
+  }
+  const joined = parts.join('\n');
+  if (joined.length <= budgetChars) return joined;
+  // Keep the tail: the most recent reasoning is the closest to the verdict.
+  return `…${joined.slice(joined.length - budgetChars)}`;
 }
 
 export async function reconcileAgentSession(sessionId: string): Promise<void> {

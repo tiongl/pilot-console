@@ -26,6 +26,10 @@ export interface Delegation {
   status: DelegationStatus;
   note: string | null;
   unread: number;
+  /** 1 when this is a spin_off_review reviewer rather than a builder worker. */
+  isReview: number;
+  /** 1 when the reviewer's condensed reasoning should be folded back to the lead. */
+  deepMerge: number;
   createdAt: string | null;
   updatedAt: string | null;
 }
@@ -33,6 +37,7 @@ export interface Delegation {
 const SELECT = `
   SELECT d.id, d.project_id AS projectId, d.worktree_id AS worktreeId, w.name AS worktreeName,
          d.session_id AS sessionId, d.title, d.task, d.status, d.note, d.unread,
+         d.is_review AS isReview, d.deep_merge AS deepMerge,
          d.created_at AS createdAt, d.updated_at AS updatedAt
   FROM delegations d
   LEFT JOIN worktrees w ON w.id = d.worktree_id
@@ -53,12 +58,23 @@ export function createDelegation(input: {
   title: string;
   task: string;
   sessionId?: string | null;
+  isReview?: boolean;
+  deepMerge?: boolean;
 }): Delegation {
   const id = randomUUID();
   getDb().prepare(`
-    INSERT INTO delegations (id, project_id, worktree_id, session_id, title, task, status)
-    VALUES (?, ?, ?, ?, ?, ?, 'planning')
-  `).run(id, input.projectId, input.worktreeId, input.sessionId ?? null, shortTitle(input.title), input.task);
+    INSERT INTO delegations (id, project_id, worktree_id, session_id, title, task, status, is_review, deep_merge)
+    VALUES (?, ?, ?, ?, ?, ?, 'planning', ?, ?)
+  `).run(
+    id,
+    input.projectId,
+    input.worktreeId,
+    input.sessionId ?? null,
+    shortTitle(input.title),
+    input.task,
+    input.isReview ? 1 : 0,
+    input.deepMerge ? 1 : 0,
+  );
   emitWorktreesChanged(input.projectId);
   return getDelegation(id)!;
 }
@@ -72,6 +88,20 @@ export function getDelegationForWorktree(worktreeId: string): Delegation | undef
   return getDb()
     .prepare(`${SELECT} WHERE d.worktree_id = ? ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1`)
     .get(worktreeId) as Delegation | undefined;
+}
+
+/**
+ * Whether a builder worker (not a reviewer) is currently working in a worktree.
+ * A spin_off_review reviewer runs tests, so it must not start while a builder is
+ * still changing files underneath it.
+ */
+export function hasWorkingBuilderDelegation(worktreeId: string): boolean {
+  const row = getDb()
+    .prepare(
+      "SELECT 1 FROM delegations WHERE worktree_id = ? AND is_review = 0 AND status = 'working' LIMIT 1",
+    )
+    .get(worktreeId);
+  return Boolean(row);
 }
 
 export function listDelegations(projectId: string): Delegation[] {
@@ -94,7 +124,20 @@ export function listActiveDelegations(projectId: string): Delegation[] {  const 
 export function countActiveDelegations(projectId: string): number {
   const placeholders = ACTIVE_STATUSES.map(() => '?').join(',');
   const row = getDb()
-    .prepare(`SELECT COUNT(*) AS n FROM delegations WHERE project_id = ? AND status IN (${placeholders})`)
+    .prepare(
+      `SELECT COUNT(*) AS n FROM delegations WHERE project_id = ? AND is_review = 0 AND status IN (${placeholders})`,
+    )
+    .get(projectId, ...ACTIVE_STATUSES) as { n: number };
+  return row?.n ?? 0;
+}
+
+/** In-flight spin_off_review reviewers, counted against their own cap. */
+export function countActiveReviews(projectId: string): number {
+  const placeholders = ACTIVE_STATUSES.map(() => '?').join(',');
+  const row = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM delegations WHERE project_id = ? AND is_review = 1 AND status IN (${placeholders})`,
+    )
     .get(projectId, ...ACTIVE_STATUSES) as { n: number };
   return row?.n ?? 0;
 }

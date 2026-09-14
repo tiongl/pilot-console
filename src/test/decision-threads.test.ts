@@ -77,6 +77,7 @@ describe('project lead decision thread tools', () => {
     vi.doMock('../shared/cos-briefing-store', () => ({ recordCosBriefing: vi.fn() }));
     vi.doMock('../shared/delegation-store', () => ({
       countActiveDelegations: () => 0,
+      countActiveReviews: () => 0,
       createDelegation: vi.fn(),
       getDelegationForWorktree: () => undefined,
       listDelegations: () => [],

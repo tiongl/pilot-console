@@ -58,6 +58,7 @@ describe('worktree cleanup', () => {
         id TEXT PRIMARY KEY, project_id TEXT NOT NULL, worktree_id TEXT NOT NULL, session_id TEXT,
         title TEXT NOT NULL, task TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'planning',
         note TEXT, unread INTEGER NOT NULL DEFAULT 0,
+        is_review INTEGER NOT NULL DEFAULT 0, deep_merge INTEGER NOT NULL DEFAULT 0,
         created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
       );
       CREATE TABLE merge_requests (
