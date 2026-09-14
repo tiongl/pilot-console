@@ -12,7 +12,7 @@ const projectId = 'p1';
  * Builds the Project Lead's tool set against in-memory stores, with the review
  * concurrency counts made controllable so the separate cap can be exercised.
  */
-async function buildLeadTools(opts: { activeBuilders?: number; activeReviews?: number } = {}) {
+async function buildLeadTools(opts: { activeBuilders?: number; activeReviews?: number; builderWorking?: boolean } = {}) {
   vi.resetModules();
 
   const db = new Database(':memory:');
@@ -77,6 +77,7 @@ async function buildLeadTools(opts: { activeBuilders?: number; activeReviews?: n
       return { id: `deleg-${createdDelegations.length}` };
     },
     getDelegationForWorktree: () => undefined,
+    hasWorkingBuilderDelegation: () => opts.builderWorking ?? false,
     listDelegations: () => [],
     markWorktreeDelegation: vi.fn(),
     shortTitle: (value: string) => value,
@@ -126,7 +127,7 @@ describe('spin_off_review', () => {
 
     expect(h.createAgentSession).toHaveBeenCalledTimes(1);
     const [userId, passedProjectId, worktreeId, model, kind, mode, options] =
-      h.createAgentSession.mock.calls[0];
+      h.createAgentSession.mock.calls[0] as unknown[];
     expect({ userId, passedProjectId, worktreeId, kind, mode }).toEqual({
       userId: 'user-1',
       passedProjectId: projectId,
@@ -135,7 +136,7 @@ describe('spin_off_review', () => {
       mode: 'autopilot',
     });
     expect(model).toBe('lead-model');
-    expect(options).toEqual({ unattended: true });
+    expect(options).toEqual({ unattended: true, isReview: true });
 
     // The review delegation is marked distinctly from a builder.
     expect(h.createdDelegations).toHaveLength(1);
@@ -155,7 +156,7 @@ describe('spin_off_review', () => {
     });
 
     expect(h.sendToSession).toHaveBeenCalledTimes(1);
-    const [, prompt] = h.sendToSession.mock.calls[0] as [unknown, string];
+    const [, prompt] = h.sendToSession.mock.calls[0] as unknown as [unknown, string];
     expect(prompt).toContain('REVIEW PERSONA');
     expect(prompt).toContain('Check the auth changes carefully');
     expect(prompt).toContain('Earlier I suspected the refresh token path.');
@@ -169,7 +170,7 @@ describe('spin_off_review', () => {
   it('omits the additional-context section when no snapshot is given', async () => {
     const h = await buildLeadTools();
     await h.tool('spin_off_review').handler({ worktreeId: 'wt-1', focus: 'Just the focus' });
-    const [, prompt] = h.sendToSession.mock.calls[0] as [unknown, string];
+    const [, prompt] = h.sendToSession.mock.calls[0] as unknown as [unknown, string];
     expect(prompt).not.toContain('Additional context from the Lead');
   });
 
@@ -178,6 +179,14 @@ describe('spin_off_review', () => {
     await expect(
       h.tool('spin_off_review').handler({ worktreeId: 'wt-other', focus: 'x' }),
     ).rejects.toThrow(/does not belong/);
+    expect(h.createAgentSession).not.toHaveBeenCalled();
+  });
+
+  it('refuses to review a worktree whose builder is still working', async () => {
+    const h = await buildLeadTools({ builderWorking: true });
+    await expect(
+      h.tool('spin_off_review').handler({ worktreeId: 'wt-1', focus: 'x' }),
+    ).rejects.toThrow(/still has a worker running/);
     expect(h.createAgentSession).not.toHaveBeenCalled();
   });
 

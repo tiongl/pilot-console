@@ -1996,6 +1996,7 @@ export function buildToolsForKind(
   worktreeId: string | null,
   userId?: string,
   getSessionId?: () => string | undefined,
+  isReview = false,
 ): Tool<any>[] | undefined {
   const askUser = createAskUserTool(() => {
     const id = getSessionId?.();
@@ -2004,8 +2005,16 @@ export function buildToolsForKind(
   if (kind === 'chief_of_staff') return [...createChiefOfStaffTools(), askUser];
   if (kind === 'project_lead')
     return projectId ? [...createProjectLeadTools(projectId, userId, getSessionId), askUser] : [askUser];
-  if (worktreeId)
-    return [...createWorktreeAgentTools(worktreeId, projectId, userId), ...createMergeTools(worktreeId), askUser];
+  if (worktreeId) {
+    const worktreeTools = createWorktreeAgentTools(worktreeId, projectId, userId);
+    // A spin_off_review reviewer is report-only: it must not be able to initiate
+    // a merge, which is a decision that belongs to the main Project Lead. Strip
+    // the merge tools (request_merge/check_merge_status) so an autopilot reviewer
+    // cannot usurp it; it keeps update_digest and ask_project_lead to report back.
+    return isReview
+      ? [...worktreeTools, askUser]
+      : [...worktreeTools, ...createMergeTools(worktreeId), askUser];
+  }
   return [askUser];
 }
 
@@ -2051,7 +2060,7 @@ export async function createAgentSession(
   model = DEFAULT_MODEL,
   kind: AgentSessionKind = 'agent',
   mode: AgentMode = DEFAULT_MODE,
-  options: { unattended?: boolean } = {},
+  options: { unattended?: boolean; isReview?: boolean } = {},
 ): Promise<AgentSession> {
   const client = await getClient();
   const cwd = resolveCwd(projectId, worktreeId);
@@ -2079,7 +2088,7 @@ export async function createAgentSession(
       mode: 'append',
       content: buildSystemInstructions(kind, projectId, worktreeId),
     },
-    tools: buildToolsForKind(kind, projectId, worktreeId, userId, () => sessionRef?.sessionId),
+    tools: buildToolsForKind(kind, projectId, worktreeId, userId, () => sessionRef?.sessionId, options.isReview ?? false),
     onPermissionRequest: makePermissionHandler(() => sessionRef),
     onExitPlanModeRequest: makeExitPlanHandler(() => sessionRef),
   });
@@ -2474,13 +2483,19 @@ async function resumeAgentSessionUncached(
   // A worktree with a live delegation belongs to a worker the Project Lead
   // started, which nobody is subscribed to. Sessions created before the flag
   // existed have it missing, so derive it here rather than resuming them
-  // straight back onto the permission prompt they were already stuck on.
+  // straight back onto the permission prompt they were already stuck on. The
+  // same lookup recovers whether this session is a spin_off_review reviewer, so
+  // its merge tools stay stripped across a restart.
   let unattended = persisted.unattended ?? false;
-  if (!unattended && worktreeId) {
+  let isReview = false;
+  if (worktreeId) {
     try {
       const { getDelegationForWorktree } = await import('./delegation-store');
       const delegation = getDelegationForWorktree(worktreeId);
-      if (delegation && delegation.sessionId === sessionId) unattended = true;
+      if (delegation && delegation.sessionId === sessionId) {
+        if (!unattended) unattended = true;
+        isReview = delegation.isReview === 1;
+      }
     } catch (err) {
       console.warn(`[agent-bridge] Could not check delegation for ${sessionId}:`, err);
     }
@@ -2501,7 +2516,7 @@ async function resumeAgentSessionUncached(
   session.sessionId = sessionId;
   let sessionRef: AgentSession | undefined = session;
 
-  const tools = buildToolsForKind(kind, projectId, worktreeId, userId, () => sessionRef?.sessionId);
+  const tools = buildToolsForKind(kind, projectId, worktreeId, userId, () => sessionRef?.sessionId, isReview);
 
   let sdk;
   try {

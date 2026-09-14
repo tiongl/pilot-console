@@ -10,6 +10,7 @@ import {
   countActiveReviews,
   createDelegation,
   getDelegationForWorktree,
+  hasWorkingBuilderDelegation,
   listDelegations,
   markWorktreeDelegation,
   shortTitle,
@@ -606,13 +607,23 @@ export function createProjectLeadTools(  projectId: string,
         const existing = listWorktrees(projectId).find((w) => w.id === worktreeId);
         if (!existing) throw new Error('Worktree does not belong to this project');
 
+        // A reviewer runs the test suite; if a builder is still changing files in
+        // this worktree the results would be meaningless. Make the lead wait for
+        // the worker to finish. Scoped to builders so a review never blocks another.
+        if (hasWorkingBuilderDelegation(worktreeId)) {
+          throw new Error(
+            'That worktree still has a worker running. Wait for it to finish (or cancel it) before spinning off a review, so tests do not run while files change underneath the reviewer.',
+          );
+        }
+
         const label = shortTitle(`Review: ${existing.name ?? worktreeId}`);
 
         const { createAgentSession, sendToSession } = await import('./agent-bridge');
         // Autopilot + unattended: the reviewer reads and runs tests immediately
         // with no plan-approval handshake (that gate is only for builders in
         // 'plan' mode), and no permission prompts, since nobody is subscribed to
-        // answer them. It is report-only; the seed forbids any write/commit.
+        // answer them. isReview strips its merge tools so it cannot initiate a
+        // merge; the seed forbids any write/commit as defense in depth.
         const model = await leadModel(getSessionId);
         const session = await createAgentSession(
           userId,
@@ -621,7 +632,7 @@ export function createProjectLeadTools(  projectId: string,
           model,
           'agent',
           'autopilot',
-          { unattended: true },
+          { unattended: true, isReview: true },
         );
         const delegation = createDelegation({
           projectId,
@@ -633,6 +644,12 @@ export function createProjectLeadTools(  projectId: string,
           deepMerge: deepMerge === true,
         });
 
+        // Note: the reviewer writes its verdict to this worktree's digest via
+        // update_digest, which overwrites the worker's own summary. That is an
+        // accepted tradeoff — post-review the verdict is the useful digest, and
+        // the worker's summary remains in its notify message and session tab.
+        // Making the digest additive would need a merge of two authors' fields;
+        // left for a follow-up if the dashboard ever needs both side by side.
         await sendToSession(session, [
           'You are the Project Lead\'s REVIEW PERSONA. You are reviewing the changes in THIS worktree, and your findings will be attributed to the Project Lead as if the Lead reviewed them itself.',
           '',

@@ -769,6 +769,18 @@ describe('buildToolsForKind', () => {
     const tools = buildToolsForKind('agent', null, 'wt-1');
     expect(tools).toBeDefined();
     expect(tools!.length).toBeGreaterThan(0);
+    expect(tools!.map((t) => t.name)).toContain('request_merge');
+  });
+
+  // A spin_off_review reviewer is report-only: it keeps update_digest to report
+  // its verdict but must not be able to initiate a merge, which is the main
+  // Project Lead's decision. isReview strips the merge tools structurally.
+  it('strips the merge tools from review (isReview) worktree sessions', () => {
+    const names = buildToolsForKind('agent', null, 'wt-1', undefined, undefined, true)?.map((t) => t.name);
+    expect(names).toContain('update_digest');
+    expect(names).toContain('ask_user');
+    expect(names).not.toContain('request_merge');
+    expect(names).not.toContain('check_merge_status');
   });
 
   // Asking the user a question with buttons is useful whatever the agent is

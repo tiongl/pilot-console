@@ -90,6 +90,20 @@ export function getDelegationForWorktree(worktreeId: string): Delegation | undef
     .get(worktreeId) as Delegation | undefined;
 }
 
+/**
+ * Whether a builder worker (not a reviewer) is currently working in a worktree.
+ * A spin_off_review reviewer runs tests, so it must not start while a builder is
+ * still changing files underneath it.
+ */
+export function hasWorkingBuilderDelegation(worktreeId: string): boolean {
+  const row = getDb()
+    .prepare(
+      "SELECT 1 FROM delegations WHERE worktree_id = ? AND is_review = 0 AND status = 'working' LIMIT 1",
+    )
+    .get(worktreeId);
+  return Boolean(row);
+}
+
 export function listDelegations(projectId: string): Delegation[] {
   return getDb()
     .prepare(`${SELECT} WHERE d.project_id = ? ORDER BY d.created_at ASC, d.rowid ASC`)
