@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { Button } from '@/components/ui/button';
-import { Plus, Trash2, ChevronRight, ChevronDown, Download, Copy, Check } from 'lucide-react';
+import { Plus, Trash2, ChevronRight, ChevronDown, Download, Copy, Check, Eye, EyeOff } from 'lucide-react';
 
 interface TodoItem {
   id: string;
@@ -24,11 +24,20 @@ interface Props {
   pollMs?: number;
 }
 
+const HIDE_COMPLETED_KEY = 'pilot-console:todo-hide-completed';
+
 export default function ProjectTodoPanel({ projectId, projectName, pollMs = 8000 }: Props) {
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [newText, setNewText] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [hideCompleted, setHideCompleted] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(HIDE_COMPLETED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -49,6 +58,12 @@ export default function ProjectTodoPanel({ projectId, projectName, pollMs = 8000
   }, [projectId]);
 
   useEffect(() => { fetchTodos(); }, [fetchTodos]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(HIDE_COMPLETED_KEY, hideCompleted ? '1' : '0');
+    } catch {}
+  }, [hideCompleted]);
 
   // Text boxes are uncontrolled and keyed on their text, so applying a poll
   // while the user is typing would remount the box out from under them and
@@ -133,8 +148,18 @@ export default function ProjectTodoPanel({ projectId, projectName, pollMs = 8000
   };
 
   // Build tree structure
-  const rootTodos = todos.filter(t => !t.parentId);
-  const childrenOf = (parentId: string) => todos.filter(t => t.parentId === parentId);
+  // A completed subtree (a done todo whose descendants are all done) is hidden
+  // when the filter is on. A done parent with any incomplete descendant stays
+  // visible so the child remains reachable. This is presentation-only — the
+  // underlying `todos` state is never mutated.
+  const subtreeHasIncomplete = (todo: TodoItem): boolean => {
+    if (!todo.done) return true;
+    return todos.some(t => t.parentId === todo.id && subtreeHasIncomplete(t));
+  };
+  const isHidden = (todo: TodoItem) => hideCompleted && !subtreeHasIncomplete(todo);
+
+  const rootTodos = todos.filter(t => !t.parentId && !isHidden(t));
+  const childrenOf = (parentId: string) => todos.filter(t => t.parentId === parentId && !isHidden(t));
 
   const renderTodo = (todo: TodoItem, depth: number = 0) => {
     const children = childrenOf(todo.id);
@@ -230,15 +255,31 @@ export default function ProjectTodoPanel({ projectId, projectName, pollMs = 8000
       <div className="px-3 py-2 border-b flex items-center gap-2">
         <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">TODO Prompt</h3>
         {todos.length > 0 && (
-          <Button variant="ghost" size="icon" className="h-6 w-6 ml-auto" onClick={exportToMarkdown} title="Export as Markdown">
-            <Download className="h-3.5 w-3.5" />
-          </Button>
+          <div className="ml-auto flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6"
+              onClick={() => setHideCompleted(v => !v)}
+              title={hideCompleted ? 'Show completed' : 'Hide completed'}
+              data-testid="toggle-hide-completed"
+              aria-pressed={hideCompleted}
+            >
+              {hideCompleted ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+            </Button>
+            <Button variant="ghost" size="icon" className="h-6 w-6" onClick={exportToMarkdown} title="Export as Markdown">
+              <Download className="h-3.5 w-3.5" />
+            </Button>
+          </div>
         )}
       </div>
       <div className="flex-1 overflow-y-auto px-2 py-2 space-y-0">
         {rootTodos.map(todo => renderTodo(todo))}
         {todos.length === 0 && (
           <p className="text-xs text-muted-foreground text-center py-4">No todos yet</p>
+        )}
+        {todos.length > 0 && rootTodos.length === 0 && (
+          <p className="text-xs text-muted-foreground text-center py-4">All todos completed</p>
         )}
       </div>
       <div className="border-t px-2 py-2">

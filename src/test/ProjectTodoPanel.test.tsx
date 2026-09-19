@@ -13,6 +13,7 @@ function todo(id: string, text: string, extra: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   todos = [];
+  localStorage.clear();
   fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     if ((init?.method ?? 'GET') === 'GET') {
       return { ok: true, json: async () => ({ todos }) } as unknown as Response;
@@ -135,5 +136,72 @@ describe('ProjectTodoPanel', () => {
         text: 'Ship login with SSO',
       });
     });
+  });
+});
+
+describe('ProjectTodoPanel hide-completed filter', () => {
+  // A fully-completed todo is a completed subtree, so the filter removes it while
+  // the underlying list is left intact for export and re-showing.
+  it('hides a fully-completed todo when the toggle is on', async () => {
+    todos = [todo('t1', 'Ship login', { done: 1 }), todo('t2', 'Ship search')];
+    render(<ProjectTodoPanel projectId={projectId} />);
+    await screen.findByTestId('todo-text-t2');
+    expect(screen.getByTestId('todo-text-t1')).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId('toggle-hide-completed'));
+
+    await waitFor(() => expect(screen.queryByTestId('todo-text-t1')).toBeNull());
+    expect(screen.getByTestId('todo-text-t2')).toBeTruthy();
+  });
+
+  // A done parent with an incomplete descendant must stay visible so the child
+  // remains reachable — only genuinely completed subtrees disappear.
+  it('keeps a done parent that still has an incomplete child', async () => {
+    todos = [
+      todo('t1', 'Ship login', { done: 1 }),
+      todo('t2', 'Write tests', { parentId: 't1', done: 0 }),
+    ];
+    render(<ProjectTodoPanel projectId={projectId} />);
+    await screen.findByTestId('todo-text-t2');
+
+    fireEvent.click(screen.getByTestId('toggle-hide-completed'));
+
+    await waitFor(() => expect(screen.getByTestId('todo-text-t1')).toBeTruthy());
+    expect(screen.getByTestId('todo-text-t2')).toBeTruthy();
+  });
+
+  it('shows everything again when the toggle is turned off', async () => {
+    todos = [todo('t1', 'Ship login', { done: 1 }), todo('t2', 'Ship search')];
+    render(<ProjectTodoPanel projectId={projectId} />);
+    await screen.findByTestId('todo-text-t2');
+
+    const toggle = screen.getByTestId('toggle-hide-completed');
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.queryByTestId('todo-text-t1')).toBeNull());
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.getByTestId('todo-text-t1')).toBeTruthy());
+    expect(screen.getByTestId('todo-text-t2')).toBeTruthy();
+  });
+
+  // The preference is UI-only and persisted, so a remount reads it back and the
+  // filter is already applied without the user touching the toggle.
+  it('honors the localStorage preference on mount', async () => {
+    localStorage.setItem('pilot-console:todo-hide-completed', '1');
+    todos = [todo('t1', 'Ship login', { done: 1 }), todo('t2', 'Ship search')];
+    render(<ProjectTodoPanel projectId={projectId} />);
+
+    await screen.findByTestId('todo-text-t2');
+    expect(screen.queryByTestId('todo-text-t1')).toBeNull();
+  });
+
+  it('shows an all-completed message when the filter hides everything', async () => {
+    todos = [todo('t1', 'Ship login', { done: 1 })];
+    render(<ProjectTodoPanel projectId={projectId} />);
+    await screen.findByTestId('todo-text-t1');
+
+    fireEvent.click(screen.getByTestId('toggle-hide-completed'));
+
+    await waitFor(() => expect(screen.getByText('All todos completed')).toBeTruthy());
   });
 });
