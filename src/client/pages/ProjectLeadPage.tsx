@@ -54,6 +54,9 @@ interface ManagedServer {
 const SERVER_TAB_PREFIX = 'srv-';
 const ARTIFACT_TAB_PREFIX = 'art-';
 
+/** Worker lifecycle states that still count as "live" — everything else is finished. */
+const WORKER_ACTIVE_STATUSES = new Set(['planning', 'awaiting_plan_review', 'working', 'blocked']);
+
 interface LavishArtifactTab {
   id: string;
   projectId: string;
@@ -270,7 +273,13 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
         </Button>
       </div>
       <div role="tablist" aria-label="Project Lead and workers" className="mb-2 flex flex-wrap items-center gap-1">
-        {tabs.map((tab) => (
+        {tabs.map((tab) => {
+          const isWorker =
+            tab.id !== 'lead' &&
+            !tab.id.startsWith(SERVER_TAB_PREFIX) &&
+            !tab.id.startsWith(ARTIFACT_TAB_PREFIX);
+          const workerActive = isWorker && WORKER_ACTIVE_STATUSES.has(tab.status ?? '');
+          return (
           <button
             key={tab.id}
             role="tab"
@@ -294,9 +303,20 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
               <Users className="h-3.5 w-3.5 shrink-0" />
             )}
             <span className="truncate">{tab.label}</span>
+            {isWorker ? (
+              <span
+                data-testid={`worker-status-${tab.id}`}
+                data-active={workerActive ? 'true' : 'false'}
+                title={workerActive ? 'Worker active' : 'Worker done'}
+                className={`h-2 w-2 shrink-0 rounded-full ${
+                  workerActive ? 'bg-green-500' : 'bg-muted-foreground/30'
+                }`}
+              />
+            ) : null}
             {tab.unread ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" /> : null}
           </button>
-        ))}
+          );
+        })}
         {servers.length > 0 && (
           <button
             type="button"

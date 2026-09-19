@@ -111,6 +111,29 @@ function StatusDot({ info }: { info: ProjectSessionInfo | undefined }) {
   );
 }
 
+  /** Worker lifecycle states that still count as "live" — everything else is finished. */
+  const WORKER_ACTIVE_STATUSES = new Set<Delegation['status']>([
+    'planning',
+    'awaiting_plan_review',
+    'working',
+    'blocked',
+  ]);
+
+  /**
+   * A delegated worktree's dot follows the worker's lifecycle, not its session:
+   * green while the worker is still live, grey once it has finished.
+   */
+  function WorkerStatusDot({ status }: { status: Delegation['status'] }) {
+    const active = WORKER_ACTIVE_STATUSES.has(status);
+    return (
+      <span
+        data-active={active ? 'true' : 'false'}
+        className={`h-2 w-2 shrink-0 rounded-full ${active ? 'bg-green-500' : 'bg-muted-foreground/30'}`}
+        title={active ? `Worker active — ${status.replace(/_/g, ' ')}` : `Worker ${status}`}
+      />
+    );
+  }
+
 function ProjectNav({
   projects,
   onProjectClick,
@@ -559,7 +582,7 @@ function ProjectNav({
                       >
                         <Trash2 className="h-3 w-3" />
                       </button>
-                      <span className="w-3 flex items-center justify-center shrink-0"><StatusDot info={worktreeStatuses.get(wt.id)} /></span>
+                      <span className="w-3 flex items-center justify-center shrink-0">{delegation ? <WorkerStatusDot status={delegation.status} /> : <StatusDot info={worktreeStatuses.get(wt.id)} />}</span>
                     </>
                   );
                   return onWorktreeClick ? (

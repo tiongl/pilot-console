@@ -133,6 +133,22 @@ describe('ProjectLeadPage worker tabs', () => {
     expect(await screen.findByTestId('lead-tab-wt-1')).toBeTruthy();
   });
 
+  it('marks the worker status dot green while the worker is active', async () => {
+    delegations = [{ ...liveDelegation, status: 'working' }];
+    await renderPage();
+
+    const dot = await screen.findByTestId('worker-status-wt-1');
+    expect(dot.getAttribute('data-active')).toBe('true');
+  });
+
+  it('marks the worker status dot grey once the worker is done', async () => {
+    delegations = [{ ...liveDelegation, status: 'done' }];
+    await renderPage();
+
+    const dot = await screen.findByTestId('worker-status-wt-1');
+    expect(dot.getAttribute('data-active')).toBe('false');
+  });
+
   // A re-delegated worktree keeps its old rows; a closed one must not be
   // resurrected by an earlier, still-open delegation on the same worktree.
   it('ignores an older open delegation once the worktree is closed', async () => {
