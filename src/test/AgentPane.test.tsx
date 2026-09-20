@@ -28,6 +28,7 @@ vi.mock('mermaid', () => ({
 }));
 
 import AgentPane from '@/components/terminal/AgentPane';
+import { writeTranscript } from '@/lib/transcript-cache';
 
 function emit(msg: AgentServerMessage) {
   act(() => {
@@ -172,6 +173,63 @@ describe('AgentPane', () => {
   it('does not force a new session when resuming an existing tab session', () => {
     render(<AgentPane projectId="p1" active sessionId="sess-current" />);
     expect(hooked.lastOptions?.forceNew).toBe(false);
+  });
+
+  it('shows a hydrating indicator (not the new-session text) for an existing session before replay', () => {
+    render(<AgentPane projectId="p1" active sessionId="sess-existing" />);
+    expect(screen.getByTestId('agent-hydrating')).toBeTruthy();
+    expect(screen.getByText('Loading conversation…')).toBeTruthy();
+    expect(screen.queryByText('Start a conversation with the Copilot agent.')).toBeNull();
+  });
+
+  it('shows the new-session empty text for a genuinely new session (no sessionId)', () => {
+    renderPane();
+    expect(screen.getByText('Start a conversation with the Copilot agent.')).toBeTruthy();
+    expect(screen.queryByTestId('agent-hydrating')).toBeNull();
+  });
+
+  it('paints the cached transcript optimistically and reconciles to the authoritative replay', async () => {
+    writeTranscript('sess-cached', [{ kind: 'user', id: 'u1', ts: 1, content: 'cached message' }]);
+    render(<AgentPane projectId="p1" active sessionId="sess-cached" />);
+    // Cached content paints immediately, before any replay arrives.
+    expect(screen.getByText('cached message')).toBeTruthy();
+    expect(screen.queryByTestId('agent-hydrating')).toBeNull();
+
+    emit({
+      type: 'replay',
+      events: [{ kind: 'assistant', id: 'a1', ts: 2, content: 'fresh reply' }],
+    });
+    await waitFor(() => expect(screen.getByText('fresh reply')).toBeTruthy());
+    // The cached transcript is replaced wholesale — no leftover, no duplicate.
+    expect(screen.queryByText('cached message')).toBeNull();
+  });
+
+  it('does not render a cached transcript that belongs to a different session', () => {
+    writeTranscript('other-session', [{ kind: 'user', id: 'u1', ts: 1, content: 'other session message' }]);
+    render(<AgentPane projectId="p1" active sessionId="sess-x" />);
+    expect(screen.queryByText('other session message')).toBeNull();
+    expect(screen.getByTestId('agent-hydrating')).toBeTruthy();
+  });
+
+  it('degrades gracefully when transcript-cache storage throws', () => {
+    // A cache entry exists, but storage throws on read — the pane must not
+    // crash and must fall back to hydrating instead of painting cached content.
+    writeTranscript('sess-existing', [{ kind: 'user', id: 'u1', ts: 1, content: 'cached message' }]);
+    const getSpy = vi.spyOn(localStorage, 'getItem').mockImplementation(() => {
+      throw new Error('storage disabled');
+    });
+    const setSpy = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('storage disabled');
+    });
+    try {
+      render(<AgentPane projectId="p1" active sessionId="sess-existing" />);
+      expect(screen.queryByText('cached message')).toBeNull();
+      expect(screen.getByTestId('agent-hydrating')).toBeTruthy();
+      expect(screen.queryByText('Start a conversation with the Copilot agent.')).toBeNull();
+    } finally {
+      getSpy.mockRestore();
+      setSpy.mockRestore();
+    }
   });
 
   it('renders a tool activity card with the tool name', async () => {

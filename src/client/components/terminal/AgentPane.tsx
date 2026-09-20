@@ -56,6 +56,7 @@ import {
 } from 'lucide-react';
 import { useAgentSocket } from '@/hooks/useAgentSocket';
 import { getThemeByName } from '@/lib/terminal-themes';
+import { readTranscript, writeTranscript } from '@/lib/transcript-cache';
 import type {
   AgentModelOption,
   AgentMode,
@@ -544,7 +545,24 @@ export default function AgentPane({
     );
   }
 
-  const [events, setEvents] = useState<AgentTranscriptEvent[]>([]);
+  // Captures the session id this pane was opened for (if any). Reopening an
+  // existing session has an id here; a brand-new session does not. Held in a
+  // ref so the "hydrating" and cache-seed logic keys off the *initial* id and
+  // is unaffected by a later prop identity change.
+  const initialSessionIdRef = useRef(sessionId);
+  // Optimistic paint: seed the transcript from the browser cache so reopening a
+  // session shows its previous conversation immediately instead of a blank gap.
+  // The authoritative `replay` replaces this wholesale when it arrives.
+  const cachedInitial = useMemo(
+    () => (initialSessionIdRef.current ? readTranscript(initialSessionIdRef.current) : null),
+    [],
+  );
+
+  const [events, setEvents] = useState<AgentTranscriptEvent[]>(() => cachedInitial ?? []);
+  // Whether the first authoritative `replay` for this session has landed. Until
+  // it does, an existing (reopened) session is "hydrating" — never show the
+  // new-session empty text for it.
+  const [replayReceived, setReplayReceived] = useState(false);
   // Older events stay on the server until the user asks for them, so a long
   // conversation does not ship its whole history on connect.
   const [hasEarlier, setHasEarlier] = useState(false);
@@ -668,6 +686,7 @@ export default function AgentPane({
           break;
         case 'replay':
           setEvents(msg.events.filter((e) => e.kind !== 'system'));
+          setReplayReceived(true);
           setHasEarlier(msg.hasMore ?? false);
           setLoadingEarlier(false);
           setRenderLimit(RENDER_WINDOW);
@@ -809,6 +828,17 @@ export default function AgentPane({
     [upsert, applyDelta],
   );
 
+  // The real session id, known immediately for a reopened session and after
+  // `onReady` for a brand-new one. Drives the debounced transcript cache write.
+  const sessionIdRef = useRef<string | null>(sessionId ?? null);
+  const handleReady = useCallback(
+    (id: string) => {
+      sessionIdRef.current = id;
+      onSessionId?.(id);
+    },
+    [onSessionId],
+  );
+
   const { state, send, reset, switchTo, reconnect } = useAgentSocket({
     projectId,
     worktreeId,
@@ -817,8 +847,18 @@ export default function AgentPane({
     model,
     kind: sessionKind,
     onMessage: handleMessage,
-    onReady: onSessionId,
+    onReady: handleReady,
   });
+
+  // Persist the settled transcript to the browser cache (debounced) so the next
+  // reopen can paint it instantly. Keyed by the real session id, so we wait
+  // until one is known. `system` events are dropped inside writeTranscript.
+  useEffect(() => {
+    const id = sessionIdRef.current;
+    if (!id) return;
+    const timer = setTimeout(() => writeTranscript(id, events), 500);
+    return () => clearTimeout(timer);
+  }, [events]);
 
   useEffect(() => {
     // Report a connection-oriented status for the tab indicator dot.
@@ -1528,6 +1568,13 @@ export default function AgentPane({
     return busy ? 'working…' : 'ready';
   }, [state, busy, activeTool, permissions.length, exitPlans.length]);
 
+  // An existing (reopened) session is "hydrating" until its first authoritative
+  // replay lands. Drives the empty-state so a reopened session shows a loading
+  // indicator instead of the new-session "Start a conversation…" text.
+  const hydrating = Boolean(initialSessionIdRef.current) && !replayReceived;
+  // We painted the cached transcript but the fresh replay hasn't reconciled yet.
+  const showingCached = Boolean(cachedInitial) && !replayReceived;
+
   // Resolve appearance from the per-project terminal theme + font settings so
   // the agent chat matches the look of the terminal tabs.
   const appearance = useMemo(() => {
@@ -2094,11 +2141,32 @@ export default function AgentPane({
           </div>
         ) : (
           <>
-        {events.length === 0 && (
-          <div className="text-center pt-10" style={{ color: appearance.muted }}>
-            Start a conversation with the Copilot agent.
+        {showingCached && events.length > 0 && (
+          <div className="flex justify-center pt-2 pb-1" data-testid="agent-updating">
+            <span
+              className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border"
+              style={{ borderColor: appearance.border, color: appearance.muted }}
+            >
+              <Loader2 className="h-2.5 w-2.5 animate-spin" />
+              Updating…
+            </span>
           </div>
         )}
+        {events.length === 0 &&
+          (hydrating ? (
+            <div
+              className="flex flex-col items-center justify-center gap-2 pt-10"
+              style={{ color: appearance.muted }}
+              data-testid="agent-hydrating"
+            >
+              <Loader2 className="h-4 w-4 animate-spin" />
+              <span className="text-xs">Loading conversation…</span>
+            </div>
+          ) : (
+            <div className="text-center pt-10" style={{ color: appearance.muted }}>
+              Start a conversation with the Copilot agent.
+            </div>
+          ))}
         {events.length > 0 && renderItems.length === 0 && (
           <div className="text-center pt-10 text-xs" style={{ color: appearance.muted }}>
             All output is hidden by the current filters.
