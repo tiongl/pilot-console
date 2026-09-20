@@ -557,10 +557,10 @@ describe('AgentPane', () => {
     });
     await waitFor(() => expect(screen.getByText('bash')).toBeTruthy());
 
-    // Open the View menu and uncheck "Tool calls".
+    // Open the View menu and set "Tool calls" to Badge.
     fireEvent.click(screen.getByTitle('Show/hide output types'));
-    const toolToggle = await screen.findByLabelText('Tool calls');
-    fireEvent.click(toolToggle);
+    const toolBadge = await screen.findByTestId('filter-tool-badge');
+    fireEvent.click(toolBadge);
 
     // The expanded tool card is gone; only a compact badge remains.
     await waitFor(() => expect(screen.queryByTestId('tool-progress-c1')).toBeNull());
@@ -581,7 +581,7 @@ describe('AgentPane', () => {
     await waitFor(() => expect(screen.getByText('bash')).toBeTruthy());
 
     fireEvent.click(screen.getByTitle('Show/hide output types'));
-    fireEvent.click(await screen.findByLabelText('Tool calls'));
+    fireEvent.click(await screen.findByTestId('filter-tool-badge'));
 
     // Both calls collapse into a single strip of badges, in transcript order.
     const strip = await screen.findByTestId('tool-badges');
@@ -613,7 +613,7 @@ describe('AgentPane', () => {
     await waitFor(() => expect(screen.getByText('powershell')).toBeTruthy());
 
     fireEvent.click(screen.getByTitle('Show/hide output types'));
-    fireEvent.click(await screen.findByLabelText('Tool calls'));
+    fireEvent.click(await screen.findByTestId('filter-tool-badge'));
 
     const badge = await screen.findByTestId('tool-badge-c1');
     expect(badge.textContent).toContain('powershell');
@@ -648,7 +648,7 @@ describe('AgentPane', () => {
     await waitFor(() => expect(screen.getByText('powershell')).toBeTruthy());
 
     fireEvent.click(screen.getByTitle('Show/hide output types'));
-    fireEvent.click(await screen.findByLabelText('Tool calls'));
+    fireEvent.click(await screen.findByTestId('filter-tool-badge'));
     expect(screen.queryByTestId('tool-detail-dialog')).toBeNull();
 
     fireEvent.click(await screen.findByTestId('tool-badge-c1'));
@@ -681,16 +681,26 @@ describe('AgentPane', () => {
     expect(screen.getByTestId('tool-output-hidden-c1')).toBeTruthy();
   });
 
-  it('disables the "Tool output" sub-filter while tool calls are hidden', async () => {
+  it('disables the "Tool output" sub-filter while tool calls are not shown in full', async () => {
     renderPane();
     fireEvent.click(screen.getByTitle('Show/hide output types'));
     const outputToggle = await screen.findByTestId('filter-tool-output');
     expect(outputToggle).not.toBeDisabled();
 
-    fireEvent.click(screen.getByLabelText('Tool calls'));
+    // Badge mode: the tool card (and its body) is collapsed, so the sub-filter
+    // has nothing to act on and is disabled.
+    fireEvent.click(screen.getByTestId('filter-tool-badge'));
 
     await waitFor(() => expect(screen.getByTestId('filter-tool-output')).toBeDisabled());
     expect(screen.getByTestId('filter-tool-output')).not.toBeChecked();
+
+    // Hide mode keeps it disabled too.
+    fireEvent.click(screen.getByTestId('filter-tool-hide'));
+    expect(screen.getByTestId('filter-tool-output')).toBeDisabled();
+
+    // Back to Show re-enables it.
+    fireEvent.click(screen.getByTestId('filter-tool-show'));
+    await waitFor(() => expect(screen.getByTestId('filter-tool-output')).not.toBeDisabled());
   });
 
   it('does not render system messages', async () => {
@@ -1044,7 +1054,7 @@ describe('AgentPane', () => {
     await waitFor(() => expect(screen.getByText('Shipped the parser fix.')).toBeTruthy());
 
     fireEvent.click(screen.getByTitle('Show/hide output types'));
-    fireEvent.click(await screen.findByLabelText('Tool calls'));
+    fireEvent.click(await screen.findByTestId('filter-tool-badge'));
 
     // The ordinary tool call collapses to a badge, the summary stays readable.
     await waitFor(() => expect(screen.getByTestId('tool-badge-c1')).toBeTruthy());
@@ -1052,7 +1062,7 @@ describe('AgentPane', () => {
     expect(screen.getByTestId('task-complete-c2').textContent).toContain('Shipped the parser fix.');
   });
 
-  it('keeps reasoning expanded by default and collapses it to a badge when unchecked', async () => {
+  it('keeps reasoning expanded by default and collapses it to a badge in Badge mode', async () => {
     renderPane();
     emit({
       type: 'replay',
@@ -1067,15 +1077,124 @@ describe('AgentPane', () => {
     expect(screen.queryByTestId('agent-reasoning-badge')).toBeNull();
 
     fireEvent.click(screen.getByTitle('Show/hide output types'));
-    fireEvent.click(await screen.findByLabelText('Reasoning'));
+    fireEvent.click(await screen.findByTestId('filter-reasoning-badge'));
 
-    // Unchecking collapses it to a brain badge rather than removing it.
+    // Badge mode collapses it to a brain badge rather than removing it.
     const badge = await screen.findByTestId('agent-reasoning-badge');
     expect(screen.queryByText('Weighing the two parser strategies')).toBeNull();
 
     // The badge still expands on click.
     fireEvent.click(badge);
     expect(screen.getByText('Weighing the two parser strategies')).toBeTruthy();
+  });
+
+  it('fully removes reasoning when its view mode is Hide', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'reasoning', id: 'r1', ts: 1, content: 'Weighing the two parser strategies' },
+        { kind: 'assistant', id: 'a1', ts: 2, content: 'Done' },
+      ],
+    });
+    await waitFor(() => expect(screen.getByText('Weighing the two parser strategies')).toBeTruthy());
+
+    fireEvent.click(screen.getByTitle('Show/hide output types'));
+    fireEvent.click(await screen.findByTestId('filter-reasoning-hide'));
+
+    // Nothing left behind: no trace text and no brain badge.
+    await waitFor(() => expect(screen.queryByText('Weighing the two parser strategies')).toBeNull());
+    expect(screen.queryByTestId('agent-reasoning-badge')).toBeNull();
+    // The assistant message it preceded still renders.
+    expect(screen.getByText('Done')).toBeTruthy();
+  });
+
+  it('fully removes tool calls when the tool view mode is Hide', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'assistant', id: 'a1', ts: 1, content: 'Working on it' },
+        { kind: 'tool', id: 't1', ts: 2, toolCallId: 'c1', toolName: 'bash', status: 'running' },
+      ],
+    });
+    await waitFor(() => expect(screen.getByText('bash')).toBeTruthy());
+
+    fireEvent.click(screen.getByTitle('Show/hide output types'));
+    fireEvent.click(await screen.findByTestId('filter-tool-hide'));
+
+    // Neither the full card nor a badge remains.
+    await waitFor(() => expect(screen.queryByTestId('tool-progress-c1')).toBeNull());
+    expect(screen.queryByTestId('tool-badge-c1')).toBeNull();
+    expect(screen.queryByTestId('tool-badges')).toBeNull();
+    // The assistant message stays visible.
+    expect(screen.getByText('Working on it')).toBeTruthy();
+  });
+
+  it('shows notices in full by default, as a badge in Badge mode, and gone in Hide mode', async () => {
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [{ kind: 'notice', id: 'n1', ts: 1, message: 'Session resumed' }],
+    });
+    // Show (default): full notice text is visible.
+    await waitFor(() => expect(screen.getByText('Session resumed')).toBeTruthy());
+    expect(screen.queryByTestId('notice-badge-n1')).toBeNull();
+
+    // Badge: collapses to a compact notice badge, full text gone.
+    fireEvent.click(screen.getByTitle('Show/hide output types'));
+    fireEvent.click(await screen.findByTestId('filter-notice-badge'));
+    await waitFor(() => expect(screen.getByTestId('notice-badge-n1')).toBeTruthy());
+    expect(screen.queryByText('Session resumed')).toBeNull();
+
+    // Hide: nothing left at all.
+    fireEvent.click(screen.getByTestId('filter-notice-hide'));
+    await waitFor(() => expect(screen.queryByTestId('notice-badge-n1')).toBeNull());
+    expect(screen.queryByText('Session resumed')).toBeNull();
+  });
+
+  it('marks the active view mode with aria-pressed', async () => {
+    renderPane();
+    fireEvent.click(screen.getByTitle('Show/hide output types'));
+    // Default is Show for every kind.
+    expect(await screen.findByTestId('filter-reasoning-show')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('filter-reasoning-badge')).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(screen.getByTestId('filter-reasoning-badge'));
+    expect(screen.getByTestId('filter-reasoning-badge')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('filter-reasoning-show')).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('migrates the old boolean visibility payload to the tri-state model', async () => {
+    // Old shape: tool hidden, notice hidden, reasoning shown.
+    localStorage.setItem(
+      'pilot-console-agent-visibility',
+      JSON.stringify({ tool: false, reasoning: true, notice: false, toolOutput: true }),
+    );
+    renderPane();
+    emit({
+      type: 'replay',
+      events: [
+        { kind: 'tool', id: 't1', ts: 1, toolCallId: 'c1', toolName: 'bash', status: 'running' },
+        { kind: 'notice', id: 'n1', ts: 2, message: 'Session resumed' },
+        { kind: 'reasoning', id: 'r1', ts: 3, content: 'Thinking hard' },
+      ],
+    });
+
+    // old tool:false → badge (the collapsed strip is present).
+    await waitFor(() => expect(screen.getByTestId('tool-badge-c1')).toBeTruthy());
+    expect(screen.queryByTestId('tool-progress-c1')).toBeNull();
+    // old notice:false → hide (fully gone, no badge).
+    expect(screen.queryByText('Session resumed')).toBeNull();
+    expect(screen.queryByTestId('notice-badge-n1')).toBeNull();
+    // old reasoning:true → show (expanded trace text visible).
+    expect(screen.getByText('Thinking hard')).toBeTruthy();
+
+    // The dropdown reflects the migrated modes.
+    fireEvent.click(screen.getByTitle('Show/hide output types'));
+    expect(await screen.findByTestId('filter-tool-badge')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('filter-notice-hide')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('filter-reasoning-show')).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('outlines the conversation and jumps back into the transcript on click', async () => {

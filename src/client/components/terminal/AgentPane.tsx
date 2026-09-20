@@ -52,6 +52,7 @@ import {
   Mic,
   MicOff,
   MessageCircleQuestion,
+  Info,
 } from 'lucide-react';
 import { useAgentSocket } from '@/hooks/useAgentSocket';
 import { getThemeByName } from '@/lib/terminal-themes';
@@ -269,11 +270,26 @@ const FILTERABLE_KINDS: { kind: FilterableKind; label: string }[] = [
 ];
 
 /**
- * `toolOutput` is a sub-filter of `tool`: it hides just the result body of a
- * tool call while the call itself (name, args, status) stays visible. Hiding
- * `tool` implicitly hides the output too, since the whole entry is collapsed.
+ * Each filterable kind has a tri-state view mode:
+ * - `show`  — render the full entry (full tool card, expanded reasoning, full notice).
+ * - `badge` — render a compact badge only (tool-badges strip, brain badge, notice badge).
+ * - `hide`  — drop the entry entirely, leaving no badge or strip behind.
  */
-type Visibility = Record<FilterableKind, boolean> & { toolOutput: boolean };
+type ViewMode = 'show' | 'badge' | 'hide';
+
+const VIEW_MODES: { mode: ViewMode; label: string }[] = [
+  { mode: 'show', label: 'Show' },
+  { mode: 'badge', label: 'Badge' },
+  { mode: 'hide', label: 'Hide' },
+];
+
+/**
+ * `toolOutput` is a sub-filter of `tool`: it hides just the result body of a
+ * tool call while the call itself (name, args, status) stays visible. It is
+ * only meaningful when `tool === 'show'` (a badged or hidden tool has no body
+ * to reveal), so the control is disabled otherwise.
+ */
+type Visibility = Record<FilterableKind, ViewMode> & { toolOutput: boolean };
 
 /** A transcript row: either one entry, or a run of collapsed tool calls. */
 type RenderItem =
@@ -284,13 +300,18 @@ type RenderItem =
 const ESCAPE_CONFIRM_MS = 3_000;
 
 const DEFAULT_VISIBILITY: Visibility = {
-  tool: true,
-  reasoning: true,
-  notice: true,
+  tool: 'show',
+  reasoning: 'show',
+  notice: 'show',
   toolOutput: true,
 };
 
-const VISIBILITY_LS_KEY = 'pilot-console-agent-visibility';
+/**
+ * v2 stores the tri-state payload. The old v1 key held a per-kind boolean shape;
+ * it is read once on load to migrate existing users, then superseded by v2.
+ */
+const VISIBILITY_LS_KEY = 'pilot-console-agent-visibility-v2';
+const VISIBILITY_LS_KEY_V1 = 'pilot-console-agent-visibility';
 
 /**
  * The runtime's task-completion tool. Its "argument" is the agent's closing
@@ -423,17 +444,45 @@ function isDarkHexColor(color: string): boolean {
   return (0.2126 * r + 0.7152 * g + 0.0722 * b) < 140;
 }
 
+function sanitizeMode(value: unknown): ViewMode | undefined {
+  return value === 'show' || value === 'badge' || value === 'hide' ? value : undefined;
+}
+
+/**
+ * Migrate the old v1 boolean payload to the tri-state model, reproducing today's
+ * exact behavior for existing users:
+ * - old `true`  → `'show'`
+ * - old `false` → `'badge'` for tool & reasoning (they collapsed to a badge),
+ *                 `'hide'` for notice (it was dropped entirely)
+ */
+function migrateV1(raw: string): Visibility {
+  const parsed = JSON.parse(raw) as Partial<Record<FilterableKind, boolean>> & { toolOutput?: boolean };
+  const kindMode = (kind: FilterableKind, hiddenMode: ViewMode): ViewMode =>
+    parsed[kind] === false ? hiddenMode : 'show';
+  return {
+    tool: kindMode('tool', 'badge'),
+    reasoning: kindMode('reasoning', 'badge'),
+    notice: kindMode('notice', 'hide'),
+    toolOutput: parsed.toolOutput ?? true,
+  };
+}
+
 function loadVisibility(): Visibility {
   try {
     const raw = localStorage.getItem(VISIBILITY_LS_KEY);
-    if (!raw) return { ...DEFAULT_VISIBILITY };
-    const parsed = JSON.parse(raw) as Partial<Visibility>;
-    return {
-      tool: parsed.tool ?? true,
-      reasoning: parsed.reasoning ?? true,
-      notice: parsed.notice ?? true,
-      toolOutput: parsed.toolOutput ?? true,
-    };
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<Visibility>;
+      return {
+        tool: sanitizeMode(parsed.tool) ?? 'show',
+        reasoning: sanitizeMode(parsed.reasoning) ?? 'show',
+        notice: sanitizeMode(parsed.notice) ?? 'show',
+        toolOutput: parsed.toolOutput ?? true,
+      };
+    }
+    // No v2 payload yet — migrate the old boolean shape if present.
+    const legacy = localStorage.getItem(VISIBILITY_LS_KEY_V1);
+    if (legacy) return migrateV1(legacy);
+    return { ...DEFAULT_VISIBILITY };
   } catch {
     return { ...DEFAULT_VISIBILITY };
   }
@@ -874,8 +923,12 @@ export default function AgentPane({
     }
   }, [visibility]);
 
-  const toggleVisibility = useCallback((kind: FilterableKind | 'toolOutput') => {
-    setVisibility((prev) => ({ ...prev, [kind]: !prev[kind] }));
+  const setViewMode = useCallback((kind: FilterableKind, mode: ViewMode) => {
+    setVisibility((prev) => ({ ...prev, [kind]: mode }));
+  }, []);
+
+  const toggleToolOutput = useCallback(() => {
+    setVisibility((prev) => ({ ...prev, toolOutput: !prev.toolOutput }));
   }, []);
 
   const copyShareUrl = useCallback((url: string) => {
@@ -899,8 +952,13 @@ export default function AgentPane({
       if (e.kind === 'assistant') {
         // Reason appears before the message it explains (thinking happens first).
         // If there's reasoning immediately before this assistant message that hasn't
-        // been rendered yet, render it first.
-        if (i > 0 && events[i - 1].kind === 'reasoning' && !renderedReasoningIds.has(events[i - 1].id)) {
+        // been rendered yet, render it first — unless reasoning is hidden entirely.
+        if (
+          i > 0 &&
+          events[i - 1].kind === 'reasoning' &&
+          !renderedReasoningIds.has(events[i - 1].id) &&
+          visibility.reasoning !== 'hide'
+        ) {
           const reasoning = events[i - 1];
           items.push({ type: 'event', key: reasoning.id, event: reasoning });
           renderedReasoningIds.add(reasoning.id);
@@ -910,8 +968,11 @@ export default function AgentPane({
         continue;
       }
 
-      // Skip reasoning events that come right before an assistant (handled above)
+      // Reasoning: `hide` drops it entirely; `badge`/`show` flow through as events
+      // (ReasoningItem collapses to a brain badge when the mode is `badge`).
       if (e.kind === 'reasoning') {
+        if (visibility.reasoning === 'hide') continue;
+        // Skip reasoning events that come right before an assistant (handled above)
         if (i + 1 < events.length && events[i + 1].kind === 'assistant' && !renderedReasoningIds.has(e.id)) {
           // This will be handled by the assistant case above, so skip it here
           continue;
@@ -931,15 +992,21 @@ export default function AgentPane({
         items.push({ type: 'event', key: e.id, event: e });
         continue;
       }
-      if (e.kind === 'tool' && !visibility.tool) {
-        const last = items[items.length - 1];
-        if (last && last.type === 'tool-badges') last.tools.push(e);
-        else items.push({ type: 'tool-badges', key: `badges:${e.id}`, tools: [e] });
-        continue;
+      // Tool calls: `hide` drops them, `badge` collapses consecutive ones into a
+      // strip of mini badges (so a long-running tool never looks like a hang),
+      // `show` renders the full card.
+      if (e.kind === 'tool') {
+        if (visibility.tool === 'hide') continue;
+        if (visibility.tool === 'badge') {
+          const last = items[items.length - 1];
+          if (last && last.type === 'tool-badges') last.tools.push(e);
+          else items.push({ type: 'tool-badges', key: `badges:${e.id}`, tools: [e] });
+          continue;
+        }
       }
-      // Reasoning is never dropped: unchecking it collapses the entry to a
-      // brain badge (handled by ReasoningItem) rather than hiding it.
-      if ((e.kind === 'tool' || e.kind === 'notice') && !visibility[e.kind]) {
+      // Notices: `hide` drops them, `badge`/`show` still flow through as events —
+      // the render mode passed to TranscriptItem decides badge vs full.
+      if (e.kind === 'notice' && visibility.notice === 'hide') {
         continue;
       }
       items.push({ type: 'event', key: e.id, event: e });
@@ -1023,15 +1090,24 @@ export default function AgentPane({
     setSearchIndex(0);
   }, []);
 
+  // `hiddenCount` counts events with no visible trace: kinds set to `'hide'`
+  // (dropped entirely) plus tool bodies suppressed by the `toolOutput` sub-filter.
+  // Badged entries still show a badge, so they are deliberately NOT counted as
+  // hidden — the badge keeps them present in the transcript.
   const hiddenCount = useMemo(
     () =>
       events.filter((e) => {
-        if (e.kind === 'tool') return !visibility.tool || (!visibility.toolOutput && Boolean(e.output));
-        return e.kind === 'reasoning' || e.kind === 'notice' ? !visibility[e.kind] : false;
+        if (e.kind === 'tool') {
+          if (isTaskComplete(e.toolName)) return false;
+          return visibility.tool === 'hide' || (visibility.toolOutput === false && Boolean(e.output));
+        }
+        if (e.kind === 'reasoning') return visibility.reasoning === 'hide';
+        if (e.kind === 'notice') return visibility.notice === 'hide';
+        return false;
       }).length,
     [events, visibility],
   );
-  const anyHidden = FILTERABLE_KINDS.some((f) => !visibility[f.kind]) || !visibility.toolOutput;
+  const anyHidden = FILTERABLE_KINDS.some((f) => visibility[f.kind] !== 'show') || !visibility.toolOutput;
 
   const respond = (
     requestId: string,
@@ -1823,7 +1899,7 @@ export default function AgentPane({
             <>
               <div className="fixed inset-0 z-10" onClick={() => setFilterOpen(false)} />
               <div
-                className="absolute right-0 mt-1 z-20 w-48 rounded-md border shadow-xl py-1"
+                className="absolute right-0 mt-1 z-20 w-60 rounded-md border shadow-xl py-1"
                 style={{
                   borderColor: appearance.border,
                   backgroundColor: appearance.overlay,
@@ -1835,33 +1911,51 @@ export default function AgentPane({
                 </div>
                 {FILTERABLE_KINDS.map((f) => (
                   <div key={f.kind}>
-                    <label
-                      className="flex items-center gap-2 px-2 py-1 text-xs cursor-pointer hover:bg-black/5 dark:hover:bg-white/5"
-                      style={{ color: appearance.fg }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={visibility[f.kind]}
-                        onChange={() => toggleVisibility(f.kind)}
-                      />
+                    <div className="flex items-center justify-between gap-2 px-2 py-1 text-xs" style={{ color: appearance.fg }}>
                       <span>{f.label}</span>
-                    </label>
+                      <div
+                        role="group"
+                        aria-label={`${f.label} view mode`}
+                        className="inline-flex rounded border overflow-hidden"
+                        style={{ borderColor: appearance.border }}
+                      >
+                        {VIEW_MODES.map((m) => {
+                          const activeMode = visibility[f.kind] === m.mode;
+                          return (
+                            <button
+                              key={m.mode}
+                              type="button"
+                              data-testid={`filter-${f.kind}-${m.mode}`}
+                              aria-pressed={activeMode}
+                              onClick={() => setViewMode(f.kind, m.mode)}
+                              className="px-1.5 py-0.5 text-[10px] leading-none"
+                              style={{
+                                backgroundColor: activeMode ? appearance.accent : 'transparent',
+                                color: activeMode ? appearance.bg : appearance.muted,
+                              }}
+                            >
+                              {m.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                     {f.kind === 'tool' && (
                       <label
                         className="flex items-center gap-2 pl-6 pr-2 py-1 text-xs cursor-pointer hover:bg-black/5 dark:hover:bg-white/5"
-                        style={{ color: visibility.tool ? appearance.fg : appearance.muted }}
+                        style={{ color: visibility.tool === 'show' ? appearance.fg : appearance.muted }}
                         title={
-                          visibility.tool
+                          visibility.tool === 'show'
                             ? 'Show the result body of each tool call'
-                            : 'Tool calls are hidden, so their output is hidden too'
+                            : 'Tool output is only available when tool calls are shown in full'
                         }
                       >
                         <input
                           type="checkbox"
                           data-testid="filter-tool-output"
-                          checked={visibility.tool && visibility.toolOutput}
-                          disabled={!visibility.tool}
-                          onChange={() => toggleVisibility('toolOutput')}
+                          checked={visibility.tool === 'show' && visibility.toolOutput}
+                          disabled={visibility.tool !== 'show'}
+                          onChange={() => toggleToolOutput()}
                         />
                         <span>Tool output</span>
                       </label>
@@ -2060,7 +2154,8 @@ export default function AgentPane({
                   appearance={appearance}
                   codeSize={codeSize}
                   showToolOutput={visibility.toolOutput}
-                  showReasoning={visibility.reasoning}
+                  showReasoning={visibility.reasoning === 'show'}
+                  noticeMode={visibility.notice}
                   projectId={projectId}
                   worktreeId={worktreeId}
                   sessionKind={sessionKind === 'server' || sessionKind === 'artifact' ? undefined : sessionKind}
@@ -2458,6 +2553,7 @@ const TranscriptItem = memo(function TranscriptItem({
   codeSize,
   showToolOutput,
   showReasoning,
+  noticeMode,
   projectId,
   worktreeId,
   sessionKind,
@@ -2467,6 +2563,7 @@ const TranscriptItem = memo(function TranscriptItem({
   codeSize: number;
   showToolOutput: boolean;
   showReasoning: boolean;
+  noticeMode: ViewMode;
   projectId?: string;
   worktreeId?: string;
   sessionKind?: 'agent' | 'project_lead' | 'chief_of_staff';
@@ -2517,7 +2614,19 @@ const TranscriptItem = memo(function TranscriptItem({
     );
   }
 
-  // notice
+  // notice — collapses to a compact badge when the notice view mode is `badge`.
+  if (noticeMode === 'badge') {
+    return (
+      <div
+        data-testid={`notice-badge-${event.id}`}
+        title={event.message}
+        className="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] w-fit"
+        style={{ color: appearance.muted, borderColor: appearance.border }}
+      >
+        <Info className="h-3 w-3" />
+      </div>
+    );
+  }
   return (
     <div className="text-xs text-center italic" style={{ color: appearance.muted }}>
       {event.message}
