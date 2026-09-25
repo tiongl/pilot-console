@@ -1105,11 +1105,16 @@ export function createProjectLeadTools(  projectId: string,
         required: ['htmlPath', 'name'],
       },
       handler: async ({ htmlPath, name }: { htmlPath: string; name: string }) => {
-        const { createArtifact } = await import('./lavish-store');
-        const { spawnLavishArtifact } = await import('./lavish-runtime');
-
-        const artifact = createArtifact({ projectId, name, htmlPath });
+        // Row creation and the module loads must stay inside the try: createArtifact
+        // is an FK-constrained INSERT (lavish_artifacts.project_id REFERENCES projects,
+        // foreign_keys = ON), so it can throw (e.g. a Lead session pinned to a
+        // since-deleted project). Left unguarded it aborted with no row AND no audit,
+        // so the tab silently never appeared and the failure was invisible.
         try {
+          const { createArtifact } = await import('./lavish-store');
+          const { spawnLavishArtifact } = await import('./lavish-runtime');
+
+          const artifact = createArtifact({ projectId, name, htmlPath });
           const result = await spawnLavishArtifact(userId ?? '', artifact);
           audit(projectId, 'open_artifact', `Opened Lavish artifact: ${name} (${htmlPath})`, 'low');
           return {
@@ -1120,7 +1125,15 @@ export function createProjectLeadTools(  projectId: string,
             note: 'A live Lavish tab is opening. Call poll_artifact_feedback to receive human feedback.',
           };
         } catch (err) {
-          audit(projectId, 'open_artifact', `Failed to open artifact: ${name} - ${err instanceof Error ? err.message : String(err)}`, 'high');
+          // Best-effort audit. project_audit_log.project_id has the SAME
+          // `REFERENCES projects(id)` FK that createArtifact can throw on, so for a
+          // since-deleted project the audit INSERT would throw too — that must never
+          // mask the original error, so swallow any audit failure and always rethrow.
+          try {
+            audit(projectId, 'open_artifact', `Failed to open artifact: ${name} - ${err instanceof Error ? err.message : String(err)}`, 'high');
+          } catch {
+            // ignore audit failure; the original error below is what matters
+          }
           throw err;
         }
       },

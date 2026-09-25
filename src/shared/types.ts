@@ -65,6 +65,7 @@ export type WsServerMessage =
   | { type: 'perf-ping'; ts: number }
   | { type: 'git-changed'; projectId: string; worktreeId: string | null }
   | { type: 'worktrees-changed'; projectId: string }
+  | { type: 'artifacts-changed'; projectId: string }
   | { type: 'report-ready'; runId: string; scheduleId: string; scheduleName: string; status: string }
   | { type: 'schedule-changed'; action: 'created' | 'updated' | 'deleted' | 'imported'; scheduleId?: string };
 

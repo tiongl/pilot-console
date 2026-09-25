@@ -6,6 +6,7 @@ import { getDaemonClient } from '../daemon/client';
 import type { WsClientMessage, WsServerMessage } from '../shared/types';
 import { getOrCreateSessionPerf, recordPerfPong, markPerfPingSent, recordOutputBatch, recordFlush, removeSessionPerf, traceStart } from './perf-monitor';
 import { worktreeEvents, type WorktreesChangedPayload } from '../shared/worktree-events';
+import { lavishEvents, type ArtifactsChangedPayload } from '../shared/lavish-events';
 
 interface AuthedSocket extends WebSocket {
   userId?: string;
@@ -91,6 +92,20 @@ export function setupWebSocketServer(): WebSocketServer {
   worktreeEvents.on('worktrees-changed', (payload: WorktreesChangedPayload) => {
     if (!_wss) return;
     const msg = JSON.stringify({ type: 'worktrees-changed', projectId: payload.projectId });
+    _wss.clients.forEach((ws) => {
+      const socket = ws as AuthedSocket;
+      if (socket.readyState === WebSocket.OPEN && socket.userId) {
+        socket.send(msg);
+      }
+    });
+  });
+
+  // Subscribe to Lavish artifact changes (create/status/delete) and push an
+  // instant tab refresh to the Project Lead page, mirroring worktrees-changed so
+  // the tab does not wait on the page's 8s poll. Same no-owner broadcast rule.
+  lavishEvents.on('artifacts-changed', (payload: ArtifactsChangedPayload) => {
+    if (!_wss) return;
+    const msg = JSON.stringify({ type: 'artifacts-changed', projectId: payload.projectId });
     _wss.clients.forEach((ws) => {
       const socket = ws as AuthedSocket;
       if (socket.readyState === WebSocket.OPEN && socket.userId) {

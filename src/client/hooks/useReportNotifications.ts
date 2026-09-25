@@ -17,6 +17,10 @@ export interface WorktreesChangedDetail {
   projectId: string;
 }
 
+export interface ArtifactsChangedDetail {
+  projectId: string;
+}
+
 /**
  * Hook that listens for automation WebSocket notifications.
  */
@@ -62,6 +66,10 @@ export function useReportNotifications() {
             }));
           } else if (msg.type === 'worktrees-changed') {
             window.dispatchEvent(new CustomEvent<WorktreesChangedDetail>('worktrees-changed', {
+              detail: { projectId: msg.projectId },
+            }));
+          } else if (msg.type === 'artifacts-changed') {
+            window.dispatchEvent(new CustomEvent<ArtifactsChangedDetail>('artifacts-changed', {
               detail: { projectId: msg.projectId },
             }));
           }

@@ -213,6 +213,52 @@ describe('ProjectLeadPage worker tabs', () => {
     expect(props?.artifactStatus).toBe('ready');
   });
 
+  it('adds the Lavish tab instantly on the artifacts-changed live push', async () => {
+    artifacts = [];
+    await renderPage();
+
+    // No artifact tab yet (empty initial fetch).
+    expect(screen.queryByTestId('lead-tab-art-a1')).toBeNull();
+
+    // A new artifact lands and the server pushes artifacts-changed; the tab must
+    // appear on the immediate refetch rather than waiting on the 8s poll.
+    artifacts = [
+      {
+        id: 'a1',
+        projectId,
+        name: 'Architecture Plan',
+        status: 'ready',
+        sessionKey: 'key1',
+        proxyPath: '/api/lavish/a1/session/key1',
+      },
+    ];
+    window.dispatchEvent(new CustomEvent('artifacts-changed', { detail: { projectId } }));
+
+    const tab = await screen.findByTestId('lead-tab-art-a1');
+    expect(tab.textContent).toContain('Architecture Plan');
+  });
+
+  it('ignores an artifacts-changed push for a different project', async () => {
+    artifacts = [];
+    await renderPage();
+
+    artifacts = [
+      {
+        id: 'a1',
+        projectId,
+        name: 'Architecture Plan',
+        status: 'ready',
+        sessionKey: 'key1',
+        proxyPath: '/api/lavish/a1/session/key1',
+      },
+    ];
+    window.dispatchEvent(new CustomEvent('artifacts-changed', { detail: { projectId: 'other-project' } }));
+
+    // The scoped listener must not refetch for a foreign project.
+    await Promise.resolve();
+    expect(screen.queryByTestId('lead-tab-art-a1')).toBeNull();
+  });
+
   it('switches to the worker pane when its tab is clicked', async () => {    delegations = [liveDelegation];
     await renderPage();
 

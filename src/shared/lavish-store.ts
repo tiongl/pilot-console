@@ -1,5 +1,6 @@
 import { getDb } from './db';
 import { randomUUID } from 'crypto';
+import { emitArtifactsChanged } from './lavish-events';
 
 /**
  * A Lavish artifact is an HTML file opened in a live `lavish-axi` session and
@@ -37,6 +38,7 @@ export function createArtifact(options: {
     )
     .run(id, options.projectId, options.name, options.htmlPath, now, now);
 
+  emitArtifactsChanged(options.projectId);
   return getArtifactById(id)!;
 }
 
@@ -66,7 +68,9 @@ export function updateArtifactSession(
        WHERE id = ?`,
     )
     .run(session.sessionUrl, session.host, session.port, session.sessionKey, new Date().toISOString(), id);
-  return getArtifactById(id)!;
+  const updated = getArtifactById(id)!;
+  emitArtifactsChanged(updated.projectId);
+  return updated;
 }
 
 export function updateArtifactStatus(
@@ -77,11 +81,15 @@ export function updateArtifactStatus(
   getDb()
     .prepare('UPDATE lavish_artifacts SET status = ?, exit_code = ?, updated_at = ? WHERE id = ?')
     .run(status, exitCode, new Date().toISOString(), id);
-  return getArtifactById(id)!;
+  const updated = getArtifactById(id)!;
+  emitArtifactsChanged(updated.projectId);
+  return updated;
 }
 
 export function deleteArtifact(id: string): void {
+  const existing = getArtifactById(id);
   getDb().prepare('DELETE FROM lavish_artifacts WHERE id = ?').run(id);
+  if (existing) emitArtifactsChanged(existing.projectId);
 }
 
 function rowToArtifact(row: Record<string, unknown>): LavishArtifact {

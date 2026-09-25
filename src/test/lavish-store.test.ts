@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 describe('lavish store', () => {
   let db: InstanceType<typeof Database>;
   let store: typeof import('../shared/lavish-store');
+  let emitArtifactsChanged: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -26,7 +27,9 @@ describe('lavish store', () => {
       );
     `);
 
+    emitArtifactsChanged = vi.fn();
     vi.doMock('../shared/db', () => ({ getDb: () => db }));
+    vi.doMock('../shared/lavish-events', () => ({ emitArtifactsChanged }));
     store = await import('../shared/lavish-store');
   });
 
@@ -72,5 +75,27 @@ describe('lavish store', () => {
     const a = store.createArtifact({ projectId: 'p1', name: 'A', htmlPath: '/tmp/a.html' });
     store.deleteArtifact(a.id);
     expect(store.getArtifactById(a.id)).toBeNull();
+  });
+
+  it('pushes an artifacts-changed event on create, status, session, and delete', () => {
+    const a = store.createArtifact({ projectId: 'p1', name: 'A', htmlPath: '/tmp/a.html' });
+    expect(emitArtifactsChanged).toHaveBeenCalledWith('p1');
+
+    emitArtifactsChanged.mockClear();
+    store.updateArtifactStatus(a.id, 'failed', 1);
+    expect(emitArtifactsChanged).toHaveBeenCalledWith('p1');
+
+    emitArtifactsChanged.mockClear();
+    store.updateArtifactSession(a.id, {
+      sessionUrl: 'http://host:1/session/k',
+      host: 'host',
+      port: 1,
+      sessionKey: 'k',
+    });
+    expect(emitArtifactsChanged).toHaveBeenCalledWith('p1');
+
+    emitArtifactsChanged.mockClear();
+    store.deleteArtifact(a.id);
+    expect(emitArtifactsChanged).toHaveBeenCalledWith('p1');
   });
 });

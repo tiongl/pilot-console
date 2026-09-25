@@ -174,6 +174,19 @@ function ProjectLeadContent({ projectId }: { projectId: string }) {
     return () => clearInterval(timer);
   }, [refreshDelegations, refreshServers, refreshArtifacts]);
 
+  // Live push: the server emits `artifacts-changed` when an artifact is created,
+  // changes status, or is deleted, so the tab appears instantly instead of waiting
+  // on the 8s poll above (mirrors the worktrees-changed path for worker tabs).
+  useEffect(() => {
+    const onArtifactsChanged = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { projectId?: string };
+      if (detail?.projectId && detail.projectId !== projectId) return;
+      refreshArtifacts();
+    };
+    window.addEventListener('artifacts-changed', onArtifactsChanged);
+    return () => window.removeEventListener('artifacts-changed', onArtifactsChanged);
+  }, [projectId, refreshArtifacts]);
+
   // Opening a worker's tab clears its "needs attention" flag. A worktree can
   // have older, closed-out delegations too; the newest one owns the tab.
   useEffect(() => {
