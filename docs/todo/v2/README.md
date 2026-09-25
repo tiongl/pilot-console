@@ -91,6 +91,7 @@ compute**; keep an always-on control plane because cloud sessions are ephemeral.
 | `cloud-lead.md` | (optional) re-host Lead tools behind MCP so a cloud Lead can call them (R3) | R0, always-on, hosted DB |
 | `saas-multi-tenant.md` | tenancy + auth + per-tenant isolation + billing; ties the platform together | all of the above |
 | `mobile-voice-console.md` | new UX surface: mobile voice-first remote client (2FA/exposure hardening + two-way STT/TTS voice loop; Lavish/screen-capture fallbacks) — opt-in, remote-only | always-on-remote-lead, saas-multi-tenant (auth), persistent-memory-hosted-db |
+| `cost-and-pricing.md` | quantifies the SaaS cost-center model → monthly operator cost per seat + per-seat pricing scenarios (all figures assumptions, need validation) | saas-multi-tenant + all Platform-track docs (always-on, hosted-DB, cloud-agents; voice add-on) |
 
 ## Track B — Role model (org scaling)
 
@@ -132,4 +133,5 @@ The heaviest, most variable cost — **agent token burn** — is offloaded to ea
 tenant's own Copilot entitlement via cloud sandboxes. You run only a small, shared
 control plane + hosted DB, and sell the **coordination layer** (the CoS→Lead→worker
 hierarchy, durable memory, the dashboard) that is pilot-console's differentiator.
-See `saas-multi-tenant.md` for the full cost breakdown.
+See `saas-multi-tenant.md` for the full cost breakdown, and `cost-and-pricing.md`
+for a quantified per-seat cost + pricing model (all figures assumptions).
