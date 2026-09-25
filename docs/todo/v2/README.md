@@ -90,6 +90,7 @@ compute**; keep an always-on control plane because cloud sessions are ephemeral.
 | `cloud-agents.md` | route workers + the read-only assessor to Copilot cloud sandboxes | always-on |
 | `cloud-lead.md` | (optional) re-host Lead tools behind MCP so a cloud Lead can call them (R3) | R0, always-on, hosted DB |
 | `saas-multi-tenant.md` | tenancy + auth + per-tenant isolation + billing; ties the platform together | all of the above |
+| `mobile-voice-console.md` | new UX surface: mobile voice-first remote client (2FA/exposure hardening + two-way STT/TTS voice loop; Lavish/screen-capture fallbacks) — opt-in, remote-only | always-on-remote-lead, saas-multi-tenant (auth), persistent-memory-hosted-db |
 
 ## Track B — Role model (org scaling)
 
@@ -113,6 +114,12 @@ once roles are data.
 5. **Tenancy — `saas-multi-tenant.md`** (the one genuinely new pillar: `tenant_id` + GitHub-App auth).
 6. **Role additions — `pm-role.md`, `architect-role.md`** as cross-project scale demands; **`ops-runtime-role.md`** only if scope grows past "get code merged".
 7. **`cloud-lead.md`** (R3) — optional, last; the Lead core stays on the control plane regardless.
+
+**Opt-in UX surface (Platform-adjacent):** `mobile-voice-console.md` — a mobile,
+voice-first remote client behind 2FA. It is **remote-only and opt-in** (the
+local-default invariant is untouched) and slots in **after** its prerequisites:
+exposure/auth hardening rides on `saas-multi-tenant.md` (auth) + the always-on host
+(`always-on-remote-lead.md`) + hosted state (`persistent-memory-hosted-db.md`).
 
 **Near-term hybrid milestone** (the realistic first cut of v2): control plane +
 hosted DB + on-demand Lead/CoS on one small always-on host, workers pushed to
