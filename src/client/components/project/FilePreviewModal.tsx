@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
-import { X, AlertCircle, Loader2 } from 'lucide-react';
+import { X, AlertCircle, Loader2, Code, Eye } from 'lucide-react';
 import { Light as SyntaxHighlighter } from 'react-syntax-highlighter';
 import ts from 'react-syntax-highlighter/dist/esm/languages/hljs/typescript';
 import js from 'react-syntax-highlighter/dist/esm/languages/hljs/javascript';
@@ -26,6 +26,7 @@ import ini from 'react-syntax-highlighter/dist/esm/languages/hljs/ini';
 import { vs2015 } from 'react-syntax-highlighter/dist/esm/styles/hljs';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import RichMarkdown from '../markdown/RichMarkdown';
 
 SyntaxHighlighter.registerLanguage('typescript', ts);
 SyntaxHighlighter.registerLanguage('javascript', js);
@@ -54,7 +55,7 @@ const EXT_LANG: Record<string, string> = {
   cxx: 'cpp', cc: 'cpp', h: 'cpp', hpp: 'cpp', cs: 'csharp', json: 'json', yaml: 'yaml', yml: 'yaml',
   xml: 'xml', html: 'xml', htm: 'xml', css: 'css', scss: 'scss', sass: 'scss',
   sh: 'bash', bash: 'bash', zsh: 'bash', fish: 'bash', ps1: 'powershell', sql: 'sql',
-  md: 'markdown', dockerfile: 'dockerfile', docker: 'dockerfile',
+  md: 'markdown', mdx: 'markdown', dockerfile: 'dockerfile', docker: 'dockerfile',
   ini: 'ini', cfg: 'ini', conf: 'ini', env: 'ini',
 };
 
@@ -108,15 +109,18 @@ export default function FilePreviewModal({
 }: FilePreviewModalProps) {
   const [file, setFile] = useState<FileContent>({ content: null });
   const [loading, setLoading] = useState(true);
+  const [renderMarkdown, setRenderMarkdown] = useState(true);
 
   const language = useMemo(() => getLanguage(filePath), [filePath]);
   const isImage = useMemo(() => isImageFile(filePath), [filePath]);
+  const isMarkdown = useMemo(() => language === 'markdown', [language]);
 
   useEffect(() => {
     if (!open) return;
 
     setLoading(true);
     setFile({ content: null });
+    setRenderMarkdown(true);
 
     const fetchFile = async () => {
       try {
@@ -150,12 +154,25 @@ export default function FilePreviewModal({
       <DialogContent className="max-w-4xl max-h-[80vh] p-0 flex flex-col">
         <DialogHeader className="px-6 pt-6 pb-2 flex flex-row items-center justify-between space-y-0">
           <DialogTitle className="text-sm font-mono truncate">{filePath}</DialogTitle>
-          <button
-            onClick={() => onOpenChange(false)}
-            className="h-6 w-6 rounded hover:bg-muted flex items-center justify-center"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-1">
+            {isMarkdown && !loading && !file.error && !file.binary && file.content !== null && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6"
+                onClick={() => setRenderMarkdown((v) => !v)}
+                title={renderMarkdown ? 'Show source' : 'Render markdown'}
+              >
+                {renderMarkdown ? <Code className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </Button>
+            )}
+            <button
+              onClick={() => onOpenChange(false)}
+              className="h-6 w-6 rounded hover:bg-muted flex items-center justify-center"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </DialogHeader>
 
         <div className="flex-1 overflow-hidden bg-[#1e1e1e]">
@@ -179,6 +196,15 @@ export default function FilePreviewModal({
                 alt={filePath}
                 className="max-w-full max-h-full object-contain"
               />
+            </div>
+          ) : isMarkdown && renderMarkdown ? (
+            <div className="overflow-auto h-full p-6 text-sm leading-relaxed text-[#d4d4d4]">
+              <RichMarkdown content={file.content ?? ''} darkMode />
+              {file.truncated && (
+                <div className="mt-3 px-4 py-3 text-xs text-muted-foreground italic border-t border-border">
+                  — File truncated —
+                </div>
+              )}
             </div>
           ) : (
             <div className="overflow-auto h-full">
