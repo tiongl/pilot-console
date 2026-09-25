@@ -277,6 +277,78 @@ describe('AgentPane', () => {
     await waitFor(() => expect(hooked.send).toHaveBeenCalledWith({ type: 'send', prompt: 'do something' }));
   });
 
+  describe('optimistic user message', () => {
+    function submitMessage(value: string) {
+      const textarea = screen.getByPlaceholderText(/Message Copilot/i);
+      fireEvent.change(textarea, { target: { value } });
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+    }
+
+    it('paints the user bubble immediately, before any server event', async () => {
+      renderPane();
+      submitMessage('optimistic hello');
+      // No server `event` has been emitted yet — the bubble must already show.
+      await waitFor(() => expect(screen.getByText('optimistic hello')).toBeTruthy());
+      expect(hooked.send).toHaveBeenCalledWith({ type: 'send', prompt: 'optimistic hello' });
+    });
+
+    it('does not duplicate when the server echoes the matching user event', async () => {
+      renderPane();
+      submitMessage('optimistic hello');
+      await waitFor(() => expect(screen.getByText('optimistic hello')).toBeTruthy());
+      // The server persists and broadcasts the authoritative user event with its
+      // own SDK-assigned id — this must replace the optimistic bubble, not add one.
+      emit({ type: 'event', event: { kind: 'user', id: 'srv-1', ts: 99, content: 'optimistic hello' } });
+      await waitFor(() => expect(screen.getAllByText('optimistic hello')).toHaveLength(1));
+    });
+
+    it('collapses the optimistic bubble on a full replay', async () => {
+      renderPane();
+      submitMessage('optimistic hello');
+      await waitFor(() => expect(screen.getByText('optimistic hello')).toBeTruthy());
+      // A reconnect/replay is authoritative: its copy wins with no dupe and no
+      // orphaned optimistic bubble.
+      emit({
+        type: 'replay',
+        events: [{ kind: 'user', id: 'srv-1', ts: 99, content: 'optimistic hello' }],
+      });
+      await waitFor(() => expect(screen.getAllByText('optimistic hello')).toHaveLength(1));
+    });
+
+    it('does not paint an optimistic bubble for a slash command', async () => {
+      renderPane();
+      submitMessage('/help');
+      // Slash commands run through their own branch — no user bubble, no `send`.
+      await waitFor(() =>
+        expect(hooked.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'send' })),
+      );
+      expect(screen.queryByText('/help')).toBeNull();
+    });
+
+    it('does not paint an optimistic bubble when answering a pending question', () => {
+      renderPane();
+      emit({
+        type: 'ask_user_request',
+        requestId: 'q1',
+        question: 'Which database?',
+        options: ['SQLite', 'Postgres'],
+        allowText: true,
+      });
+      const textarea = screen.getByPlaceholderText(/Click an option above/i);
+      fireEvent.change(textarea, { target: { value: 'use DuckDB' } });
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+      // The typed text routes to the question, not a normal send — so no
+      // optimistic user bubble is painted for it.
+      expect(hooked.send).toHaveBeenCalledWith({
+        type: 'ask_user_response',
+        requestId: 'q1',
+        answer: 'use DuckDB',
+      });
+      expect(hooked.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'send' }));
+      expect(screen.queryByText('use DuckDB')).toBeNull();
+    });
+  });
+
   it('surfaces a permission prompt and responds on Allow', async () => {
     renderPane();
     emit({

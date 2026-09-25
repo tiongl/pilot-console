@@ -248,6 +248,15 @@ const clampToolOutput = (text: string): string =>
     ? text.slice(0, MAX_TOOL_OUTPUT_CHARS) + `\n… [truncated ${text.length - MAX_TOOL_OUTPUT_CHARS} chars]`
     : text;
 
+// Optimistic user bubbles are minted client-side and painted before the server
+// echoes the persisted `user.message`. The server assigns the real id from the
+// SDK event, which the client cannot predict, so we tag the placeholder with
+// this prefix and reconcile it away when the authoritative event arrives.
+const OPTIMISTIC_USER_PREFIX = 'optimistic:user:';
+
+/** Whether an id belongs to a not-yet-confirmed optimistic user bubble. */
+const isOptimisticUserId = (id: string): boolean => id.startsWith(OPTIMISTIC_USER_PREFIX);
+
 /** Whether a command should prompt for an argument before running. */const commandTakesArg = (c: AgentSlashCommand): boolean =>
   c.argRequired === true || !!c.argHint || !!(c.argChoices && c.argChoices.length);
 
@@ -659,6 +668,39 @@ export default function AgentPane({
     });
   }, []);
 
+  // Monotonic counter so multiple optimistic bubbles minted within the same
+  // millisecond still get distinct ids.
+  const optimisticSeqRef = useRef(0);
+  const mintOptimisticUserId = useCallback(
+    () => `${OPTIMISTIC_USER_PREFIX}${Date.now()}:${optimisticSeqRef.current++}`,
+    [],
+  );
+
+  // Reconcile the server's authoritative user event with any optimistic bubble
+  // we already painted, so the message never double-renders. The echoed id is
+  // SDK-assigned (unpredictable client-side), so we pair by content+role against
+  // the oldest unconfirmed optimistic entry and replace it in place — preserving
+  // ordering while adopting the real id/ts.
+  const reconcileUserEvent = useCallback((event: Extract<AgentTranscriptEvent, { kind: 'user' }>) => {
+    setEvents((prev) => {
+      const byId = prev.findIndex((e) => e.id === event.id);
+      if (byId >= 0) {
+        const next = prev.slice();
+        next[byId] = event;
+        return next;
+      }
+      const optIdx = prev.findIndex(
+        (e) => e.kind === 'user' && isOptimisticUserId(e.id) && e.content === event.content,
+      );
+      if (optIdx >= 0) {
+        const next = prev.slice();
+        next[optIdx] = event;
+        return next;
+      }
+      return [...prev, event];
+    });
+  }, []);
+
   const applyDelta = useCallback((id: string, delta: string, kind: 'assistant' | 'tool') => {
     setEvents((prev) => {
       const idx = prev.findIndex((e) => e.id === id);
@@ -707,7 +749,8 @@ export default function AgentPane({
           break;
         }
         case 'event':
-          if (msg.event.kind !== 'system') upsert(msg.event);
+          if (msg.event.kind === 'user') reconcileUserEvent(msg.event);
+          else if (msg.event.kind !== 'system') upsert(msg.event);
           break;
         case 'assistant_delta':
           applyDelta(msg.id, msg.delta, 'assistant');
@@ -825,7 +868,7 @@ export default function AgentPane({
           break;
       }
     },
-    [upsert, applyDelta],
+    [upsert, applyDelta, reconcileUserEvent],
   );
 
   // The real session id, known immediately for a reopened session and after
@@ -1421,6 +1464,11 @@ export default function AgentPane({
       return;
     }
     send({ type: 'send', prompt: trimmed });
+    // Paint the user's bubble immediately instead of waiting for the server to
+    // persist and echo it back (a visible lag on remote/loaded hosts). The
+    // placeholder carries an optimistic id; `reconcileUserEvent` replaces it in
+    // place when the authoritative `user.message` arrives, so it never dupes.
+    upsert({ kind: 'user', id: mintOptimisticUserId(), ts: Date.now(), content: trimmed });
     // Only anchor the clock when this prompt starts a turn; a follow-up typed
     // mid-turn is queued server-side and must not restart the running timer.
     if (status !== 'busy') setTurnStartedAt(Date.now());
