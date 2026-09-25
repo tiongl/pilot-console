@@ -29,6 +29,7 @@ vi.mock('mermaid', () => ({
 
 import AgentPane from '@/components/terminal/AgentPane';
 import { writeTranscript } from '@/lib/transcript-cache';
+import { readDraft as readDraftLib, writeDraft as writeDraftLib } from '@/lib/composer-draft';
 
 function emit(msg: AgentServerMessage) {
   act(() => {
@@ -384,6 +385,36 @@ describe('AgentPane', () => {
       first.unmount();
       render(<AgentPane projectId="p1" active sessionId="sess-b" />);
       expect((screen.getByPlaceholderText(/Message Copilot/i) as HTMLTextAreaElement).value).toBe('');
+    });
+
+    it('hands off drafts on an in-place session switch without destroying them', () => {
+      // Session B already has a saved draft from an earlier visit.
+      writeDraftLib('sess-b', 'draft for B');
+      const { rerender } = render(<AgentPane projectId="p1" active sessionId="sess-a" />);
+      const textarea = () => screen.getByPlaceholderText(/Message Copilot/i) as HTMLTextAreaElement;
+      // Type into A; it is mirrored under A's key.
+      fireEvent.change(textarea(), { target: { value: 'draft for A' } });
+      expect(readDraftLib('sess-a')).toBe('draft for A');
+      // In-place switch (same mount, no remount) — the sessionId prop changes,
+      // exactly as ProjectChatPage does on /resume.
+      rerender(<AgentPane projectId="p1" active sessionId="sess-b" />);
+      // B's saved draft is restored (not clobbered by A's stale composer value)…
+      expect(textarea().value).toBe('draft for B');
+      // …and A's draft is preserved under A's own key, never overwritten with B.
+      expect(readDraftLib('sess-a')).toBe('draft for A');
+      expect(readDraftLib('sess-b')).toBe('draft for B');
+    });
+
+    it('keeps a typed first message when a brand-new session gains its id', () => {
+      // A brand-new session mounts without an id; the id arrives in place.
+      const { rerender } = render(<AgentPane projectId="p1" active />);
+      const textarea = () => screen.getByPlaceholderText(/Message Copilot/i) as HTMLTextAreaElement;
+      fireEvent.change(textarea(), { target: { value: 'first message' } });
+      rerender(<AgentPane projectId="p1" active sessionId="sess-new" />);
+      // The composer text belongs to this session — it must not be wiped, and it
+      // is now persisted under the freshly assigned id.
+      expect(textarea().value).toBe('first message');
+      expect(readDraftLib('sess-new')).toBe('first message');
     });
   });
 

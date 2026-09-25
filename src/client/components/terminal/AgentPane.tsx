@@ -907,21 +907,46 @@ export default function AgentPane({
     return () => clearTimeout(timer);
   }, [events]);
 
+  // Tracks which session the composer's contents currently belong to. On an
+  // in-place session switch (e.g. `/resume`, no remount) both draft effects
+  // re-run in declaration order; this ref lets the mirror effect below skip
+  // writing the previous session's (now stale) composer value into the new
+  // session's key before the hand-off effect has run.
+  const draftSessionRef = useRef(sessionId);
+  // Always-current composer value, so the hand-off effect (which must not list
+  // `input` as a dependency) can read it without a stale closure.
+  const inputRef = useRef(input);
+  inputRef.current = input;
+
   // Mirror the composer's unsent contents into per-session storage so a refresh
   // restores the draft. Writing an empty string clears it, so the persisted
   // draft vanishes the moment the message is sent (or the composer is emptied).
   useEffect(() => {
     if (!sessionId) return;
+    // Only persist while the composer's contents still belong to this session.
+    // On an in-place switch this effect fires before the hand-off effect updates
+    // the ref; skipping here prevents clobbering the target session's saved
+    // draft (or clearing it) with the previous session's stale composer value.
+    if (draftSessionRef.current !== sessionId) return;
     writeDraft(sessionId, input);
   }, [input, sessionId]);
 
-  // Re-restore the draft when the active session changes without a remount.
-  // Never clobber text the user is actively typing — only fill an empty composer.
-  const draftSessionRef = useRef(sessionId);
+  // Hand the composer off when the active session changes without a remount.
   useEffect(() => {
-    if (draftSessionRef.current === sessionId) return;
+    const prev = draftSessionRef.current;
+    if (prev === sessionId) return;
     draftSessionRef.current = sessionId;
-    setInput((cur) => (cur ? cur : sessionId ? readDraft(sessionId) ?? '' : ''));
+    if (prev == null) {
+      // A brand-new session just gained its id (undefined → real id, same
+      // mount). The composer text belongs to THIS session — keep it (never
+      // clobber a typed-but-unsent first message) and persist it under the id.
+      if (sessionId) writeDraft(sessionId, inputRef.current);
+      return;
+    }
+    // A genuine switch between two sessions. The outgoing draft was already
+    // mirrored under `prev` on every keystroke, so it is safe there; load the
+    // target session's saved draft into the composer.
+    setInput(sessionId ? readDraft(sessionId) ?? '' : '');
   }, [sessionId]);
 
   useEffect(() => {
