@@ -349,6 +349,44 @@ describe('AgentPane', () => {
     });
   });
 
+  describe('composer draft persistence', () => {
+    it('restores a persisted draft on remount for the same session', () => {
+      const { unmount } = render(<AgentPane projectId="p1" active sessionId="sess-draft" />);
+      fireEvent.change(screen.getByPlaceholderText(/Message Copilot/i), {
+        target: { value: 'unsent thoughts' },
+      });
+      unmount();
+      // Simulate a refresh: a fresh mount for the same session restores the draft.
+      render(<AgentPane projectId="p1" active sessionId="sess-draft" />);
+      expect((screen.getByPlaceholderText(/Message Copilot/i) as HTMLTextAreaElement).value).toBe(
+        'unsent thoughts',
+      );
+    });
+
+    it('clears the persisted draft after the message is sent', async () => {
+      const first = render(<AgentPane projectId="p1" active sessionId="sess-draft" />);
+      const textarea = screen.getByPlaceholderText(/Message Copilot/i);
+      fireEvent.change(textarea, { target: { value: 'send me' } });
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+      await waitFor(() =>
+        expect(hooked.send).toHaveBeenCalledWith({ type: 'send', prompt: 'send me' }),
+      );
+      first.unmount();
+      render(<AgentPane projectId="p1" active sessionId="sess-draft" />);
+      expect((screen.getByPlaceholderText(/Message Copilot/i) as HTMLTextAreaElement).value).toBe('');
+    });
+
+    it('does not surface another session\'s draft', () => {
+      const first = render(<AgentPane projectId="p1" active sessionId="sess-a" />);
+      fireEvent.change(screen.getByPlaceholderText(/Message Copilot/i), {
+        target: { value: 'draft for A' },
+      });
+      first.unmount();
+      render(<AgentPane projectId="p1" active sessionId="sess-b" />);
+      expect((screen.getByPlaceholderText(/Message Copilot/i) as HTMLTextAreaElement).value).toBe('');
+    });
+  });
+
   it('surfaces a permission prompt and responds on Allow', async () => {
     renderPane();
     emit({

@@ -57,6 +57,7 @@ import {
 import { useAgentSocket } from '@/hooks/useAgentSocket';
 import { getThemeByName } from '@/lib/terminal-themes';
 import { readTranscript, writeTranscript } from '@/lib/transcript-cache';
+import { readDraft, writeDraft } from '@/lib/composer-draft';
 import type {
   AgentModelOption,
   AgentMode,
@@ -596,7 +597,10 @@ export default function AgentPane({
   const [questions, setQuestions] = useState<AskUserPrompt[]>([]);
   const [models, setModels] = useState<AgentModelOption[]>([{ id: 'auto', name: 'Auto' }]);
   const [connError, setConnError] = useState<string | null>(null);
-  const [input, setInput] = useState('');
+  // Restore any persisted draft so a refresh/reload doesn't lose a typed-but-
+  // unsent message. Seeded from storage on mount (mirrors the transcript cache
+  // seed); a session switch re-restores below.
+  const [input, setInput] = useState(() => (sessionId ? readDraft(sessionId) ?? '' : ''));
   /**
    * Text already in the composer when dictation started. Speech is appended to
    * it so starting the mic never wipes a partially typed message.
@@ -902,6 +906,23 @@ export default function AgentPane({
     const timer = setTimeout(() => writeTranscript(id, events), 500);
     return () => clearTimeout(timer);
   }, [events]);
+
+  // Mirror the composer's unsent contents into per-session storage so a refresh
+  // restores the draft. Writing an empty string clears it, so the persisted
+  // draft vanishes the moment the message is sent (or the composer is emptied).
+  useEffect(() => {
+    if (!sessionId) return;
+    writeDraft(sessionId, input);
+  }, [input, sessionId]);
+
+  // Re-restore the draft when the active session changes without a remount.
+  // Never clobber text the user is actively typing — only fill an empty composer.
+  const draftSessionRef = useRef(sessionId);
+  useEffect(() => {
+    if (draftSessionRef.current === sessionId) return;
+    draftSessionRef.current = sessionId;
+    setInput((cur) => (cur ? cur : sessionId ? readDraft(sessionId) ?? '' : ''));
+  }, [sessionId]);
 
   useEffect(() => {
     // Report a connection-oriented status for the tab indicator dot.
