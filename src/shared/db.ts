@@ -172,6 +172,7 @@ function initSchema(db: Database.Database) {
       intervention_mode TEXT NOT NULL DEFAULT 'flag_only',
       skill_install_mode TEXT NOT NULL DEFAULT 'suggest_only',
       github_task_mode  TEXT NOT NULL DEFAULT 'off',
+      lead_model        TEXT,
       dnd               INTEGER NOT NULL DEFAULT 0
     );
 
@@ -386,6 +387,13 @@ function initSchema(db: Database.Database) {
   // Lead's GitHub task tools can be gated between off, read_only, and manage.
   if (!autonomyColNames.has('github_task_mode')) {
     db.exec("ALTER TABLE project_autonomy_settings ADD COLUMN github_task_mode TEXT NOT NULL DEFAULT 'off'");
+  }
+
+  // Migration: add lead_model to project_autonomy_settings so a genuinely new
+  // Lead conversation can default to the project's last-used model. Nullable;
+  // NULL means "no project default yet".
+  if (!autonomyColNames.has('lead_model')) {
+    db.exec('ALTER TABLE project_autonomy_settings ADD COLUMN lead_model TEXT');
   }
 
   // Migration: link an audit entry to the record it acted on (currently the

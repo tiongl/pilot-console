@@ -436,8 +436,8 @@ app.get('/api/projects/:id/autonomy', (req, res) => {
   const project = getProjectById(req.params.id);
   if (!project) { res.status(404).json({ error: 'Project not found' }); return; }
   const settings = getDb().prepare(
-    'SELECT project_id as projectId, merge_mode as mergeMode, intervention_mode as interventionMode, skill_install_mode as skillInstallMode, github_task_mode as githubTaskMode, dnd FROM project_autonomy_settings WHERE project_id = ?',
-  ).get(req.params.id) ?? { projectId: req.params.id, mergeMode: 'advisory', interventionMode: 'flag_only', skillInstallMode: 'suggest_only', githubTaskMode: 'off', dnd: 0 };
+    'SELECT project_id as projectId, merge_mode as mergeMode, intervention_mode as interventionMode, skill_install_mode as skillInstallMode, github_task_mode as githubTaskMode, lead_model as leadModel, dnd FROM project_autonomy_settings WHERE project_id = ?',
+  ).get(req.params.id) ?? { projectId: req.params.id, mergeMode: 'advisory', interventionMode: 'flag_only', skillInstallMode: 'suggest_only', githubTaskMode: 'off', leadModel: null, dnd: 0 };
   res.json({ settings });
 });
 

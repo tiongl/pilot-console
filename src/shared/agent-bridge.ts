@@ -509,6 +509,37 @@ function persistentLeadKey(
 }
 
 /**
+ * Read the project's last-used Lead model, or null when none is stored yet.
+ * Guarded so older databases/harnesses without the column fall back to null.
+ */
+export function getProjectLeadModel(projectId: string): string | null {
+  try {
+    const row = getDb().prepare(
+      'SELECT lead_model FROM project_autonomy_settings WHERE project_id = ?',
+    ).get(projectId) as { lead_model?: string | null } | undefined;
+    return row?.lead_model ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist the project's last-used Lead model. Writes only `lead_model`, so the
+ * other autonomy-mode columns are preserved on an existing row.
+ */
+export function setProjectLeadModel(projectId: string, model: string): void {
+  try {
+    getDb().prepare(`
+      INSERT INTO project_autonomy_settings (project_id, lead_model)
+      VALUES (?, ?)
+      ON CONFLICT(project_id) DO UPDATE SET lead_model = excluded.lead_model
+    `).run(projectId, model);
+  } catch (err) {
+    console.error(`[agent-bridge] Failed to persist lead model for project ${projectId}:`, err);
+  }
+}
+
+/**
  * Return the single durable lead conversation for this user and scope.
  *
  * A live session wins, except when it is still empty and a stored
@@ -573,7 +604,15 @@ export async function getOrCreatePersistentLeadSession(
     // than stacking up another one.
     if (blankLive) return blankLive;
 
-    const created = await createAgentSession(userId, projectId, null, model, kind);
+    // Resolve the model for a brand-new Lead conversation. The client always
+    // sends `auto` (= DEFAULT_MODEL) on a fresh connect, which is
+    // indistinguishable from "no real choice", so a genuine selection is only a
+    // defined, non-default value. Precedence: genuine param > project default >
+    // DEFAULT_MODEL. The resume branch above is untouched.
+    const genuine = model && model !== DEFAULT_MODEL ? model : undefined;
+    const resolvedModel =
+      genuine ?? (projectId ? getProjectLeadModel(projectId) ?? undefined : undefined) ?? DEFAULT_MODEL;
+    const created = await createAgentSession(userId, projectId, null, resolvedModel, kind);
     retireEmptyLeadSessions(userId, kind, projectId, created.sessionId);
     return created;
   })().finally(() => {
@@ -2211,6 +2250,12 @@ export async function setAgentModel(sessionId: string, model: string): Promise<v
     session.model = model;
     emit(session, { type: 'model', model });
     persistAgentState(session);
+    // Make a persistent-lead model choice sticky at the project level so a
+    // genuinely new Lead conversation defaults to it. Guarded on a real
+    // projectId (global/no-project leads such as chief_of_staff don't write).
+    if ((session.kind === 'project_lead' || session.kind === 'chief_of_staff') && session.projectId) {
+      setProjectLeadModel(session.projectId, model);
+    }
   } catch (err) {
     console.error(`[agent-bridge] setModel failed for ${sessionId}:`, err);
   }
